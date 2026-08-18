@@ -27,12 +27,29 @@ trap 'rm -rf "$WORK"' EXIT
 
 # --- fragmented fixture values ---------------------------------------------
 # Each is inert until concatenated. None of the fragments matches a rule alone.
+#
+# Backslashes come from octal escapes rather than literals, so this file does
+# not itself contain a UNC-shaped string. Declaration and assignment are kept
+# separate because a command substitution in a 'readonly' assignment masks its
+# exit status.
 
-readonly BAD_EMAIL="admin@acme-$(printf 'internal').test"
-readonly BAD_IP="10.42$(printf '.')7.19"
-readonly BAD_HOST="vc01$(printf '.')corp"
-readonly BAD_UNC="$(printf '\\\\')fileserver01$(printf '\\')images"
-readonly BAD_KEY="-----BEGIN $(printf 'RSA') PRIVATE KEY-----"
+BS="$(printf '\134')"
+readonly BS
+
+BAD_EMAIL="admin@acme-$(printf 'internal').test"
+readonly BAD_EMAIL
+
+BAD_IP="10.42$(printf '.')7.19"
+readonly BAD_IP
+
+BAD_HOST="vc01$(printf '.')corp"
+readonly BAD_HOST
+
+BAD_UNC="${BS}${BS}fileserver01${BS}images"
+readonly BAD_UNC
+
+BAD_KEY="-----BEGIN $(printf 'RSA') PRIVATE KEY-----"
+readonly BAD_KEY
 
 passed=0
 failed=0

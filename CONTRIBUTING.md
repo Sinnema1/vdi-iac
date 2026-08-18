@@ -57,6 +57,10 @@ gitleaks git -v --redact .
 tests/test-public-boundary.sh
 ```
 
+```bash
+shellcheck scripts/ci/*.sh scripts/hooks/* tests/*.sh
+```
+
 The same checks run in CI. A stage is added to CI only when the repository
 contains the responsibility it validates — do not add a Packer or Terraform job
 before there is a Packer or Terraform file to check.

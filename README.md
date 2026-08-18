@@ -96,8 +96,13 @@ gitleaks git -v --redact .
 tests/test-public-boundary.sh
 ```
 
+```bash
+shellcheck scripts/ci/*.sh scripts/hooks/* tests/*.sh
+```
+
 `gitleaks` is not required to be installed for the other checks to run. Install
-it locally with `brew install gitleaks`, or rely on the CI job. Note that
+it locally with `brew install gitleaks`, or rely on the CI job. Likewise
+`brew install shellcheck`. Note that
 `gitleaks detect` is the deprecated spelling; `gitleaks git` and `gitleaks dir`
 are current.
 

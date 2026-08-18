@@ -184,8 +184,15 @@ scan_rule "internal hostname" \
   '\b[A-Za-z0-9-]+\.(local|corp|internal|intranet|lan|ad|domain)\b'
 
 # UNC paths, which name a real file server and share.
+#
+# In ERE, two characters '\\' match one literal backslash, so a UNC prefix needs
+# four and the trailing separator needs two. They are built from octal escapes
+# rather than written literally: a literal pattern ends in backslashes directly
+# before the closing quote, which reads as an attempted quote escape.
+unc_prefix="$(printf '\134\134\134\134')"
+unc_separator="$(printf '\134\134')"
 scan_rule "UNC path" \
-  '\\\\[A-Za-z0-9._-]+\\'
+  "${unc_prefix}[A-Za-z0-9._-]+${unc_separator}"
 
 # Private key material.
 scan_rule "private key" \
@@ -208,6 +215,7 @@ if [[ -f "$DENYLIST_FILE" ]]; then
   done < "$DENYLIST_FILE"
 
   if (( term_count > 0 )); then
+    denyhits=""
     run_grep denyhits -nFIi "${term_args[@]}" -- "${scan[@]}"
     emit "local denylist term" "$denyhits"
   fi

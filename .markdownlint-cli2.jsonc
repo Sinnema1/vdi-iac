@@ -1,0 +1,21 @@
+{
+  // Markdown rules for this repository.
+  //
+  // Only MD013 is disabled. Tables carrying architectural vocabulary cannot be
+  // wrapped at 80 columns without becoming unreadable, and a line-length rule
+  // that is routinely suppressed inline is worse than no rule. Every other
+  // default rule is enforced.
+  "config": {
+    "default": true,
+    "MD013": false
+  },
+  "globs": [
+    "**/*.md"
+  ],
+  "ignores": [
+    "node_modules/**",
+    // Continue prompt files. They are machine-consumed prompt bodies with YAML
+    // frontmatter, not documents, so the first-line-heading rule does not apply.
+    ".continue/prompts/**"
+  ]
+}

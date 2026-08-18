@@ -1,0 +1,62 @@
+# Local-only files. Anything matching *.local is never committed and is the
+# intended home for values that must not reach a public repository.
+*.local
+.public-boundary-denylist
+
+# Secrets and credentials
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+.env
+.env.*
+!.env.example
+
+# Packer
+packer_cache/
+*.auto.pkrvars.hcl
+!*.auto.pkrvars.hcl.example
+crash.log
+crash.*.log
+
+# Terraform
+.terraform/
+.terraform.lock.hcl.bak
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+tfplan
+*.tfplan
+
+# Installer binaries and staged packages. Package files are never committed;
+# manifests reference them by exact version and expected SHA-256.
+*.msi
+*.exe
+*.iso
+*.vhd
+*.vhdx
+*.zip
+packages/
+
+# Build evidence and logs. Evidence is published by CI, not stored in Git.
+evidence/
+logs/
+*.log
+
+# Tooling
+node_modules/
+.venv/
+__pycache__/
+
+# OS and editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

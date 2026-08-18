@@ -1,3 +1,5 @@
+# Continue Configuration Recommendations
+
 This configuration provides a strong starting point, with three adjustments recommended before it is treated as stable.
 
 The strongest part of the proposal is the operating philosophy:
@@ -16,7 +18,7 @@ That is exactly the behavior we want for this reference repository.
 ## My assessment
 
 | Proposed direction | Verdict | Adjustment |
-|---|---|---|
+| --- | --- | --- |
 | Mistral Medium 3.5 for architecture/planning | **Keep** | Use primarily as the `chat` model and with Plan Mode |
 | Gemma 4 31B for editing/code generation | **Keep provisionally** | Assign `edit`/`apply` after a small bake-off |
 | `@Repository Map`, `@Tree`, `@Current File`, `@Git Diff` | **Keep** | These are current Continue context providers |
@@ -30,7 +32,7 @@ Continue supports assigning different models to roles such as `chat`, `edit`, `a
 
 ---
 
-# 1. Keep the model split, but treat it as an empirical starting hypothesis
+## 1. Keep the model split, but treat it as an empirical starting hypothesis
 
 I agree with:
 
@@ -107,7 +109,7 @@ That is safer than assuming model characteristics from general reputation.
 
 ---
 
-# 2. I would change the workspace-rule recommendation
+## 2. I would change the workspace-rule recommendation
 
 A common alternative layout is:
 
@@ -213,7 +215,7 @@ That would consume context continuously and make the important constraints less 
 
 ---
 
-# 3. Use Plan Mode as the default planning boundary
+## 3. Use Plan Mode as the default planning boundary
 
 This is probably the biggest improvement I would make.
 
@@ -259,7 +261,7 @@ The platform provides a read-only boundary for the planning phase.
 
 ---
 
-# 4. Recommended context strategy
+## 4. Recommended context strategy
 
 Use these context providers when applicable:
 
@@ -277,7 +279,7 @@ Continue provides each of these as built-in context providers. `@Tree` exposes w
 I would use them by purpose:
 
 | Question | Context |
-|---|---|
+| --- | --- |
 | “What exists?” | `@Tree` |
 | “How is this repo organized?” | `@Repository Map` |
 | “Work on this script” | `@Current File` |
@@ -304,7 +306,7 @@ Otherwise you're paying context-window cost and distracting the model with irrel
 
 ---
 
-# 5. Custom slash commands are a good idea
+## 5. Custom slash commands are a good idea
 
 I agree with:
 
@@ -417,7 +419,7 @@ Those should considerably reduce wandering.
 
 ---
 
-# 6. ADRs: yes, but don't turn every decision into one
+## 6. ADRs: yes, but don't turn every decision into one
 
 The recommendation to maintain:
 
@@ -455,7 +457,7 @@ If yes, ADR candidate.
 
 ---
 
-# 7. I would be even more conservative with autocomplete
+## 7. I would be even more conservative with autocomplete
 
 For autocomplete, use:
 
@@ -498,7 +500,7 @@ Those are precisely where a plausible-looking completion can silently change beh
 
 ---
 
-# 8. One thing I would add: explicit mode boundaries
+## 8. One thing I would add: explicit mode boundaries
 
 I would define your default working loop as:
 
@@ -546,7 +548,7 @@ Continue's Plan Mode is particularly well matched to the first stage because it 
 
 ---
 
-# Recommended Continue configuration philosophy
+## Recommended Continue configuration philosophy
 
 I would therefore settle on:
 

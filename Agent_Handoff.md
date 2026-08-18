@@ -105,7 +105,7 @@ The desired outcome is not maximum automation. It is a solution that is repeatab
 Use the following levels when documenting or discussing the solution:
 
 | Level | View | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | L0 | System context | Actors, external platforms, and trust boundaries |
 | L1 | End-to-end lifecycle | Major phases and promotion gates |
 | L2 | Logical domains | Ownership and responsibility boundaries |

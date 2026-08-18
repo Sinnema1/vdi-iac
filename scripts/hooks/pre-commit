@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#
+# Applies the public-boundary rules to staged file content.
+#
+# CI reports a breach only after the content has been pushed, by which point it
+# is already public and removing it requires a history rewrite and a request to
+# GitHub Support. This hook checks before the data leaves the workstation.
+#
+# It scans the staged blobs rather than the working tree, so content that is
+# staged but since edited -- or staged with 'git add -p' from a larger file --
+# is checked as it will actually be committed.
+#
+# The untracked .public-boundary-denylist is applied too, which is the point:
+# the words that must never be published are enforced locally, at the last
+# moment they can still be caught cheaply.
+#
+# Install:
+#   git config core.hooksPath scripts/hooks
+#
+# Bypass, when you are certain the finding is a false positive:
+#   git commit --no-verify
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+check="$repo_root/scripts/ci/check-public-boundary.sh"
+
+if [[ ! -x "$check" ]]; then
+  echo "pre-commit: boundary check not found or not executable at $check" >&2
+  exit 1
+fi
+
+# Added, copied, and modified paths. Deletions have no content to scan.
+declare -a staged=()
+while IFS= read -r -d '' path; do
+  staged+=("$path")
+done < <(git diff --cached --name-only --diff-filter=ACM -z)
+
+if (( ${#staged[@]} == 0 )); then
+  exit 0
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# Materialize each staged blob under its repository-relative path, so that the
+# check's exemption list -- which matches relative paths -- behaves identically
+# to a normal run.
+for path in "${staged[@]}"; do
+  mkdir -p "$work/$(dirname "$path")"
+  git show ":$path" > "$work/$path" 2>/dev/null || {
+    echo "pre-commit: could not read staged blob for '$path'" >&2
+    exit 1
+  }
+done
+
+# Carry the local denylist across, since the check resolves it from the working
+# directory.
+if [[ -f "$repo_root/.public-boundary-denylist" ]]; then
+  cp "$repo_root/.public-boundary-denylist" "$work/.public-boundary-denylist"
+fi
+
+status=0
+( cd "$work" && "$check" "${staged[@]}" ) || status=$?
+
+case "$status" in
+  0) exit 0 ;;
+  1)
+    echo >&2
+    echo "pre-commit: staged content breaches the public repository boundary." >&2
+    echo "Replace the value with a fictional placeholder, or use" >&2
+    echo "'git commit --no-verify' if this is a false positive." >&2
+    exit 1
+    ;;
+  *)
+    echo "pre-commit: boundary check could not complete (exit $status). Refusing the commit." >&2
+    exit 1
+    ;;
+esac

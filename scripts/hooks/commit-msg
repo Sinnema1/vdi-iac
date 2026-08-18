@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#
+# Applies the public-boundary rules to the commit message.
+#
+# Commit messages are published content. The original exposure in this
+# repository's history was in a commit message, not in file content, and neither
+# CI job covers messages -- gitleaks scans blobs and the boundary check scans
+# tracked files. This hook closes that path.
+#
+# It also picks up the untracked .public-boundary-denylist, so the words that
+# must never appear are enforced locally at the moment they would be written.
+#
+# Install:
+#   git config core.hooksPath scripts/hooks
+#
+# Bypass, when you are certain the finding is a false positive:
+#   git commit --no-verify
+
+set -euo pipefail
+
+message_file="${1:?commit-msg hook requires the message file path}"
+repo_root="$(git rev-parse --show-toplevel)"
+check="$repo_root/scripts/ci/check-public-boundary.sh"
+
+if [[ ! -x "$check" ]]; then
+  echo "commit-msg: boundary check not found or not executable at $check" >&2
+  exit 1
+fi
+
+status=0
+"$check" "$message_file" || status=$?
+
+case "$status" in
+  0) exit 0 ;;
+  1)
+    echo >&2
+    echo "commit-msg: the commit message breaches the public repository boundary." >&2
+    echo "Rewrite the message, or use 'git commit --no-verify' if this is a false positive." >&2
+    exit 1
+    ;;
+  *)
+    echo "commit-msg: boundary check could not complete (exit $status). Refusing the commit." >&2
+    exit 1
+    ;;
+esac

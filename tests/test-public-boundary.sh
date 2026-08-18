@@ -193,6 +193,36 @@ assert_exit 2 "explicitly named missing target fails closed" \
 mkdir -p "$WORK/adir"
 assert_exit 2 "explicitly named directory fails closed" "$WORK/adir"
 
+# --- paths are content too --------------------------------------------------
+#
+# A file whose bytes are entirely clean must still be reported when the path
+# itself carries a prohibited value.
+
+mkdir -p "$WORK/paths/$BAD_HOST"
+printf 'Entirely innocuous content.\n' > "$WORK/paths/$BAD_HOST/notes.md"
+assert_reports "prohibited value in path" \
+  "prohibited value in a directory name is reported" \
+  "$WORK/paths/$BAD_HOST/notes.md"
+
+mkdir -p "$WORK/paths/clean"
+printf 'Entirely innocuous content.\n' > "$WORK/paths/clean/$BAD_IP.md"
+assert_reports "prohibited value in path" \
+  "prohibited value in a file name is reported" \
+  "$WORK/paths/clean/$BAD_IP.md"
+
+mkdir -p "$WORK/paths/Northwind Trading"
+printf 'Entirely innocuous content.\n' > "$WORK/paths/Northwind Trading/notes.md"
+status=0
+run_with_denylist $'Northwind Trading\n' "$WORK/paths/Northwind Trading/notes.md" || status=$?
+if (( status == 1 )) && grep -q -- "--- local denylist term in path ---" "$WORK/.out"; then
+  echo "  ok    denylist term in a path is reported"
+  passed=$(( passed + 1 ))
+else
+  echo "  FAIL  denylist term in a path is reported (exit $status)"
+  sed 's/^/          /' "$WORK/.out"
+  failed=$(( failed + 1 ))
+fi
+
 # --- edge cases -------------------------------------------------------------
 
 printf 'Nothing to see here.\n' > "$WORK/clean.md"

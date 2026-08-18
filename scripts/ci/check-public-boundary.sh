@@ -168,19 +168,33 @@ scan_rule() {
   emit "$rule" "${kept%$'\n'}"
 }
 
+# --- rule table -------------------------------------------------------------
+#
+# Defined once and applied twice: to file contents, and to the path strings
+# themselves. A directory or file name is published content too, and can carry a
+# prohibited identifier even when every byte inside the file is clean.
+
+declare -a RULE_NAME=() RULE_PATTERN=() RULE_ALLOW=()
+
+add_rule() {
+  RULE_NAME+=("$1")
+  RULE_PATTERN+=("$2")
+  RULE_ALLOW+=("${3:-}")
+}
+
 # Email addresses. Reserved example domains and GitHub noreply are permitted.
-scan_rule "email address" \
+add_rule "email address" \
   '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
   '@example\.(com|org|net)$|@[A-Za-z0-9.-]*\.example$|@users\.noreply\.github\.com$'
 
 # IPv4 literals. Unspecified, loopback, broadcast and the RFC 5737
 # documentation ranges are permitted.
-scan_rule "address literal" \
+add_rule "address literal" \
   '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' \
   '^(0\.0\.0\.0|127\.0\.0\.1|255\.255\.255\.255|192\.0\.2\.[0-9]{1,3}|198\.51\.100\.[0-9]{1,3}|203\.0\.113\.[0-9]{1,3})$'
 
 # Hostnames in internal-only namespaces.
-scan_rule "internal hostname" \
+add_rule "internal hostname" \
   '\b[A-Za-z0-9-]+\.(local|corp|internal|intranet|lan|ad|domain)\b'
 
 # UNC paths, which name a real file server and share.
@@ -191,12 +205,52 @@ scan_rule "internal hostname" \
 # before the closing quote, which reads as an attempted quote escape.
 unc_prefix="$(printf '\134\134\134\134')"
 unc_separator="$(printf '\134\134')"
-scan_rule "UNC path" \
+add_rule "UNC path" \
   "${unc_prefix}[A-Za-z0-9._-]+${unc_separator}"
 
 # Private key material.
-scan_rule "private key" \
+add_rule "private key" \
   '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+
+# --- content scan -----------------------------------------------------------
+
+rule_index=0
+while (( rule_index < ${#RULE_NAME[@]} )); do
+  scan_rule "${RULE_NAME[$rule_index]}" \
+            "${RULE_PATTERN[$rule_index]}" \
+            "${RULE_ALLOW[$rule_index]}"
+  rule_index=$(( rule_index + 1 ))
+done
+
+# --- path scan --------------------------------------------------------------
+#
+# Each path is tested as a string. Paths are few relative to file contents, so
+# the per-path loop is cheap; if this repository ever grows to the point where
+# it is not, batch it rather than dropping it.
+scan_path_rules() {
+  local path value allow pattern rule i kept=""
+
+  for path in "${scan[@]}"; do
+    i=0
+    while (( i < ${#RULE_NAME[@]} )); do
+      rule="${RULE_NAME[$i]}"
+      pattern="${RULE_PATTERN[$i]}"
+      allow="${RULE_ALLOW[$i]}"
+      i=$(( i + 1 ))
+
+      value="$(printf '%s' "$path" | grep -oEi -e "$pattern" || true)"
+      [[ -z "$value" ]] && continue
+      if [[ -n "$allow" ]] && printf '%s' "$value" | grep -qEi -e "$allow"; then
+        continue
+      fi
+      kept+="${path}  (${rule})"$'\n'
+    done
+  done
+
+  emit "prohibited value in path" "${kept%$'\n'}"
+}
+
+scan_path_rules
 
 # Optional local denylist. Entries are literal strings, so punctuation and
 # spaces are matched as written rather than interpreted as regex.
@@ -218,6 +272,19 @@ if [[ -f "$DENYLIST_FILE" ]]; then
     denyhits=""
     run_grep denyhits -nFIi "${term_args[@]}" -- "${scan[@]}"
     emit "local denylist term" "$denyhits"
+
+    # Paths are checked against the denylist too, for the same reason the
+    # structural rules are: a prohibited word can live in a directory name.
+    pathhits=""
+    set +e
+    pathhits="$(printf '%s\n' "${scan[@]}" | grep -Fi "${term_args[@]}")"
+    path_status=$?
+    set -e
+    if (( path_status > 1 )); then
+      echo "public-boundary: path scan failed (grep exit $path_status)" >&2
+      exit 2
+    fi
+    emit "local denylist term in path" "$pathhits"
   fi
 
   echo "public-boundary: local denylist applied ($term_count entries)"

@@ -30,11 +30,16 @@ if [[ ! -x "$check" ]]; then
   exit 1
 fi
 
-# Added, copied, and modified paths. Deletions have no content to scan.
+# Everything except deletions, which have no content to scan.
+#
+# The exclusion is expressed as 'd' (lowercase excludes) rather than an
+# allowlist of A, C and M. An allowlist silently skips whatever it forgets: a
+# rename with edits is reported as R, and a file becoming a symlink is T, so
+# both would have bypassed this check.
 declare -a staged=()
 while IFS= read -r -d '' path; do
   staged+=("$path")
-done < <(git diff --cached --name-only --diff-filter=ACM -z)
+done < <(git diff --cached --name-only --diff-filter=d -z)
 
 if (( ${#staged[@]} == 0 )); then
   exit 0

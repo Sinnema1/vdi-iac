@@ -23,7 +23,7 @@ What exists today:
 | --- | --- |
 | Solution charter and architecture direction | documented |
 | Agent operating rules and glossary | documented |
-| Public-boundary, secret, Markdown, and shell checks | configured; pending first successful CI run |
+| Public-boundary, secret, Markdown, and shell checks | enforced in CI |
 | Package manifest contract | not started |
 | Source qualification and integrity verification | not started |
 | Packer image construction and sealing | not started |
@@ -129,9 +129,11 @@ repository, so every clone must set it.
 ### Local denylist
 
 The boundary check enforces structural rules — email addresses, address
-literals, internal hostnames, UNC paths, private keys. It intentionally
-contains no organization-specific words, because committing that list to a
-public repository would republish the strings it is meant to exclude.
+literals, internal hostnames, UNC paths, private keys — against both file
+contents and the paths themselves, since a directory name is published content
+too. It intentionally contains no organization-specific words, because
+committing that list to a public repository would republish the strings it is
+meant to exclude.
 
 To additionally block specific words in your working copy, create an untracked
 denylist:

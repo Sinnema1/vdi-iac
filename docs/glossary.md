@@ -52,6 +52,10 @@ built -> validated -> canary -> approved -> promoted -> superseded -> retired
 | **Fail-closed** | A missing, unreadable, malformed, or mismatched input stops the build rather than continuing |
 | **Pinning** | Exact versions and source references, replacing `latest`, wildcards, and discovery |
 | **Staging** | Temporary storage of package content, removed after results are preserved |
+| **Artifact class** | A category of build input with its own qualification path; software packages and installation media are distinct classes |
+| **Installation media** | Operating-system media a build may construct an image from, qualified against a separately published checksum and never transferred to the guest |
+| **Media qualification** | Resolving an exact media reference and verifying it before the build consumes it, distinct from package source qualification |
+| **Content Library** | The vSphere construct through which sealed artifacts and any installation media are published and referenced |
 
 Never calculate a hash at runtime and then treat that value as the expected
 hash. That verifies only that a file equals itself.

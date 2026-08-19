@@ -28,6 +28,28 @@ If potentially non-public information reaches you during a task, do not
 reproduce it here. Replace it with an obviously fictional placeholder and say
 plainly that you substituted it.
 
+### Before you commit
+
+The automated checks find structural values -- addresses, hostnames, key
+material. The categories that matter most here are semantic, and no scanner will
+find them. Read the complete diff and ask:
+
+1. Could this be derived independently from public vendor documentation and
+   general engineering knowledge?
+2. Does it make complete sense to a reader with no context beyond this
+   repository?
+3. Are all identifiers, example values, topologies, and workflows generic?
+4. Would it still be appropriate if quoted without surrounding context?
+
+If any answer is uncertain, generalize the material further before committing.
+
+Naming conventions, exact scale, deployment structure, and approval processes
+are as revealing as a hostname, and survive the removal of every name around
+them. Section 2.1 of [Agent_Handoff.md](Agent_Handoff.md) classifies what is
+publishable.
+
+The automated checks are a floor beneath this review, not a substitute for it.
+
 Two habits make this durable:
 
 - Keep organization-specific words in an untracked

@@ -950,7 +950,9 @@ A meaningful change is complete when:
 - failure and cleanup behavior are explicit;
 - relevant tests pass;
 - formatting, validation, and static checks pass;
-- secrets and private identifiers are absent;
+- secrets and non-public identifiers are absent;
+- the complete diff has been read for non-public content, with the automated
+  checks treated as a floor rather than a substitute;
 - evidence needed to explain the result is produced;
 - documentation and decision records are updated when warranted;
 - unrelated files and future-phase scaffolding are not included;

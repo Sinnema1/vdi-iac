@@ -1,10 +1,11 @@
 ---
-# Baseline validation for the repository foundation.
+# Repository validation.
 #
 # Stages are added only when the repository contains the responsibility they
-# validate. There is no Packer, Terraform, PowerShell, or manifest job here
-# because there are no such files yet. Add each stage with the increment that
-# introduces it.
+# validate. PowerShell and manifest jobs exist because Increment 1 added source
+# qualification and a manifest contract. There is still no Packer or Terraform
+# job, because there are no such files yet. Add each stage with the increment
+# that introduces it.
 #
 # Actions are pinned to full commit SHAs rather than tags, because a tag can be
 # moved to point at different code after review. The trailing comment records

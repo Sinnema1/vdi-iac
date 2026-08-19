@@ -78,10 +78,34 @@ for another implementation to validate against.
   PowerShell code.
 - Manifests cannot carry comments. Anything explanatory belongs in the document
   that describes the baseline, not in the manifest.
-- Adding a field is a schema change. Backward-compatible additions keep
-  `schemaVersion` at 1; anything else increments it.
 - `additionalProperties: false` means Increment 2 must extend the schema in the
   same change that consumes the new fields, which is the intended coupling.
+
+### Compatibility, defined from the consumer's side
+
+Compatibility is a property of a *validator*, not of a document. Because
+`additionalProperties: false` applies at both levels, a validator holding schema
+version 1 rejects any manifest carrying a field version 1 does not name --
+including a field that is optional to the producer. There is therefore no such
+thing as a backward-compatible field addition here.
+
+The rule that follows:
+
+| Change | Effect on a v1 validator | Version |
+| --- | --- | --- |
+| Adding any field, optional or not | Rejects the document | Increment |
+| Removing a field, or narrowing a value pattern | Accepts documents it should now refuse | Increment |
+| Widening a value pattern within an existing field | Accepts everything v1 accepted | May stay 1 |
+| Editing a description | No effect on validation | Stays 1 |
+
+Increment 2 introduces installer type, install arguments, and the bounded
+validation definition. Every one of those is a field addition, so **Increment 2
+publishes schema version 2**. A version 1 manifest remains valid against the
+version 1 schema; a producer that emits the new fields must declare version 2.
+
+This is the cost of `additionalProperties: false`, and it is the intended
+trade: an unrecognized field is a mistake worth failing on, and paying for that
+with an explicit version bump is preferable to accepting fields nothing reads.
 
 ## Validation implications
 

@@ -9,8 +9,10 @@ deterministic, testable, auditable, maintainable, secure, and understandable.
 
 ## Status
 
-**Increment 0 — repository foundation.** No image-build, provisioning, or
-lifecycle capability is implemented yet.
+**Increment 1 — manifest contract and source integrity.** The host-side path is
+implemented: manifests are validated against a committed schema, sources are
+resolved under a confined root, staged, and verified against their expected
+SHA-256. No image is built and nothing is provisioned yet.
 
 This repository documents a target architecture and is being built toward it in
 small increments. Read [Agent_Handoff.md](Agent_Handoff.md) as the statement of
@@ -31,8 +33,9 @@ What exists today:
 | Promotion, reconciliation, and retirement | not started |
 
 The delivery sequence is defined in
-[Agent_Handoff.md](Agent_Handoff.md) section 32. The next increment is the
-package manifest contract and source integrity path.
+[Agent_Handoff.md](Agent_Handoff.md) section 32. The next increment is guest
+package provisioning: transfer, guest-side re-verification against the same
+expected hash, bounded installer execution, and post-install validation.
 
 ## Intended architecture
 

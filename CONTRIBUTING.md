@@ -92,8 +92,21 @@ pwsh -NoProfile -Command "Invoke-Pester -Path source-qualification/tests -Output
 pwsh -NoProfile -Command "Invoke-ScriptAnalyzer -Path ./source-qualification -Recurse -Severity Error,Warning"
 ```
 
-`shellcheck` and `pwsh` need a local install (`brew install shellcheck`). The others need
-only `git` and `npx`.
+`shellcheck` and `pwsh` each need a local install:
+
+```bash
+brew install shellcheck powershell
+```
+
+The PowerShell checks additionally need two modules from the gallery:
+
+```bash
+pwsh -NoProfile -Command "Install-Module Pester,PSScriptAnalyzer -Scope CurrentUser -Force"
+```
+
+CI pins those modules to exact versions; a local install takes the current
+release, so a finding may appear in CI that did not appear locally. The
+remaining checks need only `git` and `npx`.
 
 Secret scanning is gated by the CI **Secret scan** job, not by a local run. If
 you have `gitleaks` installed, running it first is faster feedback:

@@ -66,8 +66,14 @@ function Resolve-PackageSource {
         It does not resolve symbolic links, junctions, or other reparse points,
         so a link placed beneath the root and pointing outside it would satisfy a
         prefix comparison while reading an arbitrary file. Every existing
-        component beneath the root is therefore checked, and any link is
+        component beneath the root is therefore checked, and any redirection is
         rejected rather than followed.
+
+        Detection uses two independent signals. LinkTarget is populated for
+        symbolic links and NTFS junctions. The ReparsePoint file attribute
+        covers the wider family -- mount points, and Windows reparse types for
+        which LinkTarget is empty -- so a redirection is refused even when the
+        runtime cannot name its target.
 
         Links are refused rather than resolved-and-rechecked. A resolved target
         can be replaced between the check and the copy, and refusing is the
@@ -104,8 +110,9 @@ function Resolve-PackageSource {
     # Canonicalize the root itself. The root may legitimately be reached through
     # a link; what must not happen is a link *beneath* it escaping containment.
     $rootItem = Get-Item -LiteralPath $SourceRoot -Force
-    $rootFull = if ($rootItem.LinkTarget) {
-        [System.IO.Path]::GetFullPath($rootItem.ResolveLinkTarget($true).FullName)
+    $rootTarget = if ($rootItem.LinkTarget) { $rootItem.ResolveLinkTarget($true) } else { $null }
+    $rootFull = if ($rootTarget) {
+        [System.IO.Path]::GetFullPath($rootTarget.FullName)
     }
     else {
         [System.IO.Path]::GetFullPath($rootItem.FullName)
@@ -130,8 +137,9 @@ function Resolve-PackageSource {
         $walked = Join-Path $walked $segment
         if (-not (Test-Path -LiteralPath $walked)) { continue }
         $item = Get-Item -LiteralPath $walked -Force
-        if ($item.LinkTarget) {
-            throw (NewQualificationError -Code 'source_link_rejected' -Message "Source reference '$Reference' traverses a link at '$segment'. Links beneath the source root are not followed.")
+        $isReparsePoint = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint
+        if ($item.LinkTarget -or $isReparsePoint) {
+            throw (NewQualificationError -Code 'source_link_rejected' -Message "Source reference '$Reference' is redirected at '$segment'. Links, junctions, and other reparse points beneath the source root are not followed.")
         }
     }
 

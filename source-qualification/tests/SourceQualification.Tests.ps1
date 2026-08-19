@@ -89,7 +89,7 @@ Describe 'Resolve-PackageSource' {
         $null = New-Item -ItemType SymbolicLink -Path (Join-Path $root 'link') -Target $outside
 
         { Resolve-PackageSource -Reference 'file://link/secret.bin' -SourceRoot $root } |
-            Should -Throw '*traverses a link*'
+            Should -Throw '*is redirected*'
     }
 
     It 'rejects a file link that points outside the source root' -Skip:(-not $script:LinksSupported) {
@@ -102,7 +102,7 @@ Describe 'Resolve-PackageSource' {
         $null = New-Item -ItemType SymbolicLink -Path (Join-Path $root 'agent.msi') -Target $target
 
         { Resolve-PackageSource -Reference 'file://agent.msi' -SourceRoot $root } |
-            Should -Throw '*traverses a link*'
+            Should -Throw '*is redirected*'
     }
 
     It 'rejects a link nested deeper in the chain' -Skip:(-not $script:LinksSupported) {
@@ -114,7 +114,7 @@ Describe 'Resolve-PackageSource' {
         $null = New-Item -ItemType SymbolicLink -Path (Join-Path $root 'vendor' 'link') -Target $outside
 
         { Resolve-PackageSource -Reference 'file://vendor/link/secret.bin' -SourceRoot $root } |
-            Should -Throw '*traverses a link*'
+            Should -Throw '*is redirected*'
     }
 
     It 'still resolves a real file when the source root itself is reached through a link' -Skip:(-not $script:LinksSupported) {
@@ -127,6 +127,35 @@ Describe 'Resolve-PackageSource' {
 
         $resolved = Resolve-PackageSource -Reference 'file://agent/1.0/agent.msi' -SourceRoot $linkedRoot
         Test-Path -LiteralPath $resolved | Should -BeTrue
+    }
+
+    It 'rejects an NTFS junction that points outside the source root' -Skip:(-not $IsWindows) {
+        # A junction is a distinct reparse type from a symbolic link and needs no
+        # elevation to create, so it is the form most likely to appear in a real
+        # source tree on Windows.
+        $base = NewTempDir
+        $root = Join-Path $base 'src'
+        $outside = Join-Path $base 'outside'
+        $null = New-Item -ItemType Directory -Path $root, $outside -Force
+        Set-Content -LiteralPath (Join-Path $outside 'secret.bin') -Value 'outside content' -NoNewline
+        $null = New-Item -ItemType Junction -Path (Join-Path $root 'junction') -Target $outside
+
+        { Resolve-PackageSource -Reference 'file://junction/secret.bin' -SourceRoot $root } |
+            Should -Throw '*is redirected*'
+    }
+
+    It 'reports source_link_rejected for a redirected path' -Skip:(-not $script:LinksSupported) {
+        $base = NewTempDir
+        $root = Join-Path $base 'src'
+        $outside = Join-Path $base 'outside'
+        $null = New-Item -ItemType Directory -Path $root, $outside -Force
+        Set-Content -LiteralPath (Join-Path $outside 'secret.bin') -Value 'outside' -NoNewline
+        $null = New-Item -ItemType SymbolicLink -Path (Join-Path $root 'link') -Target $outside
+
+        $code = $null
+        try { $null = Resolve-PackageSource -Reference 'file://link/secret.bin' -SourceRoot $root }
+        catch { $code = $_.Exception.Data['ReasonCode'] }
+        $code | Should -Be 'source_link_rejected'
     }
 
     It 'carries a bounded reason code on every rejection' {

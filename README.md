@@ -24,7 +24,7 @@ What exists today:
 | Solution charter and architecture direction | documented |
 | Agent operating rules and glossary | documented |
 | Public-boundary, secret, Markdown, and shell checks | enforced in CI |
-| Package manifest contract | not started |
+| Package manifest contract | schema defined, validated in CI |
 | Source qualification and integrity verification | not started |
 | Packer image construction and sealing | not started |
 | Terraform and Citrix MCS provisioning | not started |
@@ -61,6 +61,8 @@ post-provision validation.
 | [Agent_Handoff.md](Agent_Handoff.md) | Solution charter, architectural principles, lifecycle phases, ownership boundaries, delivery sequence |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to propose and validate a change |
 | [docs/glossary.md](docs/glossary.md) | Architectural vocabulary used throughout |
+| [docs/decisions/](docs/decisions/) | Architecture decision records |
+| [contracts/](contracts/) | Machine-consumed schemas defining cross-domain boundaries |
 | [continue-config.md](continue-config.md) | Continue model routing, plan-mode workflow, context and slash-command guidance |
 
 ## Public repository boundary

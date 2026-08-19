@@ -362,38 +362,47 @@ Nothing here should be read as committing to a media-based path.
 
 One manifest normally describes the ordered software recipe for one image baseline.
 
-Illustrative YAML:
+Manifests are JSON. The serialization and validation approach is recorded in
+[ADR 1](docs/decisions/0001-package-manifest-serialization.md).
 
-```yaml
-schemaVersion: 1
-packages:
-  - id: example-agent
-    version: "1.2.3"
-    source: "file://packages/example-agent/1.2.3/installer.msi"
-    sha256: "<64-character-lowercase-hex-value>"
-    installerType: msi
-    installArgs:
-      - "/qn"
-      - "/norestart"
-    order: 20
-    required: true
-    validation:
-      type: fileVersion
-      path: "C:\\Program Files\\Example Agent\\agent.exe"
-      expectedVersion: "1.2.3"
+Schema version 1, as implemented:
+
+```json
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "id": "example-agent",
+      "version": "1.2.3",
+      "source": "file://example-agent/1.2.3/agent.msi",
+      "sha256": "<64-character-lowercase-hex-value>",
+      "order": 20,
+      "required": true
+    }
+  ]
+}
 ```
 
-Start with only fields required by implemented behavior. Likely core fields are:
+The contract is `contracts/package-manifest.schema.json`. It sets
+`additionalProperties: false` at both levels, so a manifest carrying a field
+this version does not consume is rejected rather than silently accepted.
+
+Fields arrive with the increment that consumes them. Schema version 1 carries
+only what source qualification uses:
 
 - schema version;
 - package ID;
 - package version;
 - exact source reference;
 - expected SHA-256;
+- install order;
+- required/optional status.
+
+Deferred to the increment that implements installation and post-install
+validation:
+
 - installer type;
 - install arguments represented safely as an array;
-- install order;
-- required/optional status;
 - a bounded validation definition.
 
 The manifest is an image recipe. It must not acquire endpoint-deployment concepts such as assignments, schedules, audience targeting, package search, update channels, or general dependency resolution.
@@ -1009,7 +1018,7 @@ Keep these as explicit decisions until implementation evidence or requirements r
 - artifact publication and reference-resolution mechanism, including whether
   Content Library is used;
 - package-source adapter and retention expectations;
-- canonical package-manifest serialization and minimum fields;
+- ~~canonical package-manifest serialization and minimum fields~~ resolved by [ADR 1](docs/decisions/0001-package-manifest-serialization.md);
 - image identity and versioning convention;
 - evidence schema and durable evidence store;
 - CI implementation and approval mechanism;

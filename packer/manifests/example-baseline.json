@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "id": "example-runtime",
+      "version": "4.2.1",
+      "source": "file://example-runtime/4.2.1/runtime.msi",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "order": 10,
+      "required": true
+    },
+    {
+      "id": "example-agent",
+      "version": "1.2.3",
+      "source": "file://example-agent/1.2.3/agent.msi",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "order": 20,
+      "required": true
+    },
+    {
+      "id": "example-diagnostics",
+      "version": "0.9.0",
+      "source": "file://example-diagnostics/0.9.0/diagnostics.exe",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "order": 30,
+      "required": false
+    }
+  ]
+}

@@ -65,10 +65,15 @@ post-provision validation.
 
 ## Public repository boundary
 
-This is a public repository. It must not contain names of individuals or
-organizations; internal hostnames, addresses, account or tenant identifiers, or
+This is a public repository. It must not contain names identifying individuals,
+affiliations, or organization-specific identifiers belonging to a non-public
+context; internal hostnames, addresses, account or tenant identifiers, or
 network topology; credentials or private keys; proprietary code or documents; or
 values copied from any non-public source, even when they appear harmless.
+
+Naming a technology vendor or product is expected; the stack cannot be described
+otherwise. What must not appear is any identity, affiliation, or
+organization-specific identifier belonging to a non-public context.
 
 Beyond specific values, some categories reveal origin through their shape alone
 — naming conventions, exact scale, deployment structure, and approval processes

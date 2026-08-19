@@ -39,13 +39,15 @@ This is a generic, public reference implementation.
 
 Repository content must not include:
 
-- names of individuals or organizations;
+- names identifying individuals, affiliations, or organization-specific identifiers belonging to a non-public context;
 - non-public repository names or links;
 - internal hostnames, domains, IP addresses, account identifiers, tenant identifiers, or network topology;
 - credentials, secrets, certificates, tokens, or private keys;
 - proprietary source code, scripts, installer binaries, documents, screenshots, or architecture artifacts;
 - non-public ticket numbers, change records, incident details, or operational data;
 - values copied from any non-public source, even when they appear harmless.
+
+Naming a technology vendor or product is expected; the stack cannot be described otherwise. What must not appear is any identity, affiliation, or organization-specific identifier belonging to a non-public context.
 
 Use neutral language, fictional identifiers, placeholder addresses, `.example` files, and synthetic test data. Examples should describe only the technologies and architecture patterns required to understand the solution.
 

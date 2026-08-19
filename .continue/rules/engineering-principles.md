@@ -8,10 +8,14 @@ alwaysApply: true
 
 ## Public repository boundary
 
-This repository is public. Never write names of individuals or organizations;
-internal hostnames, addresses, account or tenant identifiers, or network
-topology; credentials, tokens, or private keys; or any value copied from a
-non-public source.
+This repository is public. Never write names identifying individuals,
+affiliations, or organization-specific identifiers belonging to a non-public
+context; internal hostnames, addresses, account or tenant identifiers, or
+network topology; credentials, tokens, or private keys; or any value copied from
+a non-public source.
+
+Naming a technology vendor or product is expected. What must not appear is an
+identity or affiliation belonging to a non-public context.
 
 Naming conventions, exact scale, deployment structure, and approval processes
 reveal origin through their shape even after names are removed. Content belongs

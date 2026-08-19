@@ -17,12 +17,17 @@ can tell what it does, why it exists, and how it fails."
 
 ## Public repository boundary
 
-Nothing in this repository may contain names of individuals or organizations;
-non-public repository names or links; internal hostnames, addresses, account or
+Nothing in this repository may contain names identifying individuals,
+affiliations, or organization-specific identifiers belonging to a non-public
+context; non-public repository names or links; internal hostnames, addresses, account or
 tenant identifiers, or network topology; credentials, certificates, tokens, or
 private keys; proprietary code, scripts, installer binaries, or documents;
 non-public ticket or incident data; or any value copied from a non-public
 source.
+
+Naming a technology vendor or product is expected; the stack cannot be described
+otherwise. What must not appear is any identity, affiliation, or
+organization-specific identifier belonging to a non-public context.
 
 If potentially non-public information reaches you during a task, do not
 reproduce it here. Replace it with an obviously fictional placeholder and say

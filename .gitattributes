@@ -1,0 +1,10 @@
+# Line endings are normalized to LF in the working tree on every platform.
+# Without this, a Windows checkout rewrites text files to CRLF and the bytes on
+# disk differ from the bytes that were committed.
+* text=auto eol=lf
+
+# Frozen contracts are exempt from conversion entirely, not merely normalized.
+# A supported schema version is immutable byte-for-byte, and a digest asserted
+# against it has to hold on every platform that checks it out. Treating these as
+# non-text guarantees Git never rewrites a byte.
+contracts/** -text

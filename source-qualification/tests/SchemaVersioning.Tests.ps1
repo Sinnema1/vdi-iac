@@ -76,6 +76,12 @@ Describe 'schema version 1 is frozen' {
         # The digest recorded in ADR 1 and section 32. If this fails, either the
         # file was edited -- which the freeze forbids -- or the digest is wrong,
         # and both need a decision rather than an update to this number.
+        #
+        # This first failed on Windows and not on Linux: Git rewrote the file to
+        # CRLF at checkout, so the bytes on disk were not the bytes committed.
+        # .gitattributes marks contracts/ as non-text to stop that. A frozen
+        # artifact whose bytes depend on the platform that checked it out is not
+        # frozen, so the guard was right and the repository was wrong.
         $path = Join-Path $script:Contracts 'package-manifest.schema.json'
         (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() |
             Should -Be 'd05796232c677cb2c7b5c19e54fc02a75bf579d8dc1b33897f90e1eddfccb16d'

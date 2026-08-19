@@ -30,7 +30,7 @@ What exists today:
 | Solution charter and architecture direction | documented |
 | Agent operating rules and glossary | documented |
 | Public-boundary, secret, Markdown, and shell checks | enforced in CI |
-| Package manifest contract | schema version 1 supported and frozen |
+| Package manifest contract | version 1 supported and frozen; version 2 an implementation draft |
 | Source qualification and integrity verification | host-side path implemented |
 | Packer image construction and sealing | not started |
 | Terraform and Citrix MCS provisioning | not started |

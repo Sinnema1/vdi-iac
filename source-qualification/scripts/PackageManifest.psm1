@@ -15,7 +15,24 @@
 
 Set-StrictMode -Version 3.0
 
-$script:SchemaPath = Join-Path $PSScriptRoot '..' '..' 'contracts' 'package-manifest.schema.json'
+$script:ContractDirectory = Join-Path $PSScriptRoot '..' '..' 'contracts'
+
+# Hard-coded version map. A schema path is never built from the declared value,
+# and there is no fallback to the newest schema: an unrecognized version is
+# rejected. Version 1 keeps its original filename because it is frozen
+# byte-for-byte at that path; only later versions carry a version suffix.
+$script:SchemaFileByVersion = @{
+    1 = 'package-manifest.schema.json'
+    2 = 'package-manifest-2.schema.json'
+}
+
+# Reserved for the executor. A manifest naming one is rejected with that reason,
+# rather than as an unknown field, which would misdescribe why.
+$script:ExecutorOwnedMsiProperties = @('REBOOT', 'REBOOTPROMPT', 'TRANSFORMS', 'PATCH', 'ACTION', 'REINSTALL', 'REINSTALLMODE')
+
+# An installer that initiates its own reboot takes the restart boundary away
+# from Packer, so this code is never a success or restart-required signal.
+$script:ForbiddenExitCode = 1641
 
 function Import-PackageManifest {
     <#
@@ -25,8 +42,9 @@ function Import-PackageManifest {
     .PARAMETER Path
         Path to the manifest file.
 
-    .PARAMETER SchemaPath
-        Path to the JSON Schema. Defaults to the committed contract.
+    .PARAMETER SchemaDirectory
+        Directory holding the committed schemas. Defaults to contracts/. The
+        schema file itself is chosen by the version map, never by the caller.
 
     .OUTPUTS
         A PSCustomObject with SchemaVersion and Packages, the latter sorted by
@@ -41,19 +59,45 @@ function Import-PackageManifest {
 
         [Parameter()]
         [ValidateNotNullOrEmpty()]
-        [string] $SchemaPath = $script:SchemaPath
+        [string] $SchemaDirectory = $script:ContractDirectory
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Manifest not found: $Path"
     }
-    if (-not (Test-Path -LiteralPath $SchemaPath -PathType Leaf)) {
-        throw "Manifest schema not found: $SchemaPath"
-    }
-
     $raw = Get-Content -LiteralPath $Path -Raw -Encoding utf8
     if ([string]::IsNullOrWhiteSpace($raw)) {
         throw "Manifest is empty: $Path"
+    }
+
+    # Parse before validating, because the declared version selects the schema.
+    # Parsing is safe; the only thing done with parsed content before validation
+    # is a lookup in a fixed table.
+    try {
+        $manifest = $raw | ConvertFrom-Json
+    }
+    catch {
+        throw "Manifest is not valid JSON: $Path -- $($_.Exception.Message)"
+    }
+
+    $declared = if ($manifest.PSObject.Properties.Name -contains 'schemaVersion') { $manifest.schemaVersion } else { $null }
+
+    # ConvertFrom-Json yields [long] for JSON integers, so both integral types
+    # are accepted. A number with a fractional part parses as [double] and is
+    # refused here rather than being truncated into a version.
+    if ($declared -isnot [int] -and $declared -isnot [long]) {
+        throw "Manifest does not declare an integer schemaVersion: $Path"
+    }
+    $declared = [int] $declared
+
+    if (-not $script:SchemaFileByVersion.ContainsKey($declared)) {
+        $known = ($script:SchemaFileByVersion.Keys | Sort-Object) -join ', '
+        throw "Manifest declares unsupported schemaVersion $declared. Supported versions: $known -- $Path"
+    }
+
+    $schemaPath = Join-Path $SchemaDirectory $script:SchemaFileByVersion[$declared]
+    if (-not (Test-Path -LiteralPath $schemaPath -PathType Leaf)) {
+        throw "Manifest schema not found: $schemaPath"
     }
 
     # Stage one: structure, types, and value patterns.
@@ -61,13 +105,11 @@ function Import-PackageManifest {
     # Test-Json writes its own error record before returning false, which would
     # surface as noise ahead of the message that actually explains the failure.
     $schemaErrors = $null
-    $structurallyValid = Test-Json -Json $raw -SchemaFile $SchemaPath -ErrorAction SilentlyContinue -ErrorVariable schemaErrors
+    $structurallyValid = Test-Json -Json $raw -SchemaFile $schemaPath -ErrorAction SilentlyContinue -ErrorVariable schemaErrors
     if (-not $structurallyValid) {
         $detail = if ($schemaErrors) { ($schemaErrors | ForEach-Object { $_.ToString() }) -join '; ' } else { 'no detail reported' }
         throw "Manifest failed schema validation: $Path -- $detail"
     }
-
-    $manifest = $raw | ConvertFrom-Json
 
     # Stage two: constraints a schema cannot express.
     Assert-PackageManifestConsistency -Manifest $manifest -Path $Path
@@ -110,6 +152,78 @@ function Assert-PackageManifestConsistency {
     if ($duplicateOrders) {
         throw "Manifest has duplicate order values, so the sequence is not deterministic: $($duplicateOrders -join ', ') -- $Path"
     }
+
+    if ([int] $Manifest.schemaVersion -ge 2) {
+        Assert-PackageInstallerConsistency -Manifest $Manifest -Path $Path
+    }
 }
 
-Export-ModuleMember -Function Import-PackageManifest, Assert-PackageManifestConsistency
+function Assert-PackageInstallerConsistency {
+    <#
+    .SYNOPSIS
+        Enforces schema version 2 rules that span fields.
+
+    .DESCRIPTION
+        JSON Schema constrains each field in isolation. These rules relate two
+        fields to each other, or relate a field to the set the executor reserves,
+        and none can be written as a per-field constraint.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Manifest,
+        [Parameter(Mandatory)] [string] $Path
+    )
+
+    foreach ($package in $Manifest.packages) {
+        $installer = $package.installer
+        $label = "package '$($package.id)'"
+
+        # The source extension and the declared kind describe one file, so a
+        # disagreement means one of them is wrong.
+        $extension = [System.IO.Path]::GetExtension($package.source).TrimStart('.').ToLowerInvariant()
+        if ($extension -ne $installer.kind) {
+            throw "$label declares installer kind '$($installer.kind)' but its source ends in '.$extension' -- $Path"
+        }
+
+        if ($installer.kind -eq 'msi') {
+            $names = @()
+            if ($installer.PSObject.Properties.Name -contains 'properties' -and $installer.properties) {
+                $names = @($installer.properties.PSObject.Properties.Name)
+            }
+            # The schema already refuses unknown names. This exists so a reserved
+            # one is refused with its actual reason: the property is real, and
+            # ours, which "unknown field" would not convey.
+            $reserved = @($names | Where-Object { $script:ExecutorOwnedMsiProperties -contains $_.ToUpperInvariant() })
+            if ($reserved) {
+                throw "$label sets MSI properties the executor owns: $($reserved -join ', '). Restart and transform behavior are not manifest-controlled -- $Path"
+            }
+        }
+        else {
+            $success = @($installer.exitCodes.success)
+            $restart = @()
+            if ($installer.exitCodes.PSObject.Properties.Name -contains 'restartRequired') {
+                $restart = @($installer.exitCodes.restartRequired)
+            }
+
+            $forbidden = @(($success + $restart) | Where-Object { $_ -eq $script:ForbiddenExitCode })
+            if ($forbidden) {
+                throw "$label lists exit code $script:ForbiddenExitCode, which means the installer initiated a reboot outside Packer's control and is always a failure -- $Path"
+            }
+
+            $overlap = @($success | Where-Object { $restart -contains $_ })
+            if ($overlap) {
+                throw "$label lists exit code(s) $($overlap -join ', ') as both success and restart-required, so the outcome is ambiguous -- $Path"
+            }
+        }
+
+        $duplicateChecks = $package.validation |
+            Group-Object -Property id |
+            Where-Object Count -GT 1 |
+            ForEach-Object { $_.Name }
+        if ($duplicateChecks) {
+            throw "$label has duplicate validation check ids: $($duplicateChecks -join ', ') -- $Path"
+        }
+    }
+}
+
+Export-ModuleMember -Function Import-PackageManifest, Assert-PackageManifestConsistency, Assert-PackageInstallerConsistency

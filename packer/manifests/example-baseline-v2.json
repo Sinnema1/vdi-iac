@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 2,
+  "packages": [
+    {
+      "id": "example-runtime",
+      "version": "4.2.1",
+      "source": "file://example-runtime/4.2.1/runtime.msi",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "order": 10,
+      "required": true,
+      "installer": {
+        "kind": "msi",
+        "properties": { "ALLUSERS": "1" },
+        "timeoutSeconds": 1800,
+        "restartPolicy": "allow-deferred"
+      },
+      "validation": [
+        {
+          "id": "runtime-binary",
+          "kind": "file-version",
+          "root": "programFiles",
+          "relativePath": "Example/Runtime/runtime.exe",
+          "versionField": "file",
+          "expectedVersion": "4.2.1.4096"
+        }
+      ]
+    },
+    {
+      "id": "example-agent",
+      "version": "1.2.3",
+      "source": "file://example-agent/1.2.3/agent.exe",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "order": 20,
+      "required": true,
+      "installer": {
+        "kind": "exe",
+        "arguments": ["/quiet", "/norestart"],
+        "timeoutSeconds": 900,
+        "restartPolicy": "allow-deferred",
+        "exitCodes": { "success": [0], "restartRequired": [3010] }
+      },
+      "validation": [
+        { "id": "agent-binary", "kind": "file-exists", "root": "programFiles", "relativePath": "Example/Agent/agent.exe" },
+        { "id": "agent-service", "kind": "service-exists", "serviceName": "ExampleAgent" }
+      ]
+    }
+  ]
+}

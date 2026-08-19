@@ -1,0 +1,362 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.invalid/schemas/package-manifest-2.json",
+  "title": "Package Manifest, version 2",
+  "description": "Adds installer execution and post-install validation to version 1. An image recipe, not deployment policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "packages"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "description": "Contract version. Incremented by any change to the set of documents this schema accepts, in either direction. See ADR 1.",
+      "enum": [
+        2
+      ]
+    },
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/package"
+      }
+    }
+  },
+  "definitions": {
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "source",
+        "sha256",
+        "order",
+        "required",
+        "installer",
+        "validation"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "maxLength": 64
+        },
+        "version": {
+          "description": "Exact version. Moving references and wildcard segments are rejected.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+          "maxLength": 64,
+          "not": {
+            "pattern": "^([Ll][Aa][Tt][Ee][Ss][Tt]|[Nn][Ee][Ww][Ee][Ss][Tt]|[Cc][Uu][Rr][Rr][Ee][Nn][Tt]|[Ss][Tt][Aa][Bb][Ll][Ee]|[Hh][Ee][Aa][Dd]|[Aa][Nn][Yy])$|(^|[.+-])[xX]([.+-]|$)"
+          }
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^file://[A-Za-z0-9][A-Za-z0-9._/-]*$",
+          "maxLength": 512,
+          "not": {
+            "pattern": "(^|/)\\.{1,2}(/|$)"
+          }
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9999
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "installer": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/msiInstaller"
+            },
+            {
+              "$ref": "#/definitions/exeInstaller"
+            }
+          ]
+        },
+        "validation": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/definitions/fileExists"
+              },
+              {
+                "$ref": "#/definitions/fileVersion"
+              },
+              {
+                "$ref": "#/definitions/serviceExists"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "msiInstaller": {
+      "description": "MSI packages supply allowlisted properties only. The executor owns the command line, so a manifest cannot pass a switch.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "timeoutSeconds",
+        "restartPolicy"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "msi"
+          ]
+        },
+        "properties": {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 32,
+          "properties": {
+            "ALLUSERS": {
+              "description": "Per-machine versus per-user install. Printable ASCII only: control characters and non-ASCII are rejected.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[ -~]+$"
+            },
+            "INSTALLDIR": {
+              "description": "Install location. Printable ASCII only: control characters and non-ASCII are rejected.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[ -~]+$"
+            },
+            "INSTALLLOCATION": {
+              "description": "Install location, for packages using this spelling. Printable ASCII only: control characters and non-ASCII are rejected.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[ -~]+$"
+            },
+            "TARGETDIR": {
+              "description": "Install root. Printable ASCII only: control characters and non-ASCII are rejected.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[ -~]+$"
+            },
+            "APPDIR": {
+              "description": "Application directory. Printable ASCII only: control characters and non-ASCII are rejected.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[ -~]+$"
+            }
+          }
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 7200
+        },
+        "restartPolicy": {
+          "enum": [
+            "forbid",
+            "allow-deferred"
+          ]
+        }
+      }
+    },
+    "exeInstaller": {
+      "description": "EXE packages supply argument tokens and declare their own exit-code policy.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "timeoutSeconds",
+        "restartPolicy",
+        "exitCodes"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "exe"
+          ]
+        },
+        "arguments": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^[ -~]+$",
+            "description": "One argument token, passed individually and never joined into a command string. Printable ASCII only: control characters and non-ASCII are rejected."
+          }
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 7200
+        },
+        "restartPolicy": {
+          "enum": [
+            "forbid",
+            "allow-deferred"
+          ]
+        },
+        "exitCodes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "success"
+          ],
+          "properties": {
+            "success": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            },
+            "restartRequired": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            }
+          }
+        }
+      }
+    },
+    "checkId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "maxLength": 64
+    },
+    "root": {
+      "description": "Allowlisted base directory. A file check never names an absolute path.",
+      "enum": [
+        "programFiles",
+        "programFilesX86",
+        "programData",
+        "windows",
+        "system32"
+      ]
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 260,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+      "not": {
+        "pattern": "(^|/)\\.{1,2}(/|$)"
+      }
+    },
+    "fileExists": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "root",
+        "relativePath"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/checkId"
+        },
+        "kind": {
+          "enum": [
+            "file-exists"
+          ]
+        },
+        "root": {
+          "$ref": "#/definitions/root"
+        },
+        "relativePath": {
+          "$ref": "#/definitions/relativePath"
+        }
+      }
+    },
+    "fileVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "root",
+        "relativePath",
+        "versionField",
+        "expectedVersion"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/checkId"
+        },
+        "kind": {
+          "enum": [
+            "file-version"
+          ]
+        },
+        "root": {
+          "$ref": "#/definitions/root"
+        },
+        "relativePath": {
+          "$ref": "#/definitions/relativePath"
+        },
+        "versionField": {
+          "description": "File and product versions routinely differ, so this is required rather than defaulted.",
+          "enum": [
+            "file",
+            "product"
+          ]
+        },
+        "expectedVersion": {
+          "type": "string",
+          "pattern": "^[0-9]{1,5}(\\.[0-9]{1,5}){0,3}$"
+        }
+      }
+    },
+    "serviceExists": {
+      "description": "A service is not addressed by path, so this check has no root.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "serviceName"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/checkId"
+        },
+        "kind": {
+          "enum": [
+            "service-exists"
+          ]
+        },
+        "serviceName": {
+          "description": "The service key name, never the localized display name.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$"
+        }
+      }
+    }
+  }
+}

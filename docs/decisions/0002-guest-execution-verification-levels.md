@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted; planned for Increment 2. The levels describe how work will be proven;
+no Increment 2 capability exists yet.
 
 ## Context
 
@@ -51,6 +52,12 @@ Runs on `windows-latest` against synthetic fixtures:
 - temporary user-scoped registry fixtures, if registry validation is added
   later.
 
+Reparse-point confinement belongs here specifically. It cannot be established by
+path-string tests, because the defect it guards against is a filesystem
+behavior: a component test must create a real junction or symbolic link and
+observe the refusal. Increment 1 proved this for source resolution; the guest
+side needs its own case.
+
 The runner is not a Packer guest and must not be treated as one. These tests do
 not install real software, create persistent services, or reboot the runner.
 
@@ -89,6 +96,24 @@ Start-Process -ArgumentList
 An install argument containing a space silently becomes two arguments, and
 quoting is lost. Since manifest arguments are untrusted data, that is a
 correctness and a safety problem, not a formatting preference.
+
+### Guest runtime prerequisite
+
+`ProcessStartInfo.ArgumentList` is a .NET Core 2.1 addition. Windows PowerShell
+5.1 runs on .NET Framework, which does not have it, so the decision above is not
+merely a coding preference — it is a runtime requirement.
+
+Packer's `powershell` provisioner runs `powershell.exe` by default. The guest
+phase therefore sets `use_pwsh = true` and a preflight step asserts a supported
+PowerShell 7 major version before anything executes, failing closed if it is
+absent. Installing PowerShell is not the provisioning phase's job; confirming it
+is present is.
+
+That leaves an obligation for Increment 3: the image build must guarantee the
+runtime the guest phase depends on. Whether it arrives as a pinned package in
+the manifest or as a base-image property is unresolved, and it is tied to the
+base-image decision in section 36. Recording it here means Increment 3 inherits
+a stated dependency rather than discovering it when a preflight fails.
 
 ## Alternatives considered
 

@@ -911,13 +911,23 @@ Governed by [ADR 2](docs/decisions/0002-guest-execution-verification-levels.md),
 [ADR 4](docs/decisions/0004-package-manifest-schema-2.md), and
 [ADR 5](docs/decisions/0005-evidence-versioning-and-run-identity.md).
 
-Implementation order, each stage landing before the next begins:
+Implementation order, each stage landing before the next begins. **Every stage
+includes its own positive, negative, and regression tests**; a stage is not
+complete without them. Deferring tests to a later stage would contradict both
+the Definition of Done and ADR 2.
 
-1. the version 1 digest guard, the version 2 schema, and the version dispatcher;
-2. the verified-only bundle lifecycle;
-3. guest verification, execution, validation, cleanup, and evidence;
-4. unit tests and Windows component tests;
-5. the null-builder Packer harness and its lab tests.
+1. the version 1 digest guard, the version 2 schema, and the version dispatcher.
+   The digest guard is itself a test, and every schema rule needs a case proving
+   it rejects;
+2. the verified-only bundle lifecycle, including the descriptor and its
+   integrity binding;
+3. guest verification, execution, validation, cleanup, and evidence, with the
+   process, filesystem, and service boundaries injected so the tests are
+   non-destructive;
+4. cross-cutting regression coverage and Windows component tests -- the real
+   child process, real exit codes, and a real junction or symbolic link. This
+   stage adds what needs a Windows runner, not the tests stages 1 to 3 owed;
+5. the null-builder Packer harness, its lab-target guard, and its lab tests.
 
 Acceptance criteria:
 
@@ -935,8 +945,17 @@ Acceptance criteria:
   required and never triggers one;
 - evidence carries `ResultSchemaVersion` and `ManifestSchemaVersion`, a
   parent-supplied run identifier, and none of the excluded values in ADR 5;
-- every capability states its verification level, and the increment closes only
-  when the maturity label distinguishes CI-proven from lab-proven behavior.
+- the run identifier is a validated canonical UUID before it names any
+  directory;
+- no log holds installer arguments or property values, only bounded metadata;
+- the lab harness refuses to run without an explicit acknowledgement and a
+  matching marker on the target;
+- evidence retrieval and cleanup are attempted on both the logical-failure and
+  transport-failure paths, with cleanup recorded as attempted rather than
+  guaranteed;
+- every capability states its verification level. Without a disposable target
+  the increment closes as **implementation complete; lab validation pending**,
+  and landing lab-test definitions does not substitute for running them.
 
 Explicitly deferred to Increment 3: any vSphere builder or plugin, base-image
 selection, installation-media handling, unattended setup, VM hardware, storage

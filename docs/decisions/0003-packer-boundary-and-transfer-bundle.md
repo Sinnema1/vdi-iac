@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted; planned for Increment 2. Nothing in this record is implemented yet.
 
 ## Context
 
@@ -61,6 +61,62 @@ of provisioner ordering. Lab runs prove two things: a positive run end to end,
 and a negative run where the bundle is altered after host qualification and
 guest verification rejects it **before** execution.
 
+### Lab-target guard
+
+The null builder connects to an existing machine and mutates it. It does not
+create one and it does not dispose of one. Calling the target "disposable" is a
+description of intent, and intent is not a safeguard: the same configuration
+pointed at the wrong host installs software on that host.
+
+Before anything is uploaded, executed, or restarted:
+
+- there are no default host or credential values. An unset target is an error,
+  never a fallback;
+- the operator passes an explicit destructive-run acknowledgement. Its absence
+  stops the run;
+- the intended machine carries a generic marker placed there beforehand — a file
+  at a known path containing a nonce that the run is given independently;
+- a read-only preflight reads that marker and compares the nonce. A missing or
+  mismatched marker stops the run before any mutation.
+
+The marker is the part that actually protects a machine, because it is the only
+check that asks the target to prove it is the intended one rather than asking
+the configuration to assert it.
+
+Negative tests prove that a missing marker, a mismatched nonce, and an absent
+acknowledgement each stop the run before upload.
+
+### Failure and cleanup model
+
+Provisioner ordering does not give evidence retrieval and cleanup. A failing
+provisioner ends the build, and by default the provisioners after it never run —
+which is precisely the ones that download evidence and remove guest staging.
+
+Two distinct paths, because two distinct things are being handled:
+
+**A logical package failure** — an integrity mismatch, a non-success exit code, a
+failed validation — is an expected outcome the run is designed to report. The
+guest phase writes bounded evidence and returns a status Packer accepts, so the
+subsequent retrieval and cleanup provisioners run normally. A final evaluator
+step reads the retrieved evidence and fails the build. The build still fails; it
+fails after the evidence is safely on the host rather than instead of collecting
+it.
+
+**A genuine transport or provisioner failure** — a broken communicator, a
+timeout, an upload that could not complete — cannot be reported this way, because
+the channel needed to report it is the thing that failed. These use an
+`error-cleanup-provisioner`, which Packer runs after a provisioning failure and
+before the instance is shut down, plus host-side `finally` handling for anything
+staged on the host.
+
+Cleanup in this second path is recorded as **attempted**, never as guaranteed. If
+the communicator is gone, guest staging cannot be removed, and evidence that
+claims otherwise would be false.
+
+`continue_on_error` is used only on the guest-execution provisioner and only for
+the first path. It is not a general setting: applied broadly it would let a
+transport failure masquerade as a completed run.
+
 ### The verified-only transfer bundle
 
 A first-class artifact, distinct from host staging and from `-KeepStaging`
@@ -69,11 +125,35 @@ Unverified content never enters the transfer boundary.
 
 The bundle carries:
 
-- a unique run identity, supplied by the parent rather than invented per stage;
+- a unique run identity, supplied by the parent rather than invented per stage,
+  and validated as a canonical UUID before it names any directory (ADR 5);
 - only verified package files;
 - relative paths only, so nothing about the host layout travels with it;
-- the expected hashes the guest needs for its own verification;
+- a **descriptor** carrying everything the guest needs to act;
 - an explicit lifecycle with a recorded cleanup outcome.
+
+Files and hashes alone are not enough. The guest has to know what to run, how,
+for how long, and what to check afterwards, and it must not re-read or re-derive
+that from the manifest — the manifest does not travel, and re-parsing it in the
+guest would duplicate the validation the host already performed.
+
+The descriptor is a single JSON document holding, per package: order, identifier,
+version, relative payload path, expected SHA-256, installer kind, the MSI
+property map or EXE token array, timeout, restart policy, EXE exit-code policy,
+and the validation definitions. All of it is data the host already validated
+against schema version 2, copied rather than reinterpreted.
+
+Its own integrity is bound to the payload it describes:
+
+- the descriptor is validated against a committed schema when the guest reads it,
+  so a malformed or tampered descriptor is refused before any installer runs;
+- each entry's expected hash is the value the guest verifies its payload against;
+- the host records a hash of the descriptor itself in host-side evidence, so a
+  descriptor altered in transit is detectable rather than merely unlikely.
+
+The guest trusts the descriptor only after that validation. It is untrusted input
+that arrived over a network, and the fact that this repository produced it is not
+something the guest can confirm.
 
 Because a file can change between qualification and upload, the bundle is
 verified again at the transfer boundary. That is not the same as trusting a
@@ -101,12 +181,21 @@ early, and nothing about transfer requires it.
   its Level 3 verification is not available in CI.
 - Bundle construction is a new responsibility with its own lifecycle and tests.
 - The same content is hashed more than once across a run. That is intended.
-- Increment 3 inherits a proven transfer path and only has to add image
-  construction around it.
+- Increment 3 inherits an implemented transfer path carrying its recorded
+  verification level, which is not the same as a proven one. If Level 3 is still
+  outstanding, Increment 3 inherits that too and must not describe transfer as
+  proven.
 
 ## Validation implications
+
+Without a disposable target, the only accurate closure statement for this
+increment is **implementation complete; lab validation pending**. Landing the
+lab-test definitions is not the same as having executed them, and a test that
+has never run proves nothing.
 
 The negative lab run is the one that matters. A positive run proves the pieces
 connect; only the altered-bundle run proves the guest refuses content that
 changed after qualification, and it must show refusal **before** the installer
-executes.
+executes. It must also show that evidence was retrieved and that cleanup was
+attempted on both host and guest, since a run that refuses content correctly but
+abandons it in the guest has only half worked.

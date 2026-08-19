@@ -10,9 +10,14 @@
     manifest, resolves each source beneath the source root, stages it, and
     verifies it against the expected SHA-256 from the manifest.
 
-    Evidence is written as JSON. Nothing in the result contains a credential or
-    a path outside the run, so it is safe to retain and publish alongside a
-    build.
+    Evidence is written as JSON. Package failures carry a bounded reason code
+    rather than an exception message, because messages embed absolute paths and
+    other runtime-derived values.
+
+    Evidence is not inherently safe to publish. Package identifiers, versions,
+    and the source root are supplied by the caller and may belong to a
+    non-public context. Classify or redact evidence before releasing it
+    anywhere public.
 
 .PARAMETER ManifestPath
     Path to the package manifest.
@@ -34,9 +39,14 @@
 
 .NOTES
     Exit codes:
-      0  every required package qualified
+      0  every required package qualified and staging was cleaned up
       1  at least one required package failed
-      2  the run could not complete, for example an invalid manifest
+      2  the run could not complete: an invalid manifest, an unusable source
+         root, staging that could not be removed, or evidence that could not
+         be written
+
+    A cleanup or evidence-write failure is not a package failure, so it does not
+    return 1. Both mean the run did not finish cleanly, which is what 2 signals.
 #>
 
 [CmdletBinding()]
@@ -72,12 +82,21 @@ catch {
 }
 
 if ($EvidencePath) {
-    $evidenceDirectory = Split-Path -Parent $EvidencePath
-    if ($evidenceDirectory -and -not (Test-Path -LiteralPath $evidenceDirectory)) {
-        $null = New-Item -ItemType Directory -Path $evidenceDirectory -Force
+    # Inside its own guard: an evidence destination that cannot be written is a
+    # run-level failure, not a package failure. Left unguarded it terminates the
+    # script and surfaces as 1, which claims a required package failed.
+    try {
+        $evidenceDirectory = Split-Path -Parent $EvidencePath
+        if ($evidenceDirectory -and -not (Test-Path -LiteralPath $evidenceDirectory)) {
+            $null = New-Item -ItemType Directory -Path $evidenceDirectory -Force -ErrorAction Stop
+        }
+        $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $EvidencePath -Encoding utf8 -ErrorAction Stop
+        Write-Verbose "Evidence written to $EvidencePath"
     }
-    $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $EvidencePath -Encoding utf8
-    Write-Verbose "Evidence written to $EvidencePath"
+    catch {
+        Write-Error "source-qualification: could not write evidence to '$EvidencePath' -- $($_.Exception.Message)" -ErrorAction Continue
+        exit 2
+    }
 }
 
 foreach ($package in $result.Packages) {
@@ -86,14 +105,18 @@ foreach ($package in $result.Packages) {
         Write-Information ("  passed  {0} {1} ({2})" -f $package.Id, $package.Version, $label)
     }
     else {
-        Write-Information ("  FAILED  {0} {1} ({2}) -- {3}" -f $package.Id, $package.Version, $label, $package.Reason)
+        Write-Information ("  FAILED  {0} {1} ({2}) -- {3}" -f $package.Id, $package.Version, $label, $package.ReasonCode)
     }
 }
 
-Write-Information ("source-qualification: {0} -- {1}/{2} passed, {3} required failure(s), {4} optional failure(s)" -f
-    $result.Outcome, $result.PassedCount, $result.PackageCount, $result.FailedRequiredCount, $result.FailedOptionalCount)
+Write-Information ("source-qualification: {0} -- {1}/{2} passed, {3} required failure(s), {4} optional failure(s), cleanup {5}" -f
+    $result.Outcome, $result.PassedCount, $result.PackageCount, $result.FailedRequiredCount, $result.FailedOptionalCount, $result.CleanupOutcome)
 
 $result
 
-if ($result.Outcome -ne 'passed') { exit 1 }
-exit 0
+switch ($result.Outcome) {
+    'passed'     { exit 0 }
+    'failed'     { exit 1 }
+    'incomplete' { exit 2 }
+    default      { exit 2 }
+}

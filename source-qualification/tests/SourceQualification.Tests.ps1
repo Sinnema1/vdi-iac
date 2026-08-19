@@ -208,7 +208,7 @@ Describe 'Invoke-SourceQualification' {
 
         $result.Outcome | Should -Be 'failed'
         $result.FailedRequiredCount | Should -Be 1
-        $result.Packages[0].Reason | Should -Be 'sha256 mismatch'
+        $result.Packages[0].ReasonCode | Should -Be 'integrity_mismatch'
     }
 
     It 'records an optional failure without failing the run' {
@@ -232,7 +232,7 @@ Describe 'Invoke-SourceQualification' {
         $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
 
         $result.Outcome | Should -Be 'failed'
-        $result.Packages[0].Reason | Should -BeLike '*not found*'
+        $result.Packages[0].ReasonCode | Should -Be 'source_not_found'
     }
 
     It 'removes staging when the run completes' {
@@ -274,6 +274,44 @@ Describe 'Invoke-SourceQualification' {
         )
         { Invoke-SourceQualification -Manifest $manifest -SourceRoot (Join-Path ([System.IO.Path]::GetTempPath()) 'absent-root') -StagingRoot (NewTempDir) } |
             Should -Throw '*Source root not found*'
+    }
+
+    It 'reports cleanup outcome on a normal run' {
+        $root = NewSourceTree @{ 'a/1/a.msi' = 'alpha' }
+        $manifest = NewManifestObject @(
+            [PSCustomObject]@{ id='a'; version='1'; source='file://a/1/a.msi'; sha256=(Get-Sha (Join-Path $root 'a/1/a.msi')); order=10; required=$true }
+        )
+        $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
+        $result.CleanupOutcome | Should -Be 'removed'
+        $result.Outcome | Should -Be 'passed'
+    }
+
+    It 'reports retained cleanup when staging is kept' {
+        $root = NewSourceTree @{ 'a/1/a.msi' = 'alpha' }
+        $manifest = NewManifestObject @(
+            [PSCustomObject]@{ id='a'; version='1'; source='file://a/1/a.msi'; sha256=(Get-Sha (Join-Path $root 'a/1/a.msi')); order=10; required=$true }
+        )
+        $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir) -KeepStaging
+        $result.CleanupOutcome | Should -Be 'retained'
+    }
+
+    It 'cannot report success when cleanup fails' {
+        $root = NewSourceTree @{ 'a/1/a.msi' = 'alpha' }
+        $manifest = NewManifestObject @(
+            [PSCustomObject]@{ id='a'; version='1'; source='file://a/1/a.msi'; sha256=(Get-Sha (Join-Path $root 'a/1/a.msi')); order=10; required=$true }
+        )
+
+        # Every package qualifies; only cleanup fails. Without the cleanup
+        # outcome feeding the aggregate, this run would report 'passed' while
+        # leaving staged content behind.
+        Mock -ModuleName SourceQualification Remove-Item { throw 'staging is locked' }
+
+        $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
+
+        $result.PassedCount | Should -Be 1
+        $result.FailedRequiredCount | Should -Be 0
+        $result.CleanupOutcome | Should -Be 'failed'
+        $result.Outcome | Should -Be 'incomplete'
     }
 
     It 'gives each run a distinct identifier' {

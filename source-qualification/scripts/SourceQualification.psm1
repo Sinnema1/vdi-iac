@@ -222,8 +222,14 @@ function Invoke-SourceQualification {
         Retain staged content. Intended for diagnosis, not for normal runs.
 
     .OUTPUTS
-        PSCustomObject with Outcome, RunId, Packages, and counts. Outcome is
-        'passed' when every required package qualified, and 'failed' otherwise.
+        PSCustomObject with Outcome, CleanupOutcome, RunId, Packages, and counts.
+
+        Outcome is 'passed' when every required package qualified, 'failed' when
+        one did not, and 'incomplete' when staging could not be removed -- which
+        is a property of the run rather than of any package.
+
+        Package results carry a bounded ReasonCode, never an exception message.
+        Evidence is not inherently safe to publish; see the entry script.
     #>
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
@@ -257,7 +263,7 @@ function Invoke-SourceQualification {
                 Order      = $package.order
                 Required   = $package.required
                 Outcome    = 'failed'
-                Reason     = $null
+                ReasonCode = $null
                 Expected   = $package.sha256
                 Actual     = $null
             }
@@ -273,31 +279,60 @@ function Invoke-SourceQualification {
                     $result.Outcome = 'passed'
                 }
                 else {
-                    $result.Reason = 'sha256 mismatch'
+                    $result.ReasonCode = 'integrity_mismatch'
                 }
             }
             catch {
-                $result.Reason = $_.Exception.Message
+                # Only the code reaches the result. Exception messages carry
+                # absolute paths and other runtime-derived values, and evidence
+                # is not a safe place for them.
+                $code = $_.Exception.Data['ReasonCode']
+                $result.ReasonCode = if ($code) { $code } else { 'unexpected_error' }
+                Write-Verbose "Package '$($package.id)' failed with $($result.ReasonCode): $($_.Exception.Message)"
             }
 
             $results.Add([PSCustomObject]$result)
         }
     }
     finally {
-        if (-not $KeepStaging -and (Test-Path -LiteralPath $stagingDirectory)) {
-            Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        # Cleanup outcome is recorded, never swallowed. Staging that survives a
+        # run holds content whose verification status a later reader cannot
+        # determine, so a silent failure here is worse than a loud one.
+        if ($KeepStaging) {
+            $cleanupOutcome = 'retained'
+        }
+        elseif (-not (Test-Path -LiteralPath $stagingDirectory)) {
+            $cleanupOutcome = 'removed'
+        }
+        else {
+            try {
+                Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction Stop
+                $cleanupOutcome = if (Test-Path -LiteralPath $stagingDirectory) { 'failed' } else { 'removed' }
+            }
+            catch {
+                $cleanupOutcome = 'failed'
+                Write-Verbose "Staging cleanup failed: $($_.Exception.Message)"
+            }
         }
     }
 
     $failedRequired = @($results | Where-Object { $_.Outcome -ne 'passed' -and $_.Required })
     $failedOptional = @($results | Where-Object { $_.Outcome -ne 'passed' -and -not $_.Required })
 
+    # A cleanup failure is not a package failure, so it does not become 'failed'.
+    # It is an inability to complete the run cleanly, which the caller must be
+    # able to distinguish. 'incomplete' says exactly that.
+    $outcome = if ($cleanupOutcome -eq 'failed') { 'incomplete' }
+               elseif ($failedRequired.Count -gt 0) { 'failed' }
+               else { 'passed' }
+
     [PSCustomObject]@{
         SchemaVersion        = 1
         RunId                = $runId
         StartedUtc           = $startedUtc.ToString('o')
         CompletedUtc         = [datetime]::UtcNow.ToString('o')
-        Outcome              = if ($failedRequired.Count -gt 0) { 'failed' } else { 'passed' }
+        Outcome              = $outcome
+        CleanupOutcome       = $cleanupOutcome
         PackageCount         = $results.Count
         PassedCount          = @($results | Where-Object Outcome -EQ 'passed').Count
         FailedRequiredCount  = $failedRequired.Count

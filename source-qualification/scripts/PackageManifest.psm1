@@ -158,6 +158,8 @@ function Assert-PackageManifestConsistency {
         [Parameter(Mandatory)] [string] $Path
     )
 
+    AssertNoControlCharacters -Node $Manifest -Path $Path
+
     $duplicateIds = $Manifest.packages |
         Group-Object -Property id |
         Where-Object Count -GT 1 |
@@ -177,6 +179,65 @@ function Assert-PackageManifestConsistency {
     if ([int] $Manifest.schemaVersion -ge 2) {
         Assert-PackageInstallerConsistency -Manifest $Manifest -Path $Path
     }
+}
+
+function AssertNoControlCharacters {
+    <#
+    .SYNOPSIS
+        Refuses a control character anywhere in a manifest's string values.
+
+    .DESCRIPTION
+        Module-internal. The schemas anchor their patterns with ^ and $, and in
+        .NET -- which is what validates them here -- $ also matches immediately
+        before a trailing newline. A 64-character hex digest followed by a
+        newline therefore satisfies a pattern that reads as though it could not.
+        Measured, not assumed: a trailing space is refused and a trailing newline
+        is accepted.
+
+        The portable fix inside JSON Schema would be \A and \z, which
+        ECMAScript does not support, so a schema using them would validate here
+        and nowhere else. This check closes the gap for every version instead,
+        including version 1, which is frozen and cannot be edited.
+
+        Descent is bounded by type. Probing whether a node has properties
+        descends into primitives whose own properties are of the same type, which
+        recurses without end.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Node,
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter()] [string] $Location = 'manifest',
+        [Parameter()] [int] $Depth = 0
+    )
+
+    if ($Depth -gt 32) { throw "Manifest nests deeper than expected: $Path" }
+    if ($null -eq $Node) { return }
+
+    if ($Node -is [string]) {
+        foreach ($character in $Node.ToCharArray()) {
+            if ([char]::IsControl($character)) {
+                $code = '0x{0:X2}' -f [int] $character
+                throw "Manifest value at $Location contains control character $code -- $Path"
+            }
+        }
+        return
+    }
+
+    if ($Node -is [System.Collections.IList]) {
+        for ($i = 0; $i -lt $Node.Count; $i++) {
+            AssertNoControlCharacters -Node $Node[$i] -Path $Path -Location "$Location[$i]" -Depth ($Depth + 1)
+        }
+        return
+    }
+
+    if ($Node -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($property in $Node.PSObject.Properties) {
+            AssertNoControlCharacters -Node $property.Value -Path $Path -Location "$Location.$($property.Name)" -Depth ($Depth + 1)
+        }
+    }
+
+    # Numbers and booleans carry no text.
 }
 
 function Assert-PackageInstallerConsistency {

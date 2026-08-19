@@ -167,6 +167,48 @@ Describe 'Import-PackageManifest' {
         }
     }
 
+    Context 'refusing control characters the schema anchors let through' {
+
+        It 'rejects a sha256 with a trailing newline' {
+            # The schemas anchor with ^ and $, and in .NET $ also matches before
+            # a trailing newline, so this satisfies the pattern. A trailing space
+            # does not, which is what makes the gap easy to miss.
+            $path = NewManifestFile -Override @{ sha256 = (('a' * 64) + "`n") }
+            { Import-PackageManifest -Path $path } | Should -Throw '*control character 0x0A*'
+        }
+
+        It 'rejects a trailing newline on an identifier too' {
+            $path = NewManifestFile -Override @{ id = ("example-agent`n") }
+            { Import-PackageManifest -Path $path } | Should -Throw '*control character 0x0A*'
+        }
+
+        It 'rejects an embedded <label>, which the schema pattern already refuses' -ForEach @(
+            @{ label = 'tab';             char = "`t" }
+            @{ label = 'carriage return'; char = "`r" }
+            @{ label = 'null';            char = "`0" }
+        ) {
+            # Embedded control characters never satisfied the pattern. Only a
+            # trailing one did, because of where $ matches. These cases record
+            # that the earlier gate still holds.
+            $path = NewManifestFile -Override @{ version = ('1.2' + $char + '.3') }
+            { Import-PackageManifest -Path $path } | Should -Throw '*schema validation*'
+        }
+
+        It 'names where the offending value was found' {
+            # Asserted by substring rather than by -Throw, whose matching treats
+            # [0] as a wildcard character class.
+            $path = NewManifestFile -Override @{ id = ("example-agent`n") }
+            $message = $null
+            try { $null = Import-PackageManifest -Path $path } catch { $message = $_.Exception.Message }
+            $message | Should -Not -BeNullOrEmpty
+            $message.Contains('packages[0].id') | Should -BeTrue
+        }
+
+        It 'leaves clean manifests alone' {
+            { Import-PackageManifest -Path (NewManifestFile) } | Should -Not -Throw
+        }
+    }
+
     Context 'enforcing semantic rules the schema cannot express' {
 
         It 'rejects duplicate package ids' {

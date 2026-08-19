@@ -906,14 +906,42 @@ emerges. Consult README for which increment is actually current.
 - restart signaling and cleanup;
 - package evidence aggregation.
 
-Acceptance criteria carried from [ADR 1](docs/decisions/0001-package-manifest-serialization.md):
-installer type, install arguments, and the validation definition are field
-additions, so this increment publishes schema version 2 as a **new file**.
-`contracts/package-manifest.schema.json` is byte-for-byte immutable from
-Increment 1 acceptance and must not be edited, including its descriptions.
-Validation dispatches on the manifest's declared `schemaVersion`. A version 1
-manifest that validated before this increment must still validate after it, and
-a test must prove it.
+Governed by [ADR 2](docs/decisions/0002-guest-execution-verification-levels.md),
+[ADR 3](docs/decisions/0003-packer-boundary-and-transfer-bundle.md),
+[ADR 4](docs/decisions/0004-package-manifest-schema-2.md), and
+[ADR 5](docs/decisions/0005-evidence-versioning-and-run-identity.md).
+
+Implementation order, each stage landing before the next begins:
+
+1. the version 1 digest guard, the version 2 schema, and the version dispatcher;
+2. the verified-only bundle lifecycle;
+3. guest verification, execution, validation, cleanup, and evidence;
+4. unit tests and Windows component tests;
+5. the null-builder Packer harness and its lab tests.
+
+Acceptance criteria:
+
+- `contracts/package-manifest.schema.json` is byte-for-byte immutable and must
+  not be edited, descriptions included. Version 2 is a new file, and a test
+  asserts the version 1 digest;
+- dispatch uses a hard-coded version map, never a path built from a declared
+  value and never a fallback to the newest schema;
+- a version 1 manifest that validated before this increment still validates
+  after it, proven by a test;
+- unverified content never crosses the transfer boundary, and the bundle is
+  re-verified there;
+- installer arguments are passed as individual tokens, never as a joined string;
+- Packer owns the restart boundary; installation logic reports that a restart is
+  required and never triggers one;
+- evidence carries `ResultSchemaVersion` and `ManifestSchemaVersion`, a
+  parent-supplied run identifier, and none of the excluded values in ADR 5;
+- every capability states its verification level, and the increment closes only
+  when the maturity label distinguishes CI-proven from lab-proven behavior.
+
+Explicitly deferred to Increment 3: any vSphere builder or plugin, base-image
+selection, installation-media handling, unattended setup, VM hardware, storage
+or network configuration, and generalization, shutdown, sealing, or publication.
+Several depend on the base-image decision in section 36.
 
 ### Increment 3: Image build and sealing
 
@@ -978,6 +1006,24 @@ A meaningful change is complete when:
 - documentation and decision records are updated when warranted;
 - unrelated files and future-phase scaffolding are not included;
 - rollback or safe recovery is understood.
+
+### 33.1 Maturity Labels
+
+A capability's label states what proved it, not how complete it feels. The
+levels are defined in [ADR 2](docs/decisions/0002-guest-execution-verification-levels.md).
+
+| Label | Meaning |
+| --- | --- |
+| **not started** | No implementation exists |
+| **CI-proven** | Logic verified by tests that run on every push |
+| **component-proven** | Additionally exercised against synthetic fixtures on a Windows runner |
+| **lab-proven** | Additionally exercised end to end against a real disposable guest |
+| **implemented; lab validation pending** | Code exists and is CI-proven or component-proven, but the behavior that needs a real guest has never been observed |
+
+The last label is the one that carries weight. Transfer, restart, and
+post-restart validation cannot be proven by any test that does not move bytes
+into a machine, and describing them as working on the strength of a passing
+configuration check would be false.
 
 ## 34. Agent Operating Model
 

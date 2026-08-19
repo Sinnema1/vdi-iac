@@ -55,6 +55,8 @@ built -> validated -> canary -> approved -> promoted -> superseded -> retired
 | **Artifact class** | A category of build input with its own qualification path; software packages and installation media are distinct classes |
 | **Installation media** | Operating-system media a build may construct an image from, qualified against a separately published checksum and kept off the guest package-staging path |
 | **Media qualification** | Resolving an exact media reference and verifying it before the build consumes it, distinct from package source qualification |
+| **Transfer bundle** | The verified-only artifact uploaded to a guest; contains packages that passed host verification, relative paths, and the hashes the guest re-verifies against |
+| **Restart boundary** | The point at which Packer owns a reboot; installation logic reports that one is required and never triggers it |
 | **Content Library** | A vSphere construct for publishing and referencing sealed artifacts and installation media; one candidate publication mechanism, not a settled choice |
 
 Never calculate a hash at runtime and then treat that value as the expected
@@ -97,6 +99,8 @@ Discovery of drift is not authorization to destroy or replace resources.
 | **Contract** | An explicit definition of inputs, outputs, ownership, validation, and failure behavior at a boundary |
 | **Increment** | A bounded unit of delivery from the sequence in [Agent_Handoff.md](../Agent_Handoff.md) section 32 |
 | **ADR** | Architecture decision record, stored in `docs/decisions/` |
+| **Verification level** | Which class of test proved a capability: CI-proven, component-proven, or lab-proven. See section 33.1 |
+| **Result schema version** | The version of the evidence document's own shape, distinct from the manifest schema version it reports |
 
 ## Architecture views
 

@@ -74,9 +74,10 @@ BeforeAll {
             Set-Content -LiteralPath $manifestPath -Encoding utf8
 
         [PSCustomObject]@{
-            Manifest = Import-PackageManifest -Path $manifestPath
+            ManifestPath = $manifestPath
             SourceRoot = $source
             BundleRoot = Join-Path $base 'bundles'
+            Base = $base
         }
     }
 }
@@ -85,7 +86,7 @@ Describe 'New-TransferBundle' {
 
     It 'includes every verified package and writes a descriptor' {
         $s = NewScenario
-        $bundle = New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
+        $bundle = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
 
         $bundle.Outcome | Should -Be 'passed'
         $bundle.IncludedCount | Should -Be 2
@@ -95,7 +96,7 @@ Describe 'New-TransferBundle' {
 
     It 'orders descriptor entries deterministically' {
         $s = NewScenario
-        $bundle = New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
+        $bundle = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
         $descriptor = Get-Content -LiteralPath $bundle.DescriptorPath -Raw | ConvertFrom-Json
         $descriptor.packages.order | Should -Be @(10, 20)
     }
@@ -104,7 +105,7 @@ Describe 'New-TransferBundle' {
         # The manifest does not travel, so anything absent here is unavailable to
         # the guest no matter what the manifest said.
         $s = NewScenario
-        $bundle = New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
+        $bundle = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
         $entry = (Get-Content -LiteralPath $bundle.DescriptorPath -Raw | ConvertFrom-Json).packages |
             Where-Object id -EQ 'example-agent'
 
@@ -120,7 +121,7 @@ Describe 'New-TransferBundle' {
     It 'uses relative payload paths only' {
         # An absolute path would carry host layout into the guest.
         $s = NewScenario
-        $bundle = New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
+        $bundle = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
         $descriptor = Get-Content -LiteralPath $bundle.DescriptorPath -Raw | ConvertFrom-Json
 
         foreach ($entry in $descriptor.packages) {
@@ -134,7 +135,7 @@ Describe 'New-TransferBundle' {
         # The property that matters: an optional package failing integrity is
         # recorded, and its payload is not in the bundle.
         $s = NewScenario -CorruptIds 'example-agent' -OptionalIds 'example-agent'
-        $bundle = New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
+        $bundle = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
 
         $bundle.Outcome | Should -Be 'passed'
         $bundle.IncludedCount | Should -Be 1
@@ -147,7 +148,7 @@ Describe 'New-TransferBundle' {
 
     It 'fails and removes the bundle when a required package does not verify' {
         $s = NewScenario -CorruptIds 'example-agent'
-        $bundle = New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
+        $bundle = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
 
         $bundle.Outcome | Should -Be 'failed'
         $bundle.FailedRequiredCount | Should -Be 1
@@ -158,34 +159,91 @@ Describe 'New-TransferBundle' {
 
     It 'records a missing source as a per-package reason' {
         $s = NewScenario -MissingIds 'example-agent' -OptionalIds 'example-agent'
-        $bundle = New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
+        $bundle = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
         ($bundle.Packages | Where-Object Id -EQ 'example-agent').ReasonCode | Should -Be 'source_not_found'
     }
 
     It 'creates nothing under -WhatIf' {
         $s = NewScenario
-        $result = New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot -WhatIf
+        $result = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot -WhatIf
         $result.Outcome | Should -Be 'skipped'
         Test-Path -LiteralPath $s.BundleRoot | Should -BeFalse
     }
 
     It 'refuses a version 1 manifest' {
-        $manifest = Import-PackageManifest -Path (Join-Path $script:RepoRoot 'packer' 'manifests' 'example-baseline.json')
-        { New-TransferBundle -Manifest $manifest -SourceRoot (NewTempDir) -BundleRoot (NewTempDir) } |
-            Should -Throw '*schema version 2 or later*'
+        { New-TransferBundle -ManifestPath (Join-Path $script:RepoRoot 'packer' 'manifests' 'example-baseline.json') `
+            -SourceRoot (NewTempDir) -BundleRoot (NewTempDir) } |
+            Should -Throw '*schema version 2*'
+    }
+
+    It 'accepts no manifest that has not been validated here' {
+        # A package id becomes a directory name that is later removed
+        # recursively. Accepting a caller-built object let an id of
+        # '../../../sentinel' delete a directory outside BundleRoot; reproduced
+        # before this boundary took a path instead.
+        (Get-Command New-TransferBundle).Parameters.Keys | Should -Not -Contain 'Manifest'
+        (Get-Command New-TransferBundle).Parameters.Keys | Should -Contain 'ManifestPath'
+    }
+
+    It 'cannot touch anything outside the bundle root, even given a traversal identifier' {
+        $s = NewScenario
+        $sentinel = Join-Path $s.Base 'sentinel'
+        $null = New-Item -ItemType Directory -Path $sentinel -Force
+        $witness = Join-Path $sentinel 'must-survive.txt'
+        Set-Content -LiteralPath $witness -Value 'content' -NoNewline
+
+        # Written straight to disk, bypassing nothing: the manifest schema
+        # refuses this identifier, which is what the boundary now relies on.
+        $hostile = Join-Path $s.Base 'hostile.json'
+        @{ schemaVersion = 2; packages = @(@{
+            id = '../../../sentinel'; version = '1.0'; source = 'file://absent/absent.exe'
+            sha256 = ('f' * 64); order = 10; required = $false
+            installer = @{ kind = 'exe'; timeoutSeconds = 900; restartPolicy = 'forbid'; exitCodes = @{ success = @(0) } }
+            validation = @(@{ id = 'v'; kind = 'file-exists'; root = 'programFiles'; relativePath = 'Example/a.exe' })
+        })} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $hostile -Encoding utf8
+
+        { New-TransferBundle -ManifestPath $hostile -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot } |
+            Should -Throw '*schema validation*'
+        Test-Path -LiteralPath $witness | Should -BeTrue
+    }
+
+    It 'fails the whole bundle when an unverified payload cannot be removed' {
+        # An optional package that fails integrity but whose payload cannot be
+        # deleted would otherwise leave unverified content in a passing bundle.
+        $s = NewScenario -CorruptIds 'example-agent' -OptionalIds 'example-agent'
+        Mock -ModuleName TransferBundle Remove-Item { throw 'payload locked' } -ParameterFilter { $LiteralPath -like '*packages*' }
+
+        $bundle = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
+
+        $bundle.Outcome | Should -Not -Be 'passed'
+        $bundle.BundlePath | Should -BeNullOrEmpty
+        $bundle.Reason | Should -BeLike '*Could not remove unverified payload*'
+    }
+
+    It 'leaves nothing behind when descriptor generation fails' {
+        $s = NewScenario
+        Mock -ModuleName TransferBundle Test-Json { $false }
+
+        $bundle = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot
+
+        $bundle.Outcome | Should -Be 'failed'
+        $bundle.BundlePath | Should -BeNullOrEmpty
+        $bundle.DescriptorPath | Should -BeNullOrEmpty
+        $bundle.CleanupOutcome | Should -Be 'removed'
+        @(Get-ChildItem -LiteralPath $s.BundleRoot -Directory).Count | Should -Be 0
     }
 
     It 'refuses a reused run identifier' {
         $s = NewScenario
         $id = Get-RunIdentifier
-        $null = New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot -RunId $id
-        { New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot -RunId $id } |
+        $null = New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot -RunId $id
+        { New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot -RunId $id } |
             Should -Throw '*already exists*'
     }
 
     It 'refuses a malformed run identifier before creating anything' {
         $s = NewScenario
-        { New-TransferBundle -Manifest $s.Manifest -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot -RunId '../escape' } |
+        { New-TransferBundle -ManifestPath $s.ManifestPath -SourceRoot $s.SourceRoot -BundleRoot $s.BundleRoot -RunId '../escape' } |
             Should -Throw '*canonical lowercase UUID*'
     }
 }
@@ -194,7 +252,7 @@ Describe 'Test-TransferDescriptor' {
 
     BeforeAll {
         $script:Scenario = NewScenario
-        $script:Bundle = New-TransferBundle -Manifest $script:Scenario.Manifest `
+        $script:Bundle = New-TransferBundle -ManifestPath $script:Scenario.ManifestPath `
             -SourceRoot $script:Scenario.SourceRoot -BundleRoot $script:Scenario.BundleRoot
     }
 
@@ -251,5 +309,44 @@ Describe 'Test-TransferDescriptor' {
 
     It 'rejects a malformed expected digest before reading the file' {
         { Test-TransferDescriptor -Path $script:Bundle.DescriptorPath -ExpectedSha256 'not-a-digest' } | Should -Throw
+    }
+
+    It 'offers no way to substitute the schema' {
+        # A permissive replacement schema would make any well-formed document
+        # acceptable, which is the same bypass the manifest side already closed.
+        (Get-Command Test-TransferDescriptor).Parameters.Keys | Should -Not -Contain 'SchemaPath'
+        (Get-Command Test-TransferDescriptor).Parameters.Keys | Should -Not -Contain 'SchemaDirectory'
+    }
+
+    It 'refuses a descriptor whose <label>' -ForEach @(
+        @{ label = 'installer kind is command'; mutate = { param($d) $d.packages[0].installer = [PSCustomObject]@{ kind = 'command'; timeoutSeconds = 900; restartPolicy = 'forbid' } } }
+        @{ label = 'validation kind is arbitrary'; mutate = { param($d) $d.packages[0].validation = @([PSCustomObject]@{ id = 'v'; kind = 'run-script'; command = 'whoami' }) } }
+        @{ label = 'installer carries an unknown field'; mutate = { param($d) $d.packages[0].installer | Add-Member -NotePropertyName 'shell' -NotePropertyValue 'cmd' } }
+    ) {
+        $copy = Join-Path (NewTempDir) 'descriptor.json'
+        $document = Get-Content -LiteralPath $script:Bundle.DescriptorPath -Raw | ConvertFrom-Json
+        & $mutate $document
+        $document | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $copy -Encoding utf8
+        $digest = (Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash.ToLowerInvariant()
+
+        $code = $null
+        try { $null = Test-TransferDescriptor -Path $copy -ExpectedSha256 $digest }
+        catch { $code = $_.Exception.Data['ReasonCode'] }
+        $code | Should -Be 'descriptor_invalid'
+    }
+
+    It 'refuses a run identifier ending in a newline, digest notwithstanding' {
+        # The schema pattern accepts it: ^ and $ in .NET admit a trailing
+        # newline, and this value then names a directory in the guest.
+        $copy = Join-Path (NewTempDir) 'descriptor.json'
+        $document = Get-Content -LiteralPath $script:Bundle.DescriptorPath -Raw | ConvertFrom-Json
+        $document.runId = "$($document.runId)`n"
+        $document | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $copy -Encoding utf8
+        $digest = (Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash.ToLowerInvariant()
+
+        $code = $null
+        try { $null = Test-TransferDescriptor -Path $copy -ExpectedSha256 $digest }
+        catch { $code = $_.Exception.Data['ReasonCode'] }
+        $code | Should -Be 'descriptor_invalid'
     }
 }

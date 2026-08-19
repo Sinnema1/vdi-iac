@@ -102,6 +102,40 @@ Describe 'Import-PackageManifest' {
             { Import-PackageManifest -Path $path } | Should -Throw '*schema validation*'
         }
 
+        It 'rejects the moving version reference <version>' -ForEach @(
+            @{ version = 'latest' }, @{ version = 'LATEST' }, @{ version = 'Latest' }
+            @{ version = 'newest' }, @{ version = 'CURRENT' }, @{ version = 'stable' }
+            @{ version = 'head' },   @{ version = 'any' }
+        ) {
+            $path = NewManifestFile -Override @{ version = $version }
+            { Import-PackageManifest -Path $path } | Should -Throw '*schema validation*'
+        }
+
+        It 'rejects the version range or wildcard <version>' -ForEach @(
+            @{ version = '1.*' }, @{ version = '>=1.0' }, @{ version = '~1.2' }
+            @{ version = '1.x' }, @{ version = '^2.0' }
+        ) {
+            $path = NewManifestFile -Override @{ version = $version }
+            { Import-PackageManifest -Path $path } | Should -Throw '*schema validation*'
+        }
+
+        It 'accepts the exact version <version>' -ForEach @(
+            @{ version = '1.2.3' }, @{ version = '2026.08.1' }, @{ version = '1.0.0-rc.1' }
+        ) {
+            $path = NewManifestFile -Override @{ version = $version }
+            { Import-PackageManifest -Path $path } | Should -Not -Throw
+        }
+
+        It 'rejects the traversing source reference <source>' -ForEach @(
+            @{ source = 'file://packages/../../outside/x.bin' }
+            @{ source = 'file://./x.bin' }
+            @{ source = 'file://a/./b.msi' }
+            @{ source = 'file://a/../b.msi' }
+        ) {
+            $path = NewManifestFile -Override @{ source = $source }
+            { Import-PackageManifest -Path $path } | Should -Throw '*schema validation*'
+        }
+
         It 'rejects an empty package list' {
             $dir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
             $null = New-Item -ItemType Directory -Path $dir -Force

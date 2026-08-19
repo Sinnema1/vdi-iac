@@ -102,22 +102,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Validate committed manifests against the schema
+      - name: Validate committed manifests
         shell: pwsh
         run: |
-          $schema = 'contracts/package-manifest.schema.json'
+          # Import-PackageManifest, not Test-Json: schema validation alone misses
+          # the semantic rules, so a manifest with duplicate ids or duplicate
+          # order values would pass a schema-only gate.
+          Import-Module ./source-qualification/scripts/PackageManifest.psm1 -Force
           $manifests = Get-ChildItem -Path 'packer/manifests' -Filter '*.json' -File -ErrorAction SilentlyContinue
           if (-not $manifests) { throw 'No manifests found to validate.' }
-          $failed = $false
+          $failed = @()
           foreach ($m in $manifests) {
-            if (Test-Json -Path $m.FullName -SchemaFile $schema -ErrorAction SilentlyContinue) {
-              Write-Host "  valid   $($m.Name)"
-            } else {
-              Write-Host "  INVALID $($m.Name)"
-              $failed = $true
+            try {
+              $parsed = Import-PackageManifest -Path $m.FullName
+              Write-Host "  valid   $($m.Name) ($($parsed.Packages.Count) package(s))"
+            }
+            catch {
+              Write-Host "  INVALID $($m.Name): $($_.Exception.Message)"
+              $failed += $m.Name
             }
           }
-          if ($failed) { throw 'At least one committed manifest does not conform to the schema.' }
+          if ($failed) { throw "Manifests failed validation: $($failed -join ', ')" }
 
   shell-lint:
     name: Shell lint

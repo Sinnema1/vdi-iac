@@ -5,23 +5,37 @@
   "description": "The ordered software recipe for one image baseline. An image recipe, not deployment policy: it carries no assignments, schedules, audience targeting, update channels, or dependency resolution.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "packages"],
+  "required": [
+    "schemaVersion",
+    "packages"
+  ],
   "properties": {
     "schemaVersion": {
       "description": "Contract version. Incremented when a change is not backward compatible.",
-      "enum": [1]
+      "enum": [
+        1
+      ]
     },
     "packages": {
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/definitions/package" }
+      "items": {
+        "$ref": "#/definitions/package"
+      }
     }
   },
   "definitions": {
     "package": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "version", "source", "sha256", "order", "required"],
+      "required": [
+        "id",
+        "version",
+        "source",
+        "sha256",
+        "order",
+        "required"
+      ],
       "properties": {
         "id": {
           "description": "Stable identifier for the package within this manifest.",
@@ -30,16 +44,22 @@
           "maxLength": 64
         },
         "version": {
-          "description": "Exact version. No ranges, wildcards, or 'latest'.",
+          "description": "Exact version. Ranges, wildcards, a trailing .x series suffix, and moving references such as 'latest' are rejected. Case-insensitivity is expressed with character classes rather than an inline flag, because inline flags are not portable across JSON Schema implementations.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
-          "maxLength": 64
+          "maxLength": 64,
+          "not": {
+            "pattern": "^([Ll][Aa][Tt][Ee][Ss][Tt]|[Nn][Ee][Ww][Ee][Ss][Tt]|[Cc][Uu][Rr][Rr][Ee][Nn][Tt]|[Ss][Tt][Aa][Bb][Ll][Ee]|[Hh][Ee][Aa][Dd]|[Aa][Nn][Yy])$|\\.[xX]$"
+          }
         },
         "source": {
-          "description": "Exact source reference, relative to the qualified source root. Only the file scheme is resolvable in this schema version.",
+          "description": "Exact source reference, relative to the qualified source root. Only the file scheme is resolvable in this schema version. Dot segments are rejected here so a traversing reference is refused when the manifest is validated, not when it is resolved.",
           "type": "string",
           "pattern": "^file://[A-Za-z0-9][A-Za-z0-9._/-]*$",
-          "maxLength": 512
+          "maxLength": 512,
+          "not": {
+            "pattern": "(^|/)\\.{1,2}(/|$)"
+          }
         },
         "sha256": {
           "description": "Expected SHA-256, established before build runtime. Never computed at runtime and then treated as expected.",

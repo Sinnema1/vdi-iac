@@ -275,6 +275,21 @@ Owns:
 - superseded artifact retention or retirement;
 - desired-versus-observed reconciliation.
 
+### 8.8 Installation-media qualification (PROPOSED)
+
+**PROPOSED.** This domain applies only where a build constructs an image from
+installation media. Whether it does is unresolved -- see section 36.
+
+Where it applies, it owns:
+
+- resolution of an exact media reference;
+- verification against a separately published checksum;
+- media availability to the build execution context;
+- media identity recorded in provenance.
+
+It does not own guest package installation, and media never travels the guest
+package-transfer path described in section 13.
+
 ## 9. Primary System Flow
 
 ```text
@@ -323,6 +338,22 @@ Required properties:
 - host and guest staging are removed after results are preserved.
 
 A later artifact repository can replace the source adapter without changing the manifest's trust model or the guest installation contract.
+
+**Artifact classes.** Software packages and installation media are distinct
+classes with distinct qualification paths, and conflating them produces a
+manifest that tries to describe both badly.
+
+| | Software package | Installation media |
+| --- | --- | --- |
+| Described by | A manifest entry with an expected SHA-256 | A media reference qualified against a separately published checksum |
+| Typical size | Megabytes to hundreds of megabytes | Gigabytes |
+| Reaches the guest | Yes, through host staging and transfer | No |
+| Verified | Host-side, then re-verified in the guest | Once, before the build consumes it |
+
+This section describes the package model. It does not assert that a build begins
+from installation media: consuming an existing image source is an equally valid
+starting point, and the choice is an open decision recorded in section 36.
+Nothing here should be read as committing to a media-based path.
 
 ## 11. Package Manifest Contract
 
@@ -511,6 +542,8 @@ Do not place credentials, complete environment exports, or unnecessary machine d
 
 ## 19. Terraform Design Direction
 
+**PROPOSED.** No Terraform configuration exists. This section states intended design, not implemented behavior.
+
 Terraform should express desired infrastructure state and consume an explicitly approved image reference. It should not build images or contain large procedural scripts.
 
 Design expectations:
@@ -531,6 +564,8 @@ State boundaries should follow lifecycle ownership and blast radius. Image const
 
 ## 20. Citrix MCS Design Direction
 
+**PROPOSED.** No Citrix integration exists. Provider and module boundaries are unresolved -- see section 36.
+
 Citrix MCS consumes the sealed, approved vSphere image through declarative catalog configuration.
 
 The integration should make these concepts explicit:
@@ -550,6 +585,8 @@ Avoid embedding platform credentials or private topology in Terraform. Treat del
 
 ## 21. Intune Boundary
 
+**PROPOSED.** No Intune integration exists. The query and validation mechanism is unresolved -- see section 36.
+
 Intune participation is deliberately bounded. The image build should prepare only prerequisites that genuinely belong in the base image. Runtime validation may confirm:
 
 - expected enrollment state;
@@ -561,6 +598,8 @@ Intune participation is deliberately bounded. The image build should prepare onl
 Do not duplicate Intune policy in Packer or Terraform. Do not turn this repository into a general Intune configuration repository unless the scope is explicitly changed.
 
 ## 22. Promotion, Rollback, and Retirement
+
+**PROPOSED.** No lifecycle state is tracked anywhere in the repository. The states below are a model, not a record of anything that runs.
 
 Use explicit lifecycle states rather than inferring approval from a filename or successful build.
 
@@ -584,6 +623,8 @@ Rollback selects a previously approved immutable image and applies the same cont
 Retirement is destructive and should require dependency checks, explicit targeting, and a documented retention policy.
 
 ## 23. Reconciliation and Drift
+
+**DEFERRED.** Reconciliation depends on provisioned infrastructure to compare against, and none exists. Recorded here so the boundary is designed before it is needed.
 
 Reconciliation compares declared intent with observable platform state. It should distinguish:
 
@@ -738,6 +779,11 @@ The following structure is a destination map, not a request to create empty dire
 │   ├── templates/
 │   ├── variables/
 │   ├── manifests/
+│   ├── schemas/            PROPOSED
+│   ├── sources/            PROPOSED
+│   │   └── windows/        PROPOSED
+│   ├── unattended/         PROPOSED
+│   ├── validation/         PROPOSED
 │   ├── scripts/
 │   │   ├── packages/
 │   │   ├── validation/
@@ -756,6 +802,11 @@ The following structure is a destination map, not a request to create empty dire
     ├── fixtures/
     └── integration/
 ```
+
+Paths marked PROPOSED are candidates, not commitments. Several depend on the
+base-image decision in section 36 and may never be created: `sources/windows/`
+and `unattended/` presuppose media-based construction, and `schemas/` and
+`validation/` presuppose the shape the manifest contract takes.
 
 Create paths only when implementing their responsibility. Prefer one clear implementation over parallel examples that can drift.
 
@@ -814,7 +865,10 @@ Each decision record should contain context, decision, alternatives, consequence
 
 ## 32. Delivery Sequence
 
-Use this sequence as the strategic roadmap:
+Use this sequence as the strategic roadmap. Every increment beyond the one
+currently in progress is **PROPOSED**: the contents below are a plan, and
+earlier contracts may reshape later increments as implementation evidence
+emerges. Consult README for which increment is actually current.
 
 ### Increment 0: Repository foundation
 
@@ -846,7 +900,14 @@ Use this sequence as the strategic roadmap:
 - base-image and tool version pinning;
 - pre-generalization checks;
 - generalization, shutdown, and vSphere sealing;
-- immutable identity and provenance.
+- immutable identity and provenance;
+- **PROPOSED** Content Library publication and reference resolution;
+- **PROPOSED** installation-media qualification, if the base-image decision in
+  section 36 selects a media-based path.
+
+Content Library belongs here rather than earlier because it is how sealed
+artifacts and any installation media are published and referenced. It has no
+role until there is a sealed artifact to publish.
 
 ### Increment 4: Sealed-image validation
 
@@ -938,6 +999,8 @@ Until repository evidence establishes otherwise, prioritize the foundation, mani
 
 Keep these as explicit decisions until implementation evidence or requirements resolve them:
 
+- base-image strategy: constructing from installation media versus consuming an
+  existing image source, and the qualification each path requires;
 - package-source adapter and retention expectations;
 - canonical package-manifest serialization and minimum fields;
 - image identity and versioning convention;
@@ -950,6 +1013,12 @@ Keep these as explicit decisions until implementation evidence or requirements r
 - Intune query and validation mechanism;
 - artifact retention, rollback window, and retirement policy;
 - reconciliation frequency and automated-remediation limits.
+
+The base-image decision is load-bearing: it determines whether media
+qualification (section 8.8), the media artifact class (section 10), and the
+`sources/windows/` and `unattended/` paths (section 29) are needed at all.
+Treat all of them as PROPOSED until it is settled. Do not let an early
+implementation choice settle it silently.
 
 Do not hide unresolved decisions inside code defaults. Document assumptions, choose reversible options for early increments, and create a decision record when a choice becomes durable.
 

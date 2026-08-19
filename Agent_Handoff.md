@@ -908,11 +908,12 @@ emerges. Consult README for which increment is actually current.
 
 Acceptance criteria carried from [ADR 1](docs/decisions/0001-package-manifest-serialization.md):
 installer type, install arguments, and the validation definition are field
-additions, so this increment publishes schema version 2. Version 1 must remain
-present and working as an immutable artifact, and validation must dispatch on the
-manifest's declared `schemaVersion` rather than overwriting the single schema
-file. A version 1 manifest that validated before this increment must still
-validate after it.
+additions, so this increment publishes schema version 2 as a **new file**.
+`contracts/package-manifest.schema.json` is byte-for-byte immutable from
+Increment 1 acceptance and must not be edited, including its descriptions.
+Validation dispatches on the manifest's declared `schemaVersion`. A version 1
+manifest that validated before this increment must still validate after it, and
+a test must prove it.
 
 ### Increment 3: Image build and sealing
 

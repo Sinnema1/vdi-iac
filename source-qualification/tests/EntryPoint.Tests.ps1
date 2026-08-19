@@ -73,10 +73,88 @@ BeforeAll {
         [PSCustomObject]@{ Base = $base; SourceRoot = $source; Manifest = $manifest }
     }
 
+    function AllStringValues {
+        <#
+            Every string in a parsed evidence document, at any depth.
+
+            Searching the raw JSON text instead produces a false negative on
+            Windows: a path is serialized with escaped separators, so C:\temp
+            appears as C:\\temp and a regex built from the original path never
+            matches. The assertion then passes while the value is present.
+            Parsing first removes the escaping from the comparison entirely.
+        #>
+        param($Node, [int] $Depth = 0)
+
+        # Descent is bounded by type, not by duck-typing on PSObject.Properties.
+        # Probing whether a node "has properties" descends into primitives whose
+        # own properties are of the same type, which recurses without end. An
+        # earlier version did exactly that; it survived a hand-built fixture and
+        # hung on real evidence.
+        if ($Depth -gt 32) { throw 'evidence nested deeper than expected' }
+        if ($null -eq $Node) { return }
+        if ($Node -is [string]) { return $Node }
+
+        if ($Node -is [System.Collections.IList]) {
+            foreach ($item in $Node) { AllStringValues -Node $item -Depth ($Depth + 1) }
+            return
+        }
+        if ($Node -is [System.Management.Automation.PSCustomObject]) {
+            foreach ($property in $Node.PSObject.Properties) {
+                AllStringValues -Node $property.Value -Depth ($Depth + 1)
+            }
+            return
+        }
+
+        # Numbers, booleans, and other primitives carry no text to leak.
+    }
+
+    function AssertEvidenceExcludes {
+        param([string] $EvidencePath, [string[]] $Fragments)
+
+        $parsed = Get-Content -LiteralPath $EvidencePath -Raw | ConvertFrom-Json
+        $values = @(AllStringValues $parsed)
+        $values.Count | Should -BeGreaterThan 0
+
+        foreach ($fragment in $Fragments) {
+            $hits = @($values | Where-Object { $_.Contains($fragment, [System.StringComparison]::OrdinalIgnoreCase) })
+            $hits | Should -BeNullOrEmpty -Because "no evidence field may contain '$fragment'"
+        }
+    }
+
     function RunEntryPoint {
         param([string[]] $Arguments)
         $output = & $script:Pwsh -NoProfile -File $script:EntryPoint @Arguments 2>&1
         [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = ($output | Out-String) }
+    }
+}
+
+Describe 'evidence inspection helper' {
+
+    It 'finds a Windows-style path that a raw regex search would miss' {
+        # Guards the guard. This ran green on Windows while checking nothing,
+        # because JSON escapes the separators and the regex was built from the
+        # unescaped path. Constructed here rather than platform-dependent, so the
+        # detector is proven on every platform.
+        $path = 'C:\temp\source'
+        $document = [PSCustomObject]@{
+            Packages = @([PSCustomObject]@{ ReasonCode = "not found: $path" })
+        }
+        $evidence = Join-Path (NewTempDir) 'synthetic.json'
+        $document | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $evidence -Encoding utf8
+
+        # The old assertion: passes, wrongly.
+        (Get-Content -LiteralPath $evidence -Raw) -match [regex]::Escape($path) | Should -BeFalse
+
+        # The current one: fails, correctly.
+        { AssertEvidenceExcludes -EvidencePath $evidence -Fragments @($path) } | Should -Throw
+    }
+
+    It 'accepts a document that genuinely excludes the fragment' {
+        $evidence = Join-Path (NewTempDir) 'clean.json'
+        [PSCustomObject]@{ Packages = @([PSCustomObject]@{ ReasonCode = 'source_not_found' }) } |
+            ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $evidence -Encoding utf8
+
+        { AssertEvidenceExcludes -EvidencePath $evidence -Fragments @('C:\temp\source') } | Should -Not -Throw
     }
 }
 
@@ -148,11 +226,9 @@ Describe 'Invoke-SourceQualification.ps1 exit codes' {
         $parsed = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
         $parsed.Packages[0].ReasonCode | Should -Be 'source_not_found'
 
-        $written = Get-Content -LiteralPath $evidence -Raw
-        $written | Should -Not -Match ([regex]::Escape($f.SourceRoot))
-        # The staged path is derived from the source root and would leak the same
-        # information by another route.
-        $written | Should -Not -Match ([regex]::Escape($f.Base))
+        # The staged path derives from the source root and would leak the same
+        # information by another route, so both are excluded.
+        AssertEvidenceExcludes -EvidencePath $evidence -Fragments @($f.SourceRoot, $f.Base)
     }
 
     It 'writes evidence carrying a reason code and no absolute path' {
@@ -163,10 +239,8 @@ Describe 'Invoke-SourceQualification.ps1 exit codes' {
         $run.ExitCode | Should -Be 1
         Test-Path -LiteralPath $evidence | Should -BeTrue
 
-        $written = Get-Content -LiteralPath $evidence -Raw
-        $written | Should -Match 'integrity_mismatch'
-        # The source root is the value that previously leaked through a raw
-        # exception message.
-        $written | Should -Not -Match ([regex]::Escape($f.SourceRoot))
+        $parsed = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
+        $parsed.Packages[0].ReasonCode | Should -Be 'integrity_mismatch'
+        AssertEvidenceExcludes -EvidencePath $evidence -Fragments @($f.SourceRoot, $f.Base)
     }
 }

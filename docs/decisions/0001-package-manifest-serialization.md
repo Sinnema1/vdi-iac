@@ -105,7 +105,7 @@ increments `schemaVersion`. A change that does not, does not.**
 | Removing a field | Yes: documents carrying it move from accepted to rejected | Increment |
 | Narrowing a value pattern | Yes: some previously accepted documents are now rejected | Increment |
 | Widening a value pattern | Yes: some previously rejected documents are now accepted | Increment |
-| Editing a description or `$comment` | No | Stays 1 |
+| Editing a description or `$comment` | No | Stays 1, but see the freeze rule below |
 
 The rule is deliberately blunt. A finer one would have to name which direction
 of change is tolerable for which consumer, and this repository has no consumer
@@ -120,16 +120,35 @@ version references, wildcard segments, and dot segments were each tightened
 after the first draft -- and none of those produced a version 2.
 
 **Schema version 1 becomes a supported contract when Increment 1 is accepted.**
-Corrections made while it was being implemented do not create intermediate
-supported versions, because nothing outside this repository could have consumed
-them. From acceptance onward, any change to the accepted set requires a new
-schema version.
+Draft schemas carried no compatibility guarantee before that point. They were
+publicly accessible -- this is a public repository -- but accessible is not
+supported, and the corrections made while version 1 was being implemented create
+no intermediate supported versions.
 
-A consequence worth stating before it is needed: a supported version is
-immutable, so a later version cannot be published by editing the only schema
-file. `contracts/package-manifest.schema.json` becomes a versioned artifact, and
-validation dispatches on the manifest's declared `schemaVersion` rather than
-assuming the newest. Preserving a working version 1 is therefore an acceptance
+The repository event that marks acceptance is the commit setting README's status
+to *Increment 1 complete. Package manifest schema version 1 is supported and
+frozen.* That line, and the commit that introduced it, are the durable record.
+
+### What immutable means
+
+It means the file, not merely its behavior. After acceptance,
+`contracts/package-manifest.schema.json` as it stands is **byte-for-byte
+immutable**:
+
+- no edits, including to a `description` or `$comment`. Wording corrections
+  belong in this ADR or in the surrounding documentation, which are free to
+  change;
+- any change affecting validation publishes another schema version;
+- a later version is a new file. Version 1 is never overwritten to become
+  version 2.
+
+The narrower reading -- immutable only in the set of documents it accepts --
+would permit description edits to a supported contract, and a consumer that
+pinned a file digest could not tell an editorial change from a substantive one.
+The stricter rule costs nothing here, because prose has somewhere else to live.
+
+Validation therefore dispatches on the manifest's declared `schemaVersion` rather
+than assuming the newest. Preserving a working version 1 is an acceptance
 criterion for Increment 2, not a refactor to be done afterwards.
 
 Increment 2 introduces installer type, install arguments, and the bounded

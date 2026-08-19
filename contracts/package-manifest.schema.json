@@ -11,7 +11,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "description": "Contract version. Incremented when a change is not backward compatible.",
+      "description": "Contract version. Incremented by any change to the set of documents this schema accepts, in either direction. See ADR 1.",
       "enum": [
         1
       ]

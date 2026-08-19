@@ -9,8 +9,12 @@ deterministic, testable, auditable, maintainable, secure, and understandable.
 
 ## Status
 
-**Increment 1 — manifest contract and source integrity.** The host-side path is
-implemented: manifests are validated against a committed schema, sources are
+**Increment 1 complete. Package manifest schema version 1 is supported and
+frozen.** From this point, `contracts/package-manifest.schema.json` is
+byte-for-byte immutable and any validation change publishes a new schema
+version — see [ADR 1](docs/decisions/0001-package-manifest-serialization.md).
+
+The host-side path is implemented: manifests are validated against a committed schema, sources are
 resolved under a confined root, staged, and verified against their expected
 SHA-256. No image is built and nothing is provisioned yet.
 
@@ -26,7 +30,7 @@ What exists today:
 | Solution charter and architecture direction | documented |
 | Agent operating rules and glossary | documented |
 | Public-boundary, secret, Markdown, and shell checks | enforced in CI |
-| Package manifest contract | schema defined, validated in CI |
+| Package manifest contract | schema version 1 supported and frozen |
 | Source qualification and integrity verification | host-side path implemented |
 | Packer image construction and sealing | not started |
 | Terraform and Citrix MCS provisioning | not started |

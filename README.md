@@ -109,11 +109,11 @@ tests/test-public-boundary.sh
 shellcheck scripts/ci/*.sh scripts/hooks/* tests/*.sh
 ```
 
-`gitleaks` is not required to be installed for the other checks to run. Install
-it locally with `brew install gitleaks`, or rely on the CI job. Likewise
-`brew install shellcheck`. Note that
-`gitleaks detect` is the deprecated spelling; `gitleaks git` and `gitleaks dir`
-are current.
+`gitleaks` is optional locally — secret scanning is gated by the CI **Secret
+scan** job. Install it with `brew install gitleaks` if you want the faster
+feedback; note that `gitleaks detect` is the deprecated spelling, and `gitleaks
+git` and `gitleaks dir` are current. `shellcheck` also needs a local install
+(`brew install shellcheck`); the remaining checks need only `git` and `npx`.
 
 ### Local hooks
 

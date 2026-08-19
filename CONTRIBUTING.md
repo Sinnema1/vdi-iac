@@ -65,7 +65,7 @@ Two habits make this durable:
 
 ## Validation
 
-Run the cheapest relevant checks first, and all of them before opening a pull
+Run the cheapest relevant checks first, and all of these before opening a pull
 request:
 
 ```bash
@@ -73,20 +73,28 @@ scripts/ci/check-public-boundary.sh
 ```
 
 ```bash
-npx --yes markdownlint-cli2@0.23.2 "**/*.md"
-```
-
-```bash
-gitleaks git -v --redact .
-```
-
-```bash
 tests/test-public-boundary.sh
+```
+
+```bash
+npx --yes markdownlint-cli2@0.23.2 "**/*.md"
 ```
 
 ```bash
 shellcheck scripts/ci/*.sh scripts/hooks/* tests/*.sh
 ```
+
+`shellcheck` needs a local install (`brew install shellcheck`). The others need
+only `git` and `npx`.
+
+Secret scanning is gated by the CI **Secret scan** job, not by a local run. If
+you have `gitleaks` installed, running it first is faster feedback:
+
+```bash
+gitleaks git -v --redact .
+```
+
+That command is optional. The CI job is the gate that must pass.
 
 The same checks run in CI. A stage is added to CI only when the repository
 contains the responsibility it validates — do not add a Packer or Terraform job

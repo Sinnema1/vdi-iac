@@ -289,8 +289,9 @@ Where it applies, it owns:
 - media availability to the build execution context;
 - media identity recorded in provenance.
 
-It does not own guest package installation, and media never travels the guest
-package-transfer path described in section 13.
+It does not own guest package installation. Media does not travel the guest
+package-staging path described in section 13, though it may be mounted or
+otherwise presented to the build VM by other means.
 
 ## 9. Primary System Flow
 
@@ -349,8 +350,8 @@ manifest that tries to describe both badly.
 | --- | --- | --- |
 | Described by | A manifest entry with an expected SHA-256 | A media reference qualified against a separately published checksum |
 | Typical size | Megabytes to hundreds of megabytes | Gigabytes |
-| Reaches the guest | Yes, through host staging and transfer | No |
-| Verified | Host-side, then re-verified in the guest | Once, before the build consumes it |
+| Guest package-staging path | Yes, staged host-side then transferred | No; media may instead be mounted or otherwise presented to the build VM |
+| Verified | Host-side, then re-verified in the guest | At acquisition, and again at each transfer or publication boundary it crosses |
 
 This section describes the package model. It does not assert that a build begins
 from installation media: consuming an existing image source is an equally valid
@@ -903,13 +904,13 @@ emerges. Consult README for which increment is actually current.
 - pre-generalization checks;
 - generalization, shutdown, and vSphere sealing;
 - immutable identity and provenance;
-- **PROPOSED** Content Library publication and reference resolution;
+- **PROPOSED** artifact publication and reference resolution, by Content Library or another mechanism;
 - **PROPOSED** installation-media qualification, if the base-image decision in
   section 36 selects a media-based path.
 
-Content Library belongs here rather than earlier because it is how sealed
-artifacts and any installation media are published and referenced. It has no
-role until there is a sealed artifact to publish.
+If Content Library is selected as the publication mechanism, it belongs here
+rather than earlier: it would have no role until there is a sealed artifact to
+publish. The mechanism itself is unresolved -- see section 36.
 
 ### Increment 4: Sealed-image validation
 
@@ -1005,6 +1006,8 @@ Keep these as explicit decisions until implementation evidence or requirements r
 
 - base-image strategy: constructing from installation media versus consuming an
   existing image source, and the qualification each path requires;
+- artifact publication and reference-resolution mechanism, including whether
+  Content Library is used;
 - package-source adapter and retention expectations;
 - canonical package-manifest serialization and minimum fields;
 - image identity and versioning convention;

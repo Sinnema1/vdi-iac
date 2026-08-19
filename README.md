@@ -25,7 +25,7 @@ What exists today:
 | Agent operating rules and glossary | documented |
 | Public-boundary, secret, Markdown, and shell checks | enforced in CI |
 | Package manifest contract | schema defined, validated in CI |
-| Source qualification and integrity verification | not started |
+| Source qualification and integrity verification | host-side path implemented |
 | Packer image construction and sealing | not started |
 | Terraform and Citrix MCS provisioning | not started |
 | Promotion, reconciliation, and retirement | not started |
@@ -109,6 +109,21 @@ tests/test-public-boundary.sh
 
 ```bash
 shellcheck scripts/ci/*.sh scripts/hooks/* tests/*.sh
+```
+
+```bash
+pwsh -NoProfile -Command "Invoke-Pester -Path source-qualification/tests -Output Detailed"
+```
+
+```bash
+pwsh -NoProfile -Command "Invoke-ScriptAnalyzer -Path ./source-qualification -Recurse -Severity Error,Warning"
+```
+
+`pwsh` needs a local install (`brew install powershell`), and the two modules
+come from the gallery:
+
+```bash
+pwsh -NoProfile -Command "Install-Module Pester,PSScriptAnalyzer -Scope CurrentUser -Force"
 ```
 
 `gitleaks` is optional locally — secret scanning is gated by the CI **Secret

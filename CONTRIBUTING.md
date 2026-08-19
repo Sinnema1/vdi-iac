@@ -84,7 +84,15 @@ npx --yes markdownlint-cli2@0.23.2 "**/*.md"
 shellcheck scripts/ci/*.sh scripts/hooks/* tests/*.sh
 ```
 
-`shellcheck` needs a local install (`brew install shellcheck`). The others need
+```bash
+pwsh -NoProfile -Command "Invoke-Pester -Path source-qualification/tests -Output Detailed"
+```
+
+```bash
+pwsh -NoProfile -Command "Invoke-ScriptAnalyzer -Path ./source-qualification -Recurse -Severity Error,Warning"
+```
+
+`shellcheck` and `pwsh` need a local install (`brew install shellcheck`). The others need
 only `git` and `npx`.
 
 Secret scanning is gated by the CI **Secret scan** job, not by a local run. If
@@ -103,7 +111,9 @@ before there is a Packer or Terraform file to check.
 If you change `scripts/ci/check-public-boundary.sh`, add a case to
 `tests/test-public-boundary.sh` that fails before your change and passes after
 it. A scanner without tests reports "passed" just as confidently when it is
-broken.
+broken. The same applies to the manifest schema: a schema demonstrated only to
+accept valid input has not been tested, so every rule needs a case proving it
+rejects.
 
 ## Engineering standards
 

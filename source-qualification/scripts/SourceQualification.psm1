@@ -19,6 +19,37 @@
 
 Set-StrictMode -Version 3.0
 
+function NewQualificationError {
+    <#
+    .SYNOPSIS
+        Builds an exception carrying a bounded reason code.
+
+    .NOTES
+        Module-internal. The name deliberately omits a dash: it constructs an
+        object rather than changing state, and an approved state-changing verb
+        would misdescribe it.
+
+    .DESCRIPTION
+        Structured evidence records the code, never the message. Messages contain
+        absolute paths and other runtime-derived values that may not be safe to
+        publish; codes are a closed set defined in this module.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Exception])]
+    param(
+        [Parameter(Mandatory)] [ValidateSet(
+            'source_root_not_found', 'source_not_found', 'source_outside_root',
+            'source_link_rejected', 'unsupported_scheme', 'integrity_mismatch',
+            'staging_failed', 'cleanup_failed')]
+        [string] $Code,
+        [Parameter(Mandatory)] [string] $Message
+    )
+    $exception = [System.Exception]::new($Message)
+    $exception.Data['ReasonCode'] = $Code
+    $exception
+}
+
+
 function Resolve-PackageSource {
     <#
     .SYNOPSIS
@@ -29,6 +60,24 @@ function Resolve-PackageSource {
         is confined to the source root: a reference that escapes it is rejected
         even if the schema pattern admitted it, because the schema cannot know
         what the root is.
+
+        Confinement is enforced twice, because a lexical check alone is not
+        sufficient. Normalizing the combined path rejects dot-segment traversal.
+        It does not resolve symbolic links, junctions, or other reparse points,
+        so a link placed beneath the root and pointing outside it would satisfy a
+        prefix comparison while reading an arbitrary file. Every existing
+        component beneath the root is therefore checked, and any link is
+        rejected rather than followed.
+
+        Links are refused rather than resolved-and-rechecked. A resolved target
+        can be replaced between the check and the copy, and refusing is the
+        behavior a reader can reason about without knowing the filesystem's
+        state.
+
+        Trust assumption: the source tree is under the control of the build
+        identity and does not change during qualification. This function cannot
+        close a time-of-check to time-of-use gap on its own; a source tree that
+        mutates mid-run is outside the model in section 12.
 
     .PARAMETER Reference
         The manifest source value, for example file://example-agent/1.2.3/agent.msi.
@@ -44,22 +93,46 @@ function Resolve-PackageSource {
     )
 
     if ($Reference -notmatch '^file://(?<relative>.+)$') {
-        throw "Unsupported source scheme in reference '$Reference'. Schema version 1 resolves only file://."
+        throw (NewQualificationError -Code 'unsupported_scheme' -Message "Unsupported source scheme in reference '$Reference'. Schema version 1 resolves only file://.")
     }
     $relative = $Matches['relative']
 
     if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
-        throw "Source root not found: $SourceRoot"
+        throw (NewQualificationError -Code 'source_root_not_found' -Message "Source root not found: $SourceRoot")
     }
-    $rootFull = (Resolve-Path -LiteralPath $SourceRoot).Path
 
-    # Combine then normalize, so traversal is caught by comparison rather than by
-    # pattern matching on the reference.
+    # Canonicalize the root itself. The root may legitimately be reached through
+    # a link; what must not happen is a link *beneath* it escaping containment.
+    $rootItem = Get-Item -LiteralPath $SourceRoot -Force
+    $rootFull = if ($rootItem.LinkTarget) {
+        [System.IO.Path]::GetFullPath($rootItem.ResolveLinkTarget($true).FullName)
+    }
+    else {
+        [System.IO.Path]::GetFullPath($rootItem.FullName)
+    }
+
+    # Combine then normalize, so dot-segment traversal is caught by comparison
+    # rather than by pattern matching on the reference.
     $candidate = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($rootFull, $relative))
 
-    $rootPrefix = $rootFull.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    $rootPrefix = $rootFull.TrimEnd($separator) + $separator
     if (-not $candidate.StartsWith($rootPrefix, [System.StringComparison]::Ordinal)) {
-        throw "Source reference '$Reference' resolves outside the source root."
+        throw (NewQualificationError -Code 'source_outside_root' -Message "Source reference '$Reference' resolves outside the source root.")
+    }
+
+    # Reject a reparse point anywhere in the chain beneath the root. A lexical
+    # prefix comparison cannot see one, and following it would read content the
+    # source root was supposed to bound.
+    $walked = $rootFull.TrimEnd($separator)
+    foreach ($segment in $candidate.Substring($rootPrefix.Length).Split($separator)) {
+        if ([string]::IsNullOrEmpty($segment)) { continue }
+        $walked = Join-Path $walked $segment
+        if (-not (Test-Path -LiteralPath $walked)) { continue }
+        $item = Get-Item -LiteralPath $walked -Force
+        if ($item.LinkTarget) {
+            throw (NewQualificationError -Code 'source_link_rejected' -Message "Source reference '$Reference' traverses a link at '$segment'. Links beneath the source root are not followed.")
+        }
     }
 
     $candidate
@@ -82,7 +155,7 @@ function Copy-PackageToStaging {
     )
 
     if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
-        throw "Source file not found: $SourcePath"
+        throw (NewQualificationError -Code 'source_not_found' -Message "Source file not found: $SourcePath")
     }
     if (-not (Test-Path -LiteralPath $StagingDirectory -PathType Container)) {
         $null = New-Item -ItemType Directory -Path $StagingDirectory -Force
@@ -113,7 +186,7 @@ function Test-PackageIntegrity {
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "File not found for integrity check: $Path"
+        throw (NewQualificationError -Code 'source_not_found' -Message "File not found for integrity check: $Path")
     }
 
     $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()

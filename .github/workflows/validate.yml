@@ -62,8 +62,15 @@ jobs:
         run: npx --yes markdownlint-cli2@0.23.2 "**/*.md"
 
   powershell:
-    name: PowerShell analysis and tests
-    runs-on: ubuntu-latest
+    # Path confinement depends on filesystem semantics that differ between
+    # platforms: separators, case sensitivity, and reparse points. Windows is
+    # the target platform for the guest side, so the suite runs on both.
+    name: PowerShell analysis and tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install modules

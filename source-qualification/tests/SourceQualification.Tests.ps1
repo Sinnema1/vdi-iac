@@ -9,6 +9,24 @@
     expected hash from the artifact being checked -- see section 12.
 #>
 
+# Evaluated at discovery time, not inside BeforeAll: Pester resolves -Skip
+# conditions while discovering tests, which happens before BeforeAll runs. A
+# probe placed in BeforeAll is still $null when the condition is evaluated, and
+# every link test silently skips.
+#
+# Link creation is unprivileged on Linux and macOS; on Windows it needs
+# Developer Mode or elevation.
+$script:LinksSupported = $(
+    $probe = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+    $null = New-Item -ItemType Directory -Path $probe -Force
+    try {
+        $null = New-Item -ItemType SymbolicLink -Path (Join-Path $probe 'probe-link') -Target $probe -ErrorAction Stop
+        $true
+    }
+    catch { $false }
+    finally { Remove-Item -LiteralPath $probe -Recurse -Force -ErrorAction SilentlyContinue }
+)
+
 BeforeAll {
     $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
     $scripts = Join-Path $script:RepoRoot 'source-qualification' 'scripts'
@@ -33,6 +51,7 @@ BeforeAll {
     }
 
     function Get-Sha { param([string] $Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+
 
     function NewManifestObject {
         param([array] $Packages)
@@ -59,6 +78,69 @@ Describe 'Resolve-PackageSource' {
         $root = NewSourceTree @{ 'agent/1.0/agent.msi' = 'content' }
         { Resolve-PackageSource -Reference 'https://example.invalid/agent.msi' -SourceRoot $root } |
             Should -Throw '*Unsupported source scheme*'
+    }
+
+    It 'rejects a directory link that points outside the source root' -Skip:(-not $script:LinksSupported) {
+        $base = NewTempDir
+        $root = Join-Path $base 'src'
+        $outside = Join-Path $base 'outside'
+        $null = New-Item -ItemType Directory -Path $root, $outside -Force
+        Set-Content -LiteralPath (Join-Path $outside 'secret.bin') -Value 'outside content' -NoNewline
+        $null = New-Item -ItemType SymbolicLink -Path (Join-Path $root 'link') -Target $outside
+
+        { Resolve-PackageSource -Reference 'file://link/secret.bin' -SourceRoot $root } |
+            Should -Throw '*traverses a link*'
+    }
+
+    It 'rejects a file link that points outside the source root' -Skip:(-not $script:LinksSupported) {
+        $base = NewTempDir
+        $root = Join-Path $base 'src'
+        $outside = Join-Path $base 'outside'
+        $null = New-Item -ItemType Directory -Path $root, $outside -Force
+        $target = Join-Path $outside 'secret.bin'
+        Set-Content -LiteralPath $target -Value 'outside content' -NoNewline
+        $null = New-Item -ItemType SymbolicLink -Path (Join-Path $root 'agent.msi') -Target $target
+
+        { Resolve-PackageSource -Reference 'file://agent.msi' -SourceRoot $root } |
+            Should -Throw '*traverses a link*'
+    }
+
+    It 'rejects a link nested deeper in the chain' -Skip:(-not $script:LinksSupported) {
+        $base = NewTempDir
+        $root = Join-Path $base 'src'
+        $outside = Join-Path $base 'outside'
+        $null = New-Item -ItemType Directory -Path (Join-Path $root 'vendor'), $outside -Force
+        Set-Content -LiteralPath (Join-Path $outside 'secret.bin') -Value 'outside content' -NoNewline
+        $null = New-Item -ItemType SymbolicLink -Path (Join-Path $root 'vendor' 'link') -Target $outside
+
+        { Resolve-PackageSource -Reference 'file://vendor/link/secret.bin' -SourceRoot $root } |
+            Should -Throw '*traverses a link*'
+    }
+
+    It 'still resolves a real file when the source root itself is reached through a link' -Skip:(-not $script:LinksSupported) {
+        $base = NewTempDir
+        $real = Join-Path $base 'real'
+        $null = New-Item -ItemType Directory -Path (Join-Path $real 'agent' '1.0') -Force
+        Set-Content -LiteralPath (Join-Path $real 'agent' '1.0' 'agent.msi') -Value 'content' -NoNewline
+        $linkedRoot = Join-Path $base 'linked-root'
+        $null = New-Item -ItemType SymbolicLink -Path $linkedRoot -Target $real
+
+        $resolved = Resolve-PackageSource -Reference 'file://agent/1.0/agent.msi' -SourceRoot $linkedRoot
+        Test-Path -LiteralPath $resolved | Should -BeTrue
+    }
+
+    It 'carries a bounded reason code on every rejection' {
+        $root = NewSourceTree @{ 'a/1/a.msi' = 'content' }
+        $codes = @{}
+        foreach ($case in @(
+            @{ ref = 'file://../escape.msi';               expect = 'source_outside_root' }
+            @{ ref = 'https://example.invalid/agent.msi';  expect = 'unsupported_scheme' }
+        )) {
+            try { $null = Resolve-PackageSource -Reference $case.ref -SourceRoot $root }
+            catch { $codes[$case.expect] = $_.Exception.Data['ReasonCode'] }
+        }
+        $codes['source_outside_root'] | Should -Be 'source_outside_root'
+        $codes['unsupported_scheme'] | Should -Be 'unsupported_scheme'
     }
 
     It 'throws when the source root does not exist' {

@@ -112,8 +112,15 @@ Describe 'Import-PackageManifest' {
         }
 
         It 'rejects the version range or wildcard <version>' -ForEach @(
-            @{ version = '1.*' }, @{ version = '>=1.0' }, @{ version = '~1.2' }
-            @{ version = '1.x' }, @{ version = '^2.0' }
+            @{ version = '1.*' },   @{ version = '>=1.0' }, @{ version = '~1.2' }
+            @{ version = '^2.0' }
+            # A whole segment of x or X, in any position. Rejecting only a
+            # trailing .x left 'x', '1.x.0' and '1.2.x+meta' accepted while the
+            # contract claimed wildcards were refused.
+            @{ version = 'x' },     @{ version = 'X' }
+            @{ version = '1.x' },   @{ version = 'x.1' }
+            @{ version = '1.x.0' }, @{ version = '1.X.0' }
+            @{ version = '1.2.x+meta' }, @{ version = '1-x' }
         ) {
             $path = NewManifestFile -Override @{ version = $version }
             { Import-PackageManifest -Path $path } | Should -Throw '*schema validation*'
@@ -121,6 +128,9 @@ Describe 'Import-PackageManifest' {
 
         It 'accepts the exact version <version>' -ForEach @(
             @{ version = '1.2.3' }, @{ version = '2026.08.1' }, @{ version = '1.0.0-rc.1' }
+            # A segment that merely starts with x is a real version component,
+            # not a wildcard, and must survive the rule above.
+            @{ version = '1.0.0-x64' }, @{ version = '10.0.19045' }
         ) {
             $path = NewManifestFile -Override @{ version = $version }
             { Import-PackageManifest -Path $path } | Should -Not -Throw

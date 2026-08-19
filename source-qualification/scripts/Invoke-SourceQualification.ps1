@@ -39,7 +39,8 @@
 
 .NOTES
     Exit codes:
-      0  every required package qualified and staging was cleaned up
+      0  every required package qualified, and staging was removed or
+         explicitly retained with -KeepStaging
       1  at least one required package failed
       2  the run could not complete: an invalid manifest, an unusable source
          root, staging that could not be removed, or evidence that could not

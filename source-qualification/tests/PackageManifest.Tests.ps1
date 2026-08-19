@@ -80,14 +80,14 @@ Describe 'Import-PackageManifest' {
             { Import-PackageManifest -Path $path } | Should -Throw
         }
 
-        It 'throws when the mapped schema file is missing' {
-            # The parameter now names a directory, not a file: the schema itself
-            # is chosen by the version map so a caller cannot select one.
-            $empty = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
-            $null = New-Item -ItemType Directory -Path $empty -Force
-            $path = NewManifestFile
-            { Import-PackageManifest -Path $path -SchemaDirectory $empty } |
-                Should -Throw '*schema not found*'
+        It 'exposes no way for a caller to choose the schema' {
+            # A caller-supplied schema path or directory is a bypass: pairing an
+            # invalid manifest with a permissive schema makes it validate. The
+            # resolver is module-internal, and this asserts the public surface
+            # cannot reach it.
+            $parameters = (Get-Command Import-PackageManifest).Parameters.Keys
+            $parameters | Should -Not -Contain 'SchemaPath'
+            $parameters | Should -Not -Contain 'SchemaDirectory'
         }
     }
 

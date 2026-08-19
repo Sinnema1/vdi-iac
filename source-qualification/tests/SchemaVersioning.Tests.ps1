@@ -131,8 +131,22 @@ Describe 'version dispatch' {
     }
 
     It 'throws when the mapped schema file is absent' {
-        $path = WriteManifest @{ schemaVersion = 2; packages = @(BaseV2Package) }
-        { Import-PackageManifest -Path $path -SchemaDirectory (NewTempDir) } | Should -Throw '*schema not found*'
+        # Exercised through the module-internal resolver, because the public
+        # function deliberately offers no way to point at another directory.
+        $empty = NewTempDir
+        InModuleScope PackageManifest -Parameters @{ Directory = $empty } {
+            param($Directory)
+            # Bound outside the assertion scriptblock so static analysis can see
+            # the parameter is used; it cannot look inside a nested block.
+            $target = $Directory
+            { ResolveSchemaPath -Version 2 -Directory $target } | Should -Throw '*schema not found*'
+        }
+    }
+
+    It 'refuses an unknown version at the resolver, not only at the caller' {
+        InModuleScope PackageManifest {
+            { ResolveSchemaPath -Version 99 -Directory '.' } | Should -Throw '*unsupported schemaVersion 99*'
+        }
     }
 }
 
@@ -222,6 +236,25 @@ Describe 'schema version 2 rejections' {
     ) {
         $check = @{ id = 'a'; kind = 'file-exists'; root = 'programFiles'; relativePath = $path }
         { Import-PackageManifest -Path (V2Manifest -Validation @($check)) } | Should -Throw '*schema validation*'
+    }
+
+    It 'accepts version component <version>, the top of the permitted range' -ForEach @(
+        @{ version = '65535' }, @{ version = '65535.65535.65535.65535' }, @{ version = '0' }
+    ) {
+        $check = @{ id = 'a'; kind = 'file-version'; root = 'programFiles'
+                    relativePath = 'Example/a.exe'; versionField = 'file'; expectedVersion = $version }
+        { Import-PackageManifest -Path (V2Manifest -Validation @($check)) } | Should -Not -Throw
+    }
+
+    It 'rejects version component <version>, above the permitted range' -ForEach @(
+        @{ version = '65536' }, @{ version = '65536.0' }, @{ version = '1.2.99999' }
+    ) {
+        # The schema pattern bounds shape at five digits, so 65536 satisfies it.
+        # ADR 4 bounds the value at 65535, which is a semantic check.
+        $check = @{ id = 'a'; kind = 'file-version'; root = 'programFiles'
+                    relativePath = 'Example/a.exe'; versionField = 'file'; expectedVersion = $version }
+        { Import-PackageManifest -Path (V2Manifest -Validation @($check)) } |
+            Should -Throw '*outside the permitted range 0 to 65535*'
     }
 
     It 'rejects file-version without an explicit versionField' {

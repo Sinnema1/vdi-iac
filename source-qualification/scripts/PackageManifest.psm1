@@ -34,6 +34,42 @@ $script:ExecutorOwnedMsiProperties = @('REBOOT', 'REBOOTPROMPT', 'TRANSFORMS', '
 # from Packer, so this code is never a success or restart-required signal.
 $script:ForbiddenExitCode = 1641
 
+function ResolveSchemaPath {
+    <#
+    .SYNOPSIS
+        Maps a declared schema version to a committed schema file.
+
+    .DESCRIPTION
+        Module-internal and deliberately not exported. Import-PackageManifest
+        always passes the repository's own contract directory, so a caller cannot
+        substitute a permissive schema and have an invalid manifest accepted.
+
+        The directory is a parameter only so tests can exercise the missing-file
+        path. That seam lives here, behind the module boundary, rather than on
+        the public interface where it would be reachable in production.
+
+        The name omits a dash: it resolves a value rather than changing state,
+        and an approved state-changing verb would misdescribe it.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [int] $Version,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Directory
+    )
+
+    if (-not $script:SchemaFileByVersion.ContainsKey($Version)) {
+        $known = ($script:SchemaFileByVersion.Keys | Sort-Object) -join ', '
+        throw "Manifest declares unsupported schemaVersion $Version. Supported versions: $known"
+    }
+
+    $path = Join-Path $Directory $script:SchemaFileByVersion[$Version]
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Manifest schema not found: $path"
+    }
+    $path
+}
+
 function Import-PackageManifest {
     <#
     .SYNOPSIS
@@ -42,9 +78,6 @@ function Import-PackageManifest {
     .PARAMETER Path
         Path to the manifest file.
 
-    .PARAMETER SchemaDirectory
-        Directory holding the committed schemas. Defaults to contracts/. The
-        schema file itself is chosen by the version map, never by the caller.
 
     .OUTPUTS
         A PSCustomObject with SchemaVersion and Packages, the latter sorted by
@@ -55,11 +88,7 @@ function Import-PackageManifest {
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [string] $Path,
-
-        [Parameter()]
-        [ValidateNotNullOrEmpty()]
-        [string] $SchemaDirectory = $script:ContractDirectory
+        [string] $Path
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -90,15 +119,7 @@ function Import-PackageManifest {
     }
     $declared = [int] $declared
 
-    if (-not $script:SchemaFileByVersion.ContainsKey($declared)) {
-        $known = ($script:SchemaFileByVersion.Keys | Sort-Object) -join ', '
-        throw "Manifest declares unsupported schemaVersion $declared. Supported versions: $known -- $Path"
-    }
-
-    $schemaPath = Join-Path $SchemaDirectory $script:SchemaFileByVersion[$declared]
-    if (-not (Test-Path -LiteralPath $schemaPath -PathType Leaf)) {
-        throw "Manifest schema not found: $schemaPath"
-    }
+    $schemaPath = ResolveSchemaPath -Version $declared -Directory $script:ContractDirectory
 
     # Stage one: structure, types, and value patterns.
     #
@@ -213,6 +234,20 @@ function Assert-PackageInstallerConsistency {
             $overlap = @($success | Where-Object { $restart -contains $_ })
             if ($overlap) {
                 throw "$label lists exit code(s) $($overlap -join ', ') as both success and restart-required, so the outcome is ambiguous -- $Path"
+            }
+        }
+
+        # ADR 4 bounds each version component at 65535. The schema pattern
+        # constrains shape only -- it admits up to five digits, so 65536 passes
+        # it -- and widening the regex to express the real bound would make it
+        # unreadable for no gain. The range is checked here instead.
+        foreach ($check in $package.validation) {
+            if ($check.kind -ne 'file-version') { continue }
+            foreach ($component in $check.expectedVersion.Split('.')) {
+                $value = 0
+                if (-not [int]::TryParse($component, [ref] $value) -or $value -lt 0 -or $value -gt 65535) {
+                    throw "$label check '$($check.id)' has version component '$component' outside the permitted range 0 to 65535 -- $Path"
+                }
             }
         }
 

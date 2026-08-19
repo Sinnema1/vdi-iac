@@ -14,23 +14,75 @@ Before changing code:
 4. Explain how the increment will be validated.
 5. Avoid speculative scaffolding for later phases.
 
+### 1.1 Current Implementation Maturity
+
+Describe capability in general terms only. This document states intended
+direction; it is not evidence that a capability exists.
+
+`README.md` is the canonical implementation-status summary. It is maintained by
+hand, and it is the single place where the state of each area is enumerated. Do
+not restate that enumeration here, or in any other document, because two
+manually maintained lists diverge and the stale one is read first.
+
+Continuous integration validates the repository's own checks. It does not prove
+that any status claim is accurate: a green run means the checks passed, not that
+the summary describing the repository is current. When the two disagree, inspect
+the repository.
+
+Express maturity as a capability statement rather than a milestone claim. "The
+package manifest contract is not yet defined" is useful; "phase one is complete"
+asserts something no check can confirm.
+
 ## 2. Public Repository Boundary
 
 This is a generic, public reference implementation.
 
 Repository content must not include:
 
-- names of people, employers, clients, business units, teams, or private projects;
-- private repository names or links;
+- names of individuals or organizations;
+- non-public repository names or links;
 - internal hostnames, domains, IP addresses, account identifiers, tenant identifiers, or network topology;
 - credentials, secrets, certificates, tokens, or private keys;
 - proprietary source code, scripts, installer binaries, documents, screenshots, or architecture artifacts;
-- private ticket numbers, change records, incident details, or operational data;
-- values copied from a non-public environment, even when they appear harmless.
+- non-public ticket numbers, change records, incident details, or operational data;
+- values copied from any non-public source, even when they appear harmless.
 
 Use neutral language, fictional identifiers, placeholder addresses, `.example` files, and synthetic test data. Examples should describe only the technologies and architecture patterns required to understand the solution.
 
-If potentially private information is supplied during a task, do not reproduce it in the repository. Replace it with an obviously fictional placeholder and call out the substitution.
+If potentially non-public information is supplied during a task, do not reproduce it in the repository. Replace it with an obviously fictional placeholder and call out the substitution.
+
+### 2.1 Public-Safe Technical Detail
+
+The constraint above prohibits specific values. This subsection governs how much
+technical detail is publishable once those values are removed.
+
+The test is derivability. Content belongs here when it could be written
+independently from public vendor documentation and general engineering
+knowledge, and when it makes complete sense to a reader who knows nothing beyond
+this repository. Substantive code, contracts, pipelines, and tests are all in
+scope on those terms. Depth is not the problem; provenance is.
+
+Some categories reveal origin even after names are stripped, because their shape
+is the identifying detail:
+
+| Class | Publishable | Not publishable |
+| --- | --- | --- |
+| Identifiers | Fictional names, reserved example domains, placeholder addresses | Real hostnames, domains, addresses, account or tenant identifiers |
+| Naming conventions | Generic, self-evident schemes invented for this repository | Conventions carrying meaning assigned elsewhere |
+| Structure | Patterns explaining an architectural boundary | Exact scale, deployment layout, or approval structure copied from elsewhere |
+| Process | Generic promotion, validation, and rollback models | Approval chains, change procedures, or operational history from elsewhere |
+| Artifacts | Synthetic fixtures and `.example` files | Configuration values copied from a non-public source |
+| Evidence | Illustrative output produced for this repository | Real logs, screenshots, or validation records |
+| Checksums | Checksums for publicly available artifacts | Identifiers, filenames, sizes, or fingerprints derived from non-public artifacts |
+
+A checksum for an artifact anyone can download is independently derivable and
+carries no information about where it was used. A checksum, filename, or byte
+length taken from a non-public artifact is a fingerprint, and remains one after
+every name around it has been replaced.
+
+Metadata is content. A directory name, a variable name, a branch name, and a
+commit message are all published, and none of them is covered by a check that
+reads only file contents.
 
 ## 3. Mission
 
@@ -81,7 +133,7 @@ The desired outcome is not maximum automation. It is a solution that is repeatab
 - a custom secrets platform, artifact platform, workflow engine, or policy engine;
 - speculative multi-cloud abstraction;
 - production-specific topology or configuration;
-- embedding private environment details into examples.
+- embedding non-public environment details into examples.
 
 ## 5. Architectural Principles
 
@@ -574,7 +626,7 @@ Apply these controls from the first increment:
 - short-lived credentials when supported;
 - checksum verification for all external binary inputs;
 - pinned tool and provider versions;
-- sanitized logs and failure messages;
+- redacted logs and failure messages;
 - temporary resource isolation and cleanup;
 - dependency and static analysis in CI;
 - review of Terraform plans before apply;

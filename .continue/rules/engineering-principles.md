@@ -8,12 +8,17 @@ alwaysApply: true
 
 ## Public repository boundary
 
-This repository is public. Never write names of people, employers, clients,
-business units, or private projects; internal hostnames, addresses, account or
-tenant identifiers, or network topology; credentials, tokens, or private keys;
-or any value copied from a non-public environment.
+This repository is public. Never write names of individuals or organizations;
+internal hostnames, addresses, account or tenant identifiers, or network
+topology; credentials, tokens, or private keys; or any value copied from a
+non-public source.
 
-If private information appears in a task, substitute an obviously fictional
+Naming conventions, exact scale, deployment structure, and approval processes
+reveal origin through their shape even after names are removed. Content belongs
+here only if it could be written independently from public vendor documentation
+and general engineering knowledge.
+
+If non-public information appears in a task, substitute an obviously fictional
 placeholder and say that you did.
 
 ## Scope

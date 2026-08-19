@@ -17,16 +17,16 @@ can tell what it does, why it exists, and how it fails."
 
 ## Public repository boundary
 
-Nothing in this repository may contain names of people, employers, clients,
-business units, or private projects; private repository names or links;
-internal hostnames, addresses, account or tenant identifiers, or network
-topology; credentials, certificates, tokens, or private keys; proprietary code,
-scripts, installer binaries, or documents; private ticket or incident data; or
-any value copied from a non-public environment.
+Nothing in this repository may contain names of individuals or organizations;
+non-public repository names or links; internal hostnames, addresses, account or
+tenant identifiers, or network topology; credentials, certificates, tokens, or
+private keys; proprietary code, scripts, installer binaries, or documents;
+non-public ticket or incident data; or any value copied from a non-public
+source.
 
-If potentially private information reaches you during a task, do not reproduce
-it here. Replace it with an obviously fictional placeholder and say plainly that
-you substituted it.
+If potentially non-public information reaches you during a task, do not
+reproduce it here. Replace it with an obviously fictional placeholder and say
+plainly that you substituted it.
 
 Two habits make this durable:
 

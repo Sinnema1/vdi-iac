@@ -65,11 +65,15 @@ post-provision validation.
 
 ## Public repository boundary
 
-This is a public repository. It must not contain names of people, employers,
-clients, business units, or private projects; internal hostnames, addresses,
-account or tenant identifiers, or network topology; credentials or private
-keys; proprietary code or documents; or values copied from a non-public
-environment, even when they appear harmless.
+This is a public repository. It must not contain names of individuals or
+organizations; internal hostnames, addresses, account or tenant identifiers, or
+network topology; credentials or private keys; proprietary code or documents; or
+values copied from any non-public source, even when they appear harmless.
+
+Beyond specific values, some categories reveal origin through their shape alone
+— naming conventions, exact scale, deployment structure, and approval processes
+among them. Section 2.1 of [Agent_Handoff.md](Agent_Handoff.md) classifies what
+is publishable.
 
 Use neutral language, fictional identifiers, placeholder addresses, `.example`
 files, and synthetic test data. The full constraint is in

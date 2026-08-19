@@ -2,10 +2,9 @@
 #
 # Applies the public-boundary rules to the commit message.
 #
-# Commit messages are published content. The original exposure in this
-# repository's history was in a commit message, not in file content, and neither
-# CI job covers messages -- gitleaks scans blobs and the boundary check scans
-# tracked files. This hook closes that path.
+# Commit messages are published content, and are covered by neither CI check:
+# the secret scan reads blobs and the boundary check reads files. Neither reads
+# messages. This hook closes that path.
 #
 # It also picks up the untracked .public-boundary-denylist, so the words that
 # must never appear are enforced locally at the moment they would be written.

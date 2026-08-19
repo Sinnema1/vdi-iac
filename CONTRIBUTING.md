@@ -121,6 +121,31 @@ The same checks run in CI. A stage is added to CI only when the repository
 contains the responsibility it validates — do not add a Packer or Terraform job
 before there is a Packer or Terraform file to check.
 
+### The scanner has no suppression mechanism, on purpose
+
+A per-line exception marker was proposed and rejected. It becomes a committed
+bypass: it does not work naturally inside JSON, and a marker suppressing one
+finding on a line also suppresses a genuine prohibited value sitting beside it.
+
+Two false positives are known and expected to recur: a four-component file
+version reads as an address literal, and a JSON-escaped Windows path reads as a
+UNC prefix. Neither is a reason to weaken the scanner. Runtime-generated evidence
+is not tracked content, and bundle paths are relative, so most of this never
+reaches a committed file. Where an example collides, choose a different example.
+
+If a tracked literal ever proves genuinely unavoidable, the order is:
+
+1. make a narrow rule-specific correction — for example, distinguishing a
+   JSON-escaped drive path from a UNC prefix — and keep the mixed-value
+   regression tests that prove a prohibited value beside a permitted one is still
+   reported;
+2. only as a last resort, add a sidecar exception keyed to an exact repository
+   path, rule, line, exact-match digest of the line, and a written rationale;
+3. never accept globs, stale entries, exceptions to the secret or denylist rules,
+   or suppression of other matches on the same line;
+4. have the pre-commit hook evaluate the **staged** sidecar rather than the
+   working-tree copy, or the exception file becomes its own bypass.
+
 If you change `scripts/ci/check-public-boundary.sh`, add a case to
 `tests/test-public-boundary.sh` that fails before your change and passes after
 it. A scanner without tests reports "passed" just as confidently when it is

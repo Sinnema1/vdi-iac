@@ -35,6 +35,31 @@ Increment 1 shape is retrospectively version 1. Tests assert the literal value,
 not merely that the field is present: a test checking presence passes against a
 document still emitting the old number.
 
+### One envelope, three kinds
+
+Increment 2 produces three differently shaped documents -- host qualification,
+build orchestration, and guest provisioning. Stamping all three
+`ResultSchemaVersion = 2` would claim a shape they do not share, and a consumer
+would have to guess which it holds from whichever fields happen to be present.
+
+They share an envelope and declare their kind:
+
+```json
+{
+  "ResultSchemaVersion": 2,
+  "ResultKind": "guest-provisioning",
+  "RunId": "...",
+  "ManifestSchemaVersion": 2,
+  "Payload": {}
+}
+```
+
+`ResultKind` is required and closed: `source-qualification`,
+`build-orchestration`, `guest-provisioning`. Each has its own payload schema,
+selected by the discriminator rather than inferred. The envelope version covers
+the envelope: a payload shape changing is a payload schema change, and only a
+change to the envelope itself moves `ResultSchemaVersion`.
+
 ### One run identity, supplied by the parent
 
 A single run identifier flows from the orchestrator through host qualification,
@@ -51,6 +76,21 @@ names staging directories on both host and guest, so an arbitrary caller-supplie
 string is a path-traversal vector reaching a directory that is later deleted
 recursively. Validation happens before the value is interpolated into any path.
 
+### Syntax is not uniqueness
+
+A well-formed UUID can still be one already used -- a retried run, a copy-pasted
+value, a caller with a fixed identifier in a script. Reuse points two runs at one
+directory, and that directory is removed recursively at the end.
+
+Run directories are therefore **reserved atomically**: created with a
+create-or-fail operation, never create-if-missing. An existing directory is not
+adopted; the run aborts with `run_id_collision` before anything is staged. This
+applies on the host and in the guest.
+
+The collision test lands before recursive cleanup does, in that order. Once
+cleanup exists, a test that gets collision handling wrong deletes a directory it
+does not own.
+
 ### What evidence may not contain
 
 Extending the bounded-code rule from Increment 1, evidence never carries
@@ -62,20 +102,40 @@ someone wants to see the command. They are manifest-supplied and may encode
 install locations, property values, or a credential a manifest author should not
 have put there but might.
 
-They are therefore excluded from **every** log, not diverted into a restricted
-one. A restricted log is still a file on a build host that gets collected,
-archived, and attached to a ticket, and "restricted" is a property of intent
-rather than of the artifact. What may be logged about an installer invocation is
-bounded metadata only:
+They are therefore excluded from **every** artifact this repository produces, not
+diverted into a restricted one. A restricted log is still a file on a build host
+that gets collected, archived, and attached to a ticket, and "restricted"
+describes intent rather than the artifact.
+
+What may be recorded about an installer invocation is bounded metadata only:
 
 - package identifier and version;
 - argument or property **count**, never contents;
 - outcome and reason code;
 - duration and exit code.
 
+### What this guarantee covers, and what it cannot
+
+ADR 4 has the executor pass a log path to Windows Installer, and an MSI log
+records property values. A third-party EXE may echo its arguments to stdout or
+write its own log wherever it likes. A promise to control every file an installer
+creates would be unkeepable, so the boundary is drawn where it can be held:
+
+- **guaranteed** — repository-produced evidence, wrapper logs, and Packer output
+  never contain argument or property contents. Raw installer stdout and stderr
+  are suppressed rather than relayed, since relaying them would launder
+  third-party output into our own;
+- **guaranteed** — installer-generated diagnostic logs, including the MSI log,
+  are not collected, retrieved, or published by default. They stay in guest
+  staging and are removed with it;
+- **not guaranteed, and stated as a rule instead** — what a third-party installer
+  writes to disk. Manifests must never use arguments or properties to carry a
+  secret. That is a constraint on manifest authors, enforced by review rather
+  than by code, and it is written down because the alternative is an unkeepable
+  promise.
+
 Reproducing a failure means reading the manifest, which is version controlled and
-already subject to the content policy. Nothing is lost that the manifest does not
-already provide.
+already subject to the content policy.
 
 ## Alternatives considered
 

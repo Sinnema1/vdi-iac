@@ -104,10 +104,17 @@ correctness and a safety problem, not a formatting preference.
 merely a coding preference — it is a runtime requirement.
 
 Packer's `powershell` provisioner runs `powershell.exe` by default. The guest
-phase therefore sets `use_pwsh = true` and a preflight step asserts a supported
-PowerShell 7 major version before anything executes, failing closed if it is
-absent. Installing PowerShell is not the provisioning phase's job; confirming it
-is present is.
+phase therefore sets `use_pwsh = true` and a preflight step asserts the runtime
+before anything executes, failing closed if it is absent.
+
+The assertion is a **minimum of 7.4.0**, not "PowerShell 7". A major-version
+check accepts releases that have reached end of support, which is the opposite of
+pinning: the floor exists to guarantee a runtime that still receives fixes. The
+preflight records the observed version in evidence, so a run is attributable to
+the runtime that produced it.
+
+Installing PowerShell is not the provisioning phase's job; confirming it is
+present, and recent enough, is.
 
 That leaves an obligation for Increment 3: the image build must guarantee the
 runtime the guest phase depends on. Whether it arrives as a pinned package in

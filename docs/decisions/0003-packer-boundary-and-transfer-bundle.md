@@ -96,26 +96,42 @@ Two distinct paths, because two distinct things are being handled:
 
 **A logical package failure** — an integrity mismatch, a non-success exit code, a
 failed validation — is an expected outcome the run is designed to report. The
-guest phase writes bounded evidence and returns a status Packer accepts, so the
-subsequent retrieval and cleanup provisioners run normally. A final evaluator
-step reads the retrieved evidence and fails the build. The build still fails; it
-fails after the evidence is safely on the host rather than instead of collecting
-it.
+guest wrapper writes bounded evidence and exits with either `0` or a single
+deliberately chosen logical-result code, and the provisioner lists that code in
+`valid_exit_codes`. Packer treats the step as successful, the retrieval and
+cleanup provisioners run normally, and a final evaluator reads the retrieved
+evidence and fails the build. The build still fails; it fails after the evidence
+is on the host rather than instead of collecting it.
 
 **A genuine transport or provisioner failure** — a broken communicator, a
 timeout, an upload that could not complete — cannot be reported this way, because
-the channel needed to report it is the thing that failed. These use an
-`error-cleanup-provisioner`, which Packer runs after a provisioning failure and
-before the instance is shut down, plus host-side `finally` handling for anything
-staged on the host.
+the channel needed to report it is the thing that failed. These stay failures.
+Cleanup then depends on an `error-cleanup-provisioner`, which requires the build
+to be invoked as:
+
+```text
+packer build -on-error=run-cleanup-provisioner
+```
+
+Declaring the block is not sufficient. Under the default `-on-error=cleanup` the
+error-cleanup-provisioner does not run, so a harness that declares one and
+invokes `packer build` plainly has cleanup that never executes — the failure mode
+this section exists to prevent.
+
+Host-side `finally` handling covers anything staged on the host, independently of
+what the guest side managed.
 
 Cleanup in this second path is recorded as **attempted**, never as guaranteed. If
-the communicator is gone, guest staging cannot be removed, and evidence that
-claims otherwise would be false.
+the communicator is gone, guest staging cannot be removed, and evidence claiming
+otherwise would be false.
 
-`continue_on_error` is used only on the guest-execution provisioner and only for
-the first path. It is not a general setting: applied broadly it would let a
-transport failure masquerade as a completed run.
+`continue_on_error` is deliberately **not** used. It was in an earlier draft of
+this record, to let logical failures pass through while transport failures
+failed. It cannot make that distinction: it applies to any failure of the
+provisioner it is set on, so a timeout, a failed script upload, or a lost
+communicator would continue into the unconditional restart with the guest in an
+unknown state. `valid_exit_codes` distinguishes by what the wrapper deliberately
+returned, which is the distinction actually wanted.
 
 ### The verified-only transfer bundle
 
@@ -143,17 +159,39 @@ property map or EXE token array, timeout, restart policy, EXE exit-code policy,
 and the validation definitions. All of it is data the host already validated
 against schema version 2, copied rather than reinterpreted.
 
-Its own integrity is bound to the payload it describes:
+#### Establishing that the descriptor is the one the host sent
 
-- the descriptor is validated against a committed schema when the guest reads it,
-  so a malformed or tampered descriptor is refused before any installer runs;
-- each entry's expected hash is the value the guest verifies its payload against;
-- the host records a hash of the descriptor itself in host-side evidence, so a
-  descriptor altered in transit is detectable rather than merely unlikely.
+Schema validation proves a descriptor is well formed. It does not prove it is
+*ours*. An attacker able to modify the bundle in transit can rewrite the
+arguments, the validation definitions, and the expected payload hashes, then
+rewrite the payloads to match those hashes. Everything validates, everything
+verifies, and the guest installs whatever it was given.
 
-The guest trusts the descriptor only after that validation. It is untrusted input
-that arrived over a network, and the fact that this repository produced it is not
-something the guest can confirm.
+Recording the descriptor's digest in host-side evidence does not close this. It
+makes the substitution *visible to a later reader of host evidence*, after the
+guest has already executed. Detection after execution is not a control.
+
+The expected descriptor digest therefore reaches the guest **out of band**,
+through the provisioner's `environment_vars` rather than inside the bundle. That
+is the same channel that delivers the script itself: an attacker who can rewrite
+it is already executing arbitrary code in the guest, so the bundle is no longer
+the weak point.
+
+Order matters, and it is: read the raw descriptor bytes, hash them, compare
+against the out-of-band expected digest, and only then parse. Parsing first
+would mean acting on attacker-controlled structure before authenticating it.
+
+Both digests are recorded in guest evidence, expected and observed, so a
+mismatch is legible rather than merely fatal.
+
+The guest treats the descriptor as untrusted input that arrived over a network
+until that comparison succeeds. Nothing about the file itself tells the guest
+this repository produced it.
+
+Signing the descriptor would be stronger and is the natural successor. It needs
+a key, a distribution path, and a rotation story, none of which exist yet, and
+an out-of-band digest over a trusted channel closes the immediate hole without
+inventing a key-management design in this increment.
 
 Because a file can change between qualification and upload, the bundle is
 verified again at the transfer boundary. That is not the same as trusting a
@@ -199,3 +237,12 @@ changed after qualification, and it must show refusal **before** the installer
 executes. It must also show that evidence was retrieved and that cleanup was
 attempted on both host and guest, since a run that refuses content correctly but
 abandons it in the guest has only half worked.
+
+Two tampering cases are needed, not one, because they defeat different controls:
+
+- **payload altered, descriptor untouched** — the per-package hash comparison
+  refuses it;
+- **descriptor altered, payloads rewritten to match its new hashes** — only the
+  out-of-band digest comparison refuses it. This is the case that passes every
+  in-bundle check, and a suite testing only the first would report success while
+  the interesting attack goes unexercised.

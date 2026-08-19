@@ -43,7 +43,7 @@ differ and a single shape would have to be loose enough for both.
 ```json
 "installer": {
   "kind": "msi",
-  "properties": { "ALLUSERS": "1", "REBOOT": "ReallySuppress" },
+  "properties": { "ALLUSERS": "1" },
   "timeoutSeconds": 1800,
   "restartPolicy": "allow-deferred"
 }
@@ -52,11 +52,38 @@ differ and a single shape would have to be loose enough for both.
 The executor owns the command line entirely: it supplies the quiet and
 no-restart switches and the log path, and appends `NAME=value` for each
 property. A manifest cannot pass a switch at all, which is stricter and simpler
-than trying to enumerate the switches it may not pass.
+than enumerating the switches it may not pass.
 
-- property names match `^[A-Z][A-Z0-9_]{0,63}$`;
-- property values are strings, 1 to 512 characters, rejecting NUL, CR, and LF;
-- at most 32 properties.
+Property **names** are a closed allowlist, not a pattern. Version 2 accepts
+exactly:
+
+| Property | Purpose |
+| --- | --- |
+| `ALLUSERS` | per-machine versus per-user install |
+| `INSTALLDIR` | install location |
+| `INSTALLLOCATION` | install location, for packages using this spelling |
+| `TARGETDIR` | install root |
+| `APPDIR` | application directory |
+
+A name-shape pattern was the earlier draft and was wrong. Accepting any
+uppercase name admits properties that hand control back to the manifest, and two
+matter enough to name:
+
+- `REBOOT` controls restart behavior, which contradicts Packer owning the
+  restart boundary. An earlier version of this record used it in its own
+  example, which is how the gap was found;
+- `TRANSFORMS` makes Windows Installer apply a transform, and the value may
+  reference a path outside the bundle. It is a code-loading mechanism wearing the
+  costume of a property.
+
+Both are reserved, along with anything else outside the table, but the
+enforcement is the allowlist itself: reserving names is documentation of why
+notable ones are absent, not a second denylist to keep current. A package needing
+a property this table does not carry is unsupported by version 2, and widening
+the table is version 3.
+
+Property **values** are strings, 1 to 512 characters, rejecting NUL, CR, and LF.
+At most 32 properties.
 
 **EXE** has no common convention, so it supplies tokens and declares its codes:
 
@@ -73,7 +100,12 @@ than trying to enumerate the switches it may not pass.
 - `arguments` holds 0 to 32 tokens, each 1 to 512 characters, rejecting NUL, CR,
   and LF, and passed individually rather than joined;
 - `success` holds 1 to 8 codes; `restartRequired` holds 0 to 8;
-- both are unique, disjoint from each other, and may never contain `1641`.
+- both are unique, disjoint from each other, and may never contain `1641`;
+- codes are **signed 32-bit** integers, `-2147483648` to `2147483647`, compared
+  against the raw signed value the process returned. There is no unsigned
+  reinterpretation and no normalization: a vendor code published in hexadecimal
+  or as an unsigned value is converted to its signed decimal form by the manifest
+  author, once, where it can be reviewed.
 
 Common to both:
 
@@ -89,6 +121,26 @@ outside Packer's ownership of the restart boundary.
 When `restartPolicy` is `forbid` and the installer reports a restart is
 required, the package fails with reason code `restart_forbidden`. The result is
 not silently downgraded to success.
+
+### Timeout behavior
+
+`timeoutSeconds` bounds a number, which is not the same as bounding execution. On
+expiry:
+
+1. the installer process **and its descendants** are terminated. Installers
+   routinely spawn children, and killing only the parent leaves the machine being
+   modified by a process nothing is waiting for;
+2. termination is confirmed within a second bounded interval;
+3. the package fails with `install_timeout` when termination is confirmed, or
+   `install_timeout_termination_failed` when it is not;
+4. on `install_timeout_termination_failed` the batch stops. No further package
+   runs, and the Packer restart does not proceed, because a process that may
+   still be writing to the guest must not meet a reboot;
+5. that run is `incomplete`, not `failed`. Nothing is known about the guest's
+   state, and reporting a clean failure would overstate what was observed.
+
+This needs mutation-style tests: a fixture that keeps working after its parent is
+signalled must not be able to reach the restart or the next package.
 
 ### Restart placement
 
@@ -106,8 +158,9 @@ determinism property worth more than that.
 A non-empty array, all-of semantics, 1 to 8 checks, each with a stable `id`
 matching `^[a-z0-9]+(-[a-z0-9]+)*$` and unique within the package.
 
-Every check names an allowlisted root rather than an absolute path. The
-enumeration is closed:
+The two file checks -- `file-exists` and `file-version` -- name an allowlisted
+root rather than an absolute path. `service-exists` has no root, because a
+service is not addressed by path. The enumeration is closed:
 
 | Root | Resolves to |
 | --- | --- |

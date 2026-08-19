@@ -402,12 +402,12 @@ Deferred to the increment that implements installation and post-install
 validation:
 
 - installer type;
-- install arguments represented safely as an array;
+- installer input represented safely: an argument token array for EXE packages, and an allowlisted property map for MSI packages, per [ADR 4](docs/decisions/0004-package-manifest-schema-2.md);
 - a bounded validation definition.
 
 The manifest is an image recipe. It must not acquire endpoint-deployment concepts such as assignments, schedules, audience targeting, package search, update channels, or general dependency resolution.
 
-Treat install arguments as untrusted data. Avoid command-string concatenation and use explicit process argument handling.
+Treat installer input as untrusted data. Avoid command-string concatenation and pass each token individually through explicit process argument handling, never through a joined string. For MSI packages the executor owns the command line entirely and a manifest supplies only allowlisted properties, so it cannot pass a switch at all.
 
 ## 12. Integrity and Trust Model
 
@@ -443,22 +443,33 @@ Use the same expected hash at both verification boundaries. A missing file, inac
 ## 13. Canonical Package Provisioning Sequence
 
 1. Parse the manifest.
-2. Validate its schema and semantic constraints.
+2. Validate its schema and semantic constraints, dispatching on the declared schema version.
 3. Sort packages deterministically.
 4. Resolve each exact source reference.
 5. Copy the package into unique temporary host staging.
 6. Calculate the host SHA-256 and compare it with the manifest.
-7. Transfer only verified content through Packer.
-8. Calculate the guest SHA-256 and compare it with the same expected value.
-9. Execute the installer with explicit arguments.
-10. Normalize the process result and restart requirement.
-11. Validate installed state using a package-appropriate check.
-12. Record a structured package result with secrets redacted.
-13. Continue according to required/optional failure policy.
-14. Aggregate the package results.
-15. Remove guest staging.
-16. Remove host staging.
-17. Export durable evidence outside temporary locations.
+7. Assemble a verified-only transfer bundle with its descriptor, covering only packages that passed step 6.
+8. Transfer the bundle through Packer, and pass the expected descriptor digest out of band.
+9. Compare the descriptor digest in the guest before parsing it.
+10. Calculate the guest SHA-256 for each package and compare it with the same expected value.
+11. Execute the installer with individually passed arguments or properties.
+12. Normalize the process result and the restart requirement.
+13. Record a structured package result carrying bounded reason codes.
+14. Continue according to required/optional failure policy.
+15. Aggregate the package results.
+16. Perform the single Packer-owned restart, unconditionally, after the batch.
+17. Validate installed state on the far side of the restart.
+18. Retrieve evidence from the guest.
+19. Attempt guest staging removal, recording the outcome.
+20. Attempt host staging removal, recording the outcome.
+21. Evaluate the aggregate result and decide the build outcome.
+
+Order is deliberate in three places, each recording a lesson rather than a
+preference. Validation follows the restart, because a check run before a pending
+reboot observes a state the machine will not be in afterwards. Evidence
+retrieval precedes cleanup, because cleanup can fail and evidence collected
+afterwards may be gone. Evaluation is last, because a run that fails before
+retrieving evidence has destroyed the explanation of its own failure.
 
 Do not silently continue after an integrity failure. A required package failure must fail the image build. Optional-package behavior must be explicit and visible in the aggregate result.
 

@@ -89,19 +89,33 @@ version 1 rejects any manifest carrying a field version 1 does not name --
 including a field that is optional to the producer. There is therefore no such
 thing as a backward-compatible field addition here.
 
-The rule that follows:
+Reasoning about this in terms of "backward" and "forward" invites a mistake,
+because the two run in opposite directions -- whether an old validator accepts a
+new document, and whether a new validator accepts an old one -- and a table
+mixing them reads as coherent while being wrong. The rule below avoids the
+distinction entirely by asking a single question about the set of documents the
+schema accepts.
 
-| Change | Effect on a v1 validator | Version |
+**A change that alters the set of accepted documents, in either direction,
+increments `schemaVersion`. A change that does not, does not.**
+
+| Change | Alters the accepted set? | Version |
 | --- | --- | --- |
-| Adding any field, optional or not | Rejects the document | Increment |
-| Removing a field, or narrowing a value pattern | Accepts documents it should now refuse | Increment |
-| Widening a value pattern within an existing field | Accepts everything v1 accepted | May stay 1 |
-| Editing a description | No effect on validation | Stays 1 |
+| Adding a field, optional or not | Yes: documents carrying it move from rejected to accepted | Increment |
+| Removing a field | Yes: documents carrying it move from accepted to rejected | Increment |
+| Narrowing a value pattern | Yes: some previously accepted documents are now rejected | Increment |
+| Widening a value pattern | Yes: some previously rejected documents are now accepted | Increment |
+| Editing a description or `$comment` | No | Stays 1 |
+
+The rule is deliberately blunt. A finer one would have to name which direction
+of change is tolerable for which consumer, and this repository has no consumer
+inventory to reason from. When it does, that is the moment to revisit this, and
+the revisit belongs in a new decision record rather than an edit to this one.
 
 Increment 2 introduces installer type, install arguments, and the bounded
-validation definition. Every one of those is a field addition, so **Increment 2
-publishes schema version 2**. A version 1 manifest remains valid against the
-version 1 schema; a producer that emits the new fields must declare version 2.
+validation definition. Those are field additions, so **Increment 2 publishes
+schema version 2**. A version 1 manifest remains valid against the version 1
+schema; a producer emitting the new fields must declare version 2.
 
 This is the cost of `additionalProperties: false`, and it is the intended
 trade: an unrecognized field is a mistake worth failing on, and paying for that

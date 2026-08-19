@@ -25,6 +25,28 @@ BeforeAll {
         $d
     }
 
+    function NewMissingSourceFixture {
+        <#
+            A manifest referencing a source that does not exist. This is the path
+            the original evidence leak took: the absolute source root arrived in
+            evidence through a raw exception message, and only this path produced
+            it. An integrity mismatch never carried the root, so a test built on
+            a corrupt hash cannot detect that defect.
+        #>
+        $base = NewTempDir
+        $source = Join-Path $base 'src'
+        $null = New-Item -ItemType Directory -Path $source -Force
+
+        $manifest = Join-Path $base 'manifest.json'
+        @{ schemaVersion = 1; packages = @(@{
+            id = 'example-agent'; version = '1.2.3'
+            source = 'file://example-agent/1.2.3/agent.msi'
+            sha256 = ('a' * 64); order = 10; required = $true
+        })} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifest -Encoding utf8
+
+        [PSCustomObject]@{ Base = $base; SourceRoot = $source; Manifest = $manifest }
+    }
+
     function NewFixture {
         <#
             Builds a source tree and a manifest describing it. The expected hash
@@ -110,6 +132,27 @@ Describe 'Invoke-SourceQualification.ps1 exit codes' {
 
         $run = RunEntryPoint @('-ManifestPath', $f.Manifest, '-SourceRoot', $f.SourceRoot, '-StagingRoot', (NewTempDir), '-EvidencePath', $evidence)
         $run.ExitCode | Should -Be 2
+    }
+
+    It 'does not leak the source root when a source is missing' {
+        # The regression this suite exists for. Asserting against an integrity
+        # mismatch instead would pass on the defective implementation, because a
+        # hash mismatch never produced a message containing the source root.
+        $f = NewMissingSourceFixture
+        $evidence = Join-Path (NewTempDir) 'evidence.json'
+        $run = RunEntryPoint @('-ManifestPath', $f.Manifest, '-SourceRoot', $f.SourceRoot, '-StagingRoot', (NewTempDir), '-EvidencePath', $evidence)
+
+        $run.ExitCode | Should -Be 1
+        Test-Path -LiteralPath $evidence | Should -BeTrue
+
+        $parsed = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
+        $parsed.Packages[0].ReasonCode | Should -Be 'source_not_found'
+
+        $written = Get-Content -LiteralPath $evidence -Raw
+        $written | Should -Not -Match ([regex]::Escape($f.SourceRoot))
+        # The staged path is derived from the source root and would leak the same
+        # information by another route.
+        $written | Should -Not -Match ([regex]::Escape($f.Base))
     }
 
     It 'writes evidence carrying a reason code and no absolute path' {

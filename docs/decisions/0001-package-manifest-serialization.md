@@ -112,6 +112,26 @@ of change is tolerable for which consumer, and this repository has no consumer
 inventory to reason from. When it does, that is the moment to revisit this, and
 the revisit belongs in a new decision record rather than an edit to this one.
 
+### When the rule starts applying
+
+The rule needs a starting point, or it contradicts its own history: version 1's
+accepted set changed several times while it was being implemented -- moving
+version references, wildcard segments, and dot segments were each tightened
+after the first draft -- and none of those produced a version 2.
+
+**Schema version 1 becomes a supported contract when Increment 1 is accepted.**
+Corrections made while it was being implemented do not create intermediate
+supported versions, because nothing outside this repository could have consumed
+them. From acceptance onward, any change to the accepted set requires a new
+schema version.
+
+A consequence worth stating before it is needed: a supported version is
+immutable, so a later version cannot be published by editing the only schema
+file. `contracts/package-manifest.schema.json` becomes a versioned artifact, and
+validation dispatches on the manifest's declared `schemaVersion` rather than
+assuming the newest. Preserving a working version 1 is therefore an acceptance
+criterion for Increment 2, not a refactor to be done afterwards.
+
 Increment 2 introduces installer type, install arguments, and the bounded
 validation definition. Those are field additions, so **Increment 2 publishes
 schema version 2**. A version 1 manifest remains valid against the version 1

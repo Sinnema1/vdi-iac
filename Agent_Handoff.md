@@ -906,6 +906,14 @@ emerges. Consult README for which increment is actually current.
 - restart signaling and cleanup;
 - package evidence aggregation.
 
+Acceptance criteria carried from [ADR 1](docs/decisions/0001-package-manifest-serialization.md):
+installer type, install arguments, and the validation definition are field
+additions, so this increment publishes schema version 2. Version 1 must remain
+present and working as an immutable artifact, and validation must dispatch on the
+manifest's declared `schemaVersion` rather than overwriting the single schema
+file. A version 1 manifest that validated before this increment must still
+validate after it.
+
 ### Increment 3: Image build and sealing
 
 - complete Packer template;

@@ -60,3 +60,7 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Lab harness variable files name a machine and carry a credential.
+packer/harness/*.pkrvars.hcl
+!packer/harness/*.pkrvars.hcl.example

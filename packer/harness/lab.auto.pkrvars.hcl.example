@@ -1,0 +1,23 @@
+# Copy to lab.auto.pkrvars.hcl and fill in for a lab run. The real file is
+# git-ignored: it names a machine and carries a credential.
+#
+# There are no defaults for the target or its credentials. An unset value is an
+# error rather than a fallback to whatever happens to be reachable.
+
+guest_host     = "windows-lab-target.example"
+guest_username = "labuser"
+guest_password = "supplied-at-runtime-never-committed"
+
+# The harness installs software on the target. It refuses to run until this is
+# true, so a misdirected configuration stops rather than proceeding quietly.
+acknowledge_destructive_lab_run = false
+
+# Placed on the intended machine beforehand. The nonce is supplied here,
+# independently of the address above, so the target proves it is the intended one
+# rather than the configuration asserting it.
+lab_marker_path  = "C:/vdi-iac-lab/lab-marker.txt"
+lab_marker_nonce = "replace-with-the-nonce-written-into-the-marker"
+
+# Host-controlled. Never read or derived from the uploaded descriptor, because
+# cleanup has to work after descriptor tampering.
+guest_staging_root = "C:/vdi-iac-lab"

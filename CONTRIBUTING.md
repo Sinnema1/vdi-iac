@@ -89,7 +89,11 @@ pwsh -NoProfile -Command "Invoke-Pester -Path source-qualification/tests -Output
 ```
 
 ```bash
-pwsh -NoProfile -Command "Invoke-ScriptAnalyzer -Path ./source-qualification -Recurse -Severity Error,Warning"
+pwsh -NoProfile -Command "'./source-qualification','./scripts/ci','./packer/scripts' | ForEach-Object { Invoke-ScriptAnalyzer -Path \$_ -Recurse -Severity Error,Warning }"
+```
+
+```bash
+packer fmt -check -recursive packer/harness
 ```
 
 `shellcheck` and `pwsh` each need a local install:

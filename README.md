@@ -10,7 +10,12 @@ deterministic, testable, auditable, maintainable, secure, and understandable.
 ## Status
 
 **Increment 1 complete. Package manifest schema version 1 is supported and
-frozen.** From this point, `contracts/package-manifest.schema.json` is
+frozen. Increment 2 is implementation complete; lab validation pending** — the
+guest provisioning path and its Packer harness exist and are CI-proven, but
+transfer, installer execution, the restart boundary, and post-restart validation
+have never run against a real Windows guest. No image is built or sealed yet.
+
+ From this point, `contracts/package-manifest.schema.json` is
 byte-for-byte immutable and any validation change publishes a new schema
 version — see [ADR 1](docs/decisions/0001-package-manifest-serialization.md).
 
@@ -32,6 +37,8 @@ What exists today:
 | Public-boundary, secret, Markdown, and shell checks | enforced in CI |
 | Package manifest contract | version 1 supported and frozen; version 2 an implementation draft |
 | Source qualification and integrity verification | host-side path implemented |
+| Guest provisioning and transfer bundle | implemented; lab validation pending |
+| Packer lab harness (null builder) | implemented; lab validation pending |
 | Packer image construction and sealing | not started |
 | Terraform and Citrix MCS provisioning | not started |
 | Promotion, reconciliation, and retirement | not started |

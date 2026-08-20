@@ -83,7 +83,9 @@ jobs:
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
-          $findings = Invoke-ScriptAnalyzer -Path ./source-qualification -Recurse -Severity Error,Warning
+          # Every directory holding PowerShell, not only the first one that did.
+          $findings = @('./source-qualification', './scripts/ci', './packer/scripts') |
+            ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Recurse -Severity Error,Warning }
           if ($findings) {
             $findings | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message | Out-String -Width 200 | Write-Host
             throw "PSScriptAnalyzer reported $($findings.Count) finding(s)."
@@ -124,6 +126,52 @@ jobs:
             }
           }
           if ($failed) { throw "Manifests failed validation: $($failed -join ', ')" }
+
+  packer-harness:
+    name: Packer harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+        with:
+          version: 1.15.4
+      - name: Format check
+        run: packer fmt -check -recursive packer/harness
+      - name: Validate the harness
+        shell: pwsh
+        run: |
+          # A full validate, not -syntax-only: it resolves file provisioner
+          # sources, so a harness pointing at a directory that does not exist
+          # fails here rather than in a lab.
+          $work = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+          $bundle = Join-Path $work 'bundle'
+          $evidence = Join-Path $work 'evidence'
+          New-Item -ItemType Directory -Path $bundle, $evidence -Force | Out-Null
+          $varFile = Join-Path $work 'vars.pkrvars.hcl'
+          @"
+          guest_host                      = "windows-lab-target.example"
+          guest_username                  = "labuser"
+          guest_password                  = "placeholder"
+          acknowledge_destructive_lab_run = true
+          lab_marker_path                 = "C:/vdi-iac-lab/lab-marker.txt"
+          lab_marker_nonce                = "placeholder-nonce"
+          run_id                          = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
+          bundle_path                     = "$bundle"
+          descriptor_sha256               = "$('a' * 64)"
+          evidence_output_dir             = "$evidence"
+          tools_source_dir                = "$(Join-Path $PWD 'source-qualification' 'scripts')"
+          guest_scripts_dir               = "$(Join-Path $PWD 'packer' 'scripts' 'guest')"
+          "@.Split("`n").TrimStart() -join "`n" | Set-Content -LiteralPath $varFile -Encoding utf8
+
+          packer validate "-var-file=$varFile" packer/harness
+      - name: Refuse to validate without a target
+        shell: pwsh
+        run: |
+          # No usable defaults: an unset target must be an error, never a
+          # fallback to whatever happens to be reachable.
+          packer validate packer/harness 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) { throw 'The harness validated with no target configured.' }
+          Write-Host 'harness refuses an unconfigured target'
 
   shell-lint:
     name: Shell lint

@@ -910,6 +910,12 @@ emerges. Consult README for which increment is actually current.
 
 ### Increment 2: Guest package provisioning
 
+**Status: implementation complete; lab validation pending.** Every acceptance
+criterion below is met and CI-proven or component-proven. The transfer,
+installer execution, restart boundary, and post-restart validation have never
+run against a Windows guest, and the three lab scenarios have never executed.
+Closing the increment records what was built, not that it works in a lab.
+
 - Packer-controlled transfer;
 - guest hash re-verification;
 - bounded MSI/EXE execution;
@@ -958,7 +964,10 @@ Acceptance criteria:
   parent-supplied run identifier, and none of the excluded values in ADR 5;
 - the run identifier is a validated canonical UUID before it names any
   directory;
-- no log holds installer arguments or property values, only bounded metadata;
+- no log holds installer arguments or property values, only bounded metadata.
+  An MSI writes its own verbose log inside the guest staging root, which does
+  contain properties; it is never retrieved, and cleanup removes it with the
+  root. Do not add it to the download set;
 - the lab harness refuses to run without an explicit acknowledgement and a
   matching marker on the target;
 - evidence retrieval and cleanup are attempted on both the logical-failure and

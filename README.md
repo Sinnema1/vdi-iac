@@ -39,8 +39,7 @@ What exists today:
 | Source qualification and integrity verification | host-side path implemented |
 | Guest provisioning and transfer bundle | implemented; lab validation pending |
 | Packer lab harness (null builder) | implemented; lab validation pending |
-| Lab scenarios (positive, payload tamper, descriptor tamper) | defined and runnable; never executed |
-| Packer image build and sealing | not started |
+| Lab scenarios (positive, payload tamper, descriptor tamper) | runnable against a target; never executed |
 | Packer image construction and sealing | not started |
 | Terraform and Citrix MCS provisioning | not started |
 | Promotion, reconciliation, and retirement | not started |

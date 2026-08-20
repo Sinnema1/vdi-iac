@@ -113,6 +113,102 @@ function NewGuestError {
     $exception
 }
 
+function Test-RestartAuthorization {
+    <#
+    .SYNOPSIS
+        Decides whether install evidence authorizes a restart.
+
+    .DESCRIPTION
+        A function rather than inline harness script, so the decision can be
+        tested behaviorally instead of by reading configuration text.
+
+        Authorization is positive and specific. A schema-valid envelope with a
+        matching run identifier is not enough: validate-phase evidence, evidence
+        from another stage, or an install whose counters contradict its packages
+        would all have satisfied that. An installer that may still be running
+        must never meet a reboot, so anything short of a complete, self-consistent
+        install record refuses.
+
+    .OUTPUTS
+        Authorized, plus a bounded ReasonCode when it is not.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $EvidencePath,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RunId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SchemaPath,
+        [Parameter()] [string] $HaltMarkerPath
+    )
+
+    function Refuse([string] $Code) { [PSCustomObject]@{ Authorized = $false; ReasonCode = $Code } }
+
+    if ($HaltMarkerPath -and (Test-Path -LiteralPath $HaltMarkerPath)) { return Refuse 'halt_marker_present' }
+    if (-not (Test-Path -LiteralPath $EvidencePath -PathType Leaf)) { return Refuse 'evidence_missing' }
+
+    $raw = Get-Content -LiteralPath $EvidencePath -Raw -Encoding utf8
+    if (-not (Test-Json -Json $raw -SchemaFile $SchemaPath -ErrorAction SilentlyContinue)) { return Refuse 'evidence_malformed' }
+
+    try { $evidence = $raw | ConvertFrom-Json } catch { return Refuse 'evidence_malformed' }
+
+    if ($evidence.resultKind -ne 'guest-provisioning') { return Refuse 'evidence_wrong_kind' }
+    if ($evidence.runId -cne $RunId) { return Refuse 'evidence_run_id_mismatch' }
+    if ($evidence.payload.phase -ne 'install') { return Refuse 'evidence_wrong_phase' }
+    if ($evidence.outcome -notin @('passed', 'failed')) { return Refuse 'install_not_complete' }
+
+    $payload = $evidence.payload
+    $packages = @($payload.packages)
+
+    # A completed result cannot contain an unfinished package: that is the case
+    # where something may still be writing to the guest.
+    if (@($packages | Where-Object { $_.outcome -eq 'incomplete' }).Count -gt 0) { return Refuse 'install_not_complete' }
+
+    $terminal = if ($payload.PSObject.Properties.Name -contains 'terminalReasonCode') { $payload.terminalReasonCode } else { $null }
+    if ($terminal) { return Refuse 'install_not_complete' }
+
+    # Self-consistency. A document can satisfy every field constraint and still
+    # describe two different runs.
+    if ($packages.Count -ne $payload.packageCount) { return Refuse 'evidence_inconsistent' }
+    if (@($packages | Where-Object { $_.outcome -eq 'passed' }).Count -ne $payload.passedCount) { return Refuse 'evidence_inconsistent' }
+    $failedRequired = @($packages | Where-Object { $_.outcome -ne 'passed' -and $_.required }).Count
+    if ($payload.failedRequiredCount -ne $failedRequired) { return Refuse 'evidence_inconsistent' }
+    # Unguarded: the field is required by the envelope schema the evidence has
+    # already been validated against, so a presence check here could only skip
+    # the comparison, never reach a document that legitimately omits it.
+    if ($payload.installerAttemptCount -ne @($packages | Where-Object { $_.installerAttempted }).Count) {
+        return Refuse 'evidence_inconsistent'
+    }
+
+    [PSCustomObject]@{ Authorized = $true; ReasonCode = $null }
+}
+
+function Test-CleanupAuthorization {
+    <#
+    .SYNOPSIS
+        Decides whether an ownership sentinel authorizes this invocation to delete.
+
+    .DESCRIPTION
+        Content, not presence. A run that collides on its identifier refuses the
+        existing directory and therefore never writes a sentinel, so authorizing
+        on the file existing would let the error path delete the directory the
+        *previous* run owns -- reproduced, with its witness file destroyed.
+
+        The harness calls this from both cleanup paths, and it is a function so
+        the collision case can be executed rather than read out of the
+        configuration.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SentinelPath,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ExpectedNonce
+    )
+
+    if (-not (Test-Path -LiteralPath $SentinelPath -PathType Leaf)) { return $false }
+    $observed = (Get-Content -LiteralPath $SentinelPath -Raw -Encoding utf8).Trim()
+    [string]::Equals($observed, $ExpectedNonce, [System.StringComparison]::Ordinal)
+}
+
 function Remove-GuestBundle {
     <#
     .SYNOPSIS
@@ -564,13 +660,12 @@ function Invoke-GuestProvisioning {
                 }
 
                 $invocation = Get-InstallerInvocation -Entry $entry -PayloadPath $payloadPath -LogDirectory $LogDirectory
-                $raw = & $Adapter.StartProcess $invocation.FilePath $invocation.ArgumentList $entry.installer.timeoutSeconds
-                # Recorded before the outcome is known: an installer that
-                # started and then failed still started, and a control that
-                # claims to refuse before execution has to be measured against
-                # that rather than against the result.
+                # Marked before the boundary is crossed, not after it returns. A
+                # process that launched and then threw is still a process that
+                # launched, and a control claiming to refuse before execution has
+                # to be measured against the attempt rather than the result.
                 $record.installerAttempted = $true
-
+                $raw = & $Adapter.StartProcess $invocation.FilePath $invocation.ArgumentList $entry.installer.timeoutSeconds
                 $verdict = Get-NormalizedInstallerResult -Entry $entry -RawResult $raw
 
                 $record.outcome = $verdict.Outcome
@@ -626,4 +721,4 @@ function Invoke-GuestProvisioning {
         })
 }
 
-Export-ModuleMember -Function Get-NormalizedInstallerResult, Get-InstallerInvocation, Invoke-PackageValidation, Invoke-GuestProvisioning, Remove-GuestBundle
+Export-ModuleMember -Function Test-RestartAuthorization, Test-CleanupAuthorization, Get-NormalizedInstallerResult, Get-InstallerInvocation, Invoke-PackageValidation, Invoke-GuestProvisioning, Remove-GuestBundle

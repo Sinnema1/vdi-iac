@@ -252,25 +252,19 @@ build {
 
   # 6. The restart gate.
   #
-  #    Authorization is positive, from the install evidence itself. The halt
-  #    marker is a supplementary signal only: writing it can fail, and a gate
-  #    that permits a reboot whenever a file is absent is fail-open. An installer
-  #    that may still be writing must never meet a restart, so the gate requires
-  #    evidence that the install reached a definite conclusion.
+  #    Authorization is positive and comes from the install evidence, decided by
+  #    Test-RestartAuthorization rather than by script inline here: the rules are
+  #    then testable behaviorally instead of by reading this file. The halt
+  #    marker is a supplementary signal, because writing it can fail and a gate
+  #    that permits a reboot whenever a file is absent is fail-open.
   provisioner "powershell" {
     use_pwsh = true
     inline = [
       "$ErrorActionPreference = 'Stop'",
-      "$evidencePath = '${local.run_root}/install-${local.evidence_name}'",
-      "if (Test-Path -LiteralPath '${local.halt_path}') { throw 'The install phase reported that it did not complete. Refusing to restart.' }",
-      "if (-not (Test-Path -LiteralPath $evidencePath)) { throw 'No install evidence. Refusing to restart a guest whose install cannot be accounted for.' }",
-      "$raw = Get-Content -LiteralPath $evidencePath -Raw -Encoding utf8",
-      "$schema = '${local.contracts_target}/evidence-envelope-2.schema.json'",
-      "if (-not (Test-Json -Json $raw -SchemaFile $schema -ErrorAction SilentlyContinue)) { throw 'Install evidence does not satisfy the envelope schema. Refusing to restart.' }",
-      "$evidence = $raw | ConvertFrom-Json",
-      "if ($evidence.runId -cne '${var.run_id}') { throw 'Install evidence belongs to a different run. Refusing to restart.' }",
-      "if ($evidence.outcome -notin @('passed','failed')) { throw \"Install outcome is '$($evidence.outcome)'. Only a completed install authorizes a restart.\" }",
-      "Write-Host \"gate: install completed as '$($evidence.outcome)', restart may proceed\""
+      "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
+      "$decision = Test-RestartAuthorization -EvidencePath '${local.run_root}/install-${local.evidence_name}' -RunId '${var.run_id}' -SchemaPath '${local.contracts_target}/evidence-envelope-2.schema.json' -HaltMarkerPath '${local.halt_path}'",
+      "if (-not $decision.Authorized) { throw \"Restart refused: $($decision.ReasonCode).\" }",
+      "Write-Host 'gate: install completed, restart may proceed'"
     ]
   }
 
@@ -309,9 +303,8 @@ build {
     use_pwsh = true
     inline = [
       "$ErrorActionPreference = 'Continue'",
-      "if (-not (Test-Path -LiteralPath '${local.sentinel_path}')) { throw 'Ownership sentinel missing. Refusing to remove a directory this run does not own.' }",
-      "if ((Get-Content -LiteralPath '${local.sentinel_path}' -Raw).Trim() -cne '${var.cleanup_nonce}') { throw 'Ownership sentinel belongs to another invocation. Refusing to remove it.' }",
       "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
+      "if (-not (Test-CleanupAuthorization -SentinelPath '${local.sentinel_path}' -ExpectedNonce '${var.cleanup_nonce}')) { throw 'Ownership sentinel is missing or belongs to another invocation. Refusing to remove anything.' }",
       "$outcome = Remove-GuestBundle -StagingRoot '${local.run_root}' -RunId '${var.run_id}'",
       "Write-Host \"guest cleanup: $outcome\"",
       "Remove-Item -LiteralPath '${local.run_root}' -Recurse -Force -ErrorAction SilentlyContinue",
@@ -332,11 +325,12 @@ build {
       # Gated on the same sentinel as normal cleanup. Without it this path could
       # run after a failed preflight -- a target that never identified itself --
       # and delete a directory belonging to something else entirely.
-      "if (-not (Test-Path -LiteralPath '${local.sentinel_path}')) { Write-Host 'error cleanup: no ownership sentinel, leaving the target untouched'; exit 0 }",
+      "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force -ErrorAction SilentlyContinue",
+      "if (-not (Get-Command Test-CleanupAuthorization -ErrorAction SilentlyContinue)) { Write-Host 'error cleanup: tools unavailable, leaving the target untouched'; exit 0 }",
       # Content, not mere presence. A colliding run never writes a sentinel, so
       # presence alone would authorize deleting the directory the *previous* run
       # owns -- reproduced, with its witness file destroyed.
-      "if ((Get-Content -LiteralPath '${local.sentinel_path}' -Raw).Trim() -cne '${var.cleanup_nonce}') { Write-Host 'error cleanup: sentinel belongs to another invocation, leaving the target untouched'; exit 0 }",
+      "if (-not (Test-CleanupAuthorization -SentinelPath '${local.sentinel_path}' -ExpectedNonce '${var.cleanup_nonce}')) { Write-Host 'error cleanup: sentinel missing or from another invocation, leaving the target untouched'; exit 0 }",
       "Write-Host 'error cleanup: attempting guest staging removal'",
       "Remove-Item -LiteralPath '${local.run_root}' -Recurse -Force -ErrorAction SilentlyContinue",
       "if (Test-Path -LiteralPath '${local.run_root}') { Write-Host 'error cleanup: staging still present' } else { Write-Host 'error cleanup: staging removed' }"

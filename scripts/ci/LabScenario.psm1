@@ -172,4 +172,56 @@ function Get-LabScenarioObservation {
     [PSCustomObject]@{ ReasonCode = $reasonCode; InstallerAttemptCount = $attempts }
 }
 
-Export-ModuleMember -Function Get-LabScenario, Set-LabBundleTampering, Get-LabScenarioObservation
+function Get-LabScenarioVerdict {
+    <#
+    .SYNOPSIS
+        Decides whether a scenario ended as it was defined to.
+
+    .DESCRIPTION
+        The production decision, used by the runner and by its tests. A test-only
+        copy of this logic proves the copy works: the runner could diverge from it
+        silently, which is the class of defect these scenarios exist to catch.
+
+    .OUTPUTS
+        Passed, plus the specific failures when it did not.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)] $Definition,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Outcome,
+        [Parameter()] [AllowNull()] [string] $ObservedReasonCode,
+        [Parameter(Mandatory)] [int] $InstallerAttemptCount,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $HostCleanupOutcome,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $GuestCleanupOutcome
+    )
+
+    $failures = [System.Collections.Generic.List[string]]::new()
+
+    if ($Outcome -ne $Definition.ExpectedOutcome) {
+        $failures.Add("outcome was '$Outcome', expected '$($Definition.ExpectedOutcome)'")
+    }
+
+    # An outcome alone cannot carry a negative scenario: 'incomplete' is reachable
+    # through missing evidence or a failed cleanup, neither of which is the
+    # control under test.
+    if ($Definition.ExpectedReasonCode -and $ObservedReasonCode -ne $Definition.ExpectedReasonCode) {
+        $failures.Add("reason code was '$ObservedReasonCode', expected '$($Definition.ExpectedReasonCode)'")
+    }
+
+    # A count from evidence, not an inference from output: an installer that
+    # started and then failed has still started.
+    $installerRan = $InstallerAttemptCount -gt 0
+    if ($installerRan -ne $Definition.ExpectInstalled) {
+        $failures.Add("installer attempts were $InstallerAttemptCount, expected installed: $($Definition.ExpectInstalled)")
+    }
+
+    # These scenarios run against a healthy communicator, so cleanup succeeding is
+    # part of what they assert.
+    if ($HostCleanupOutcome -ne 'removed') { $failures.Add("host cleanup was '$HostCleanupOutcome', expected 'removed'") }
+    if ($GuestCleanupOutcome -ne 'removed') { $failures.Add("guest cleanup was '$GuestCleanupOutcome', expected 'removed'") }
+
+    [PSCustomObject]@{ Passed = ($failures.Count -eq 0); Failures = @($failures) }
+}
+
+Export-ModuleMember -Function Get-LabScenario, Set-LabBundleTampering, Get-LabScenarioObservation, Get-LabScenarioVerdict

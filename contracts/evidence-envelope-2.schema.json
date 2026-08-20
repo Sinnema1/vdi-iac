@@ -158,7 +158,8 @@
         "passedCount",
         "failedRequiredCount",
         "cleanupOutcome",
-        "packages"
+        "packages",
+        "installerAttemptCount"
       ],
       "properties": {
         "phase": {
@@ -317,7 +318,8 @@
         "required",
         "outcome",
         "reasonCode",
-        "restartRequired"
+        "restartRequired",
+        "installerAttempted"
       ],
       "properties": {
         "id": {

@@ -27,9 +27,10 @@ BeforeAll {
     function GuestPayloadWithVersion {
         param([string] $Version)
         @{ phase = 'install'; restartRequired = $false; packageCount = 1; passedCount = 0
-           failedRequiredCount = 0; cleanupOutcome = 'not-attempted'
+           failedRequiredCount = 0; installerAttemptCount = 0; cleanupOutcome = 'not-attempted'
            packages = @(@{ id = 'a'; version = $Version; order = 1; required = $false
-                           outcome = 'failed'; reasonCode = 'installer_failed'; restartRequired = $false }) }
+                           outcome = 'failed'; reasonCode = 'installer_failed'
+                           restartRequired = $false; installerAttempted = $false }) }
     }
 
     function QualificationPayloadWithVersion {

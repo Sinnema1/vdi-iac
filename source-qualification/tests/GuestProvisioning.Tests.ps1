@@ -482,6 +482,125 @@ Describe 'guest path confinement' {
     }
 }
 
+Describe 'Test-RestartAuthorization' {
+
+    BeforeAll {
+        $script:Schema = Join-Path $script:RepoRoot 'contracts' 'evidence-envelope-2.schema.json'
+
+        function WriteInstallEvidence {
+            param(
+                [string] $Path, [string] $RunId,
+                [string] $Outcome = 'passed', [string] $Phase = 'install',
+                [string] $Kind = 'guest-provisioning',
+                [string] $PackageOutcome = 'passed', [string] $TerminalReason,
+                [int] $PackageCount = 1, [int] $PassedCount = 1, [int] $AttemptCount = 1
+            )
+            $terminal = if ([string]::IsNullOrEmpty($TerminalReason)) { $null } else { $TerminalReason }
+            @{
+                resultSchemaVersion = 2; resultKind = $Kind
+                runId = $RunId; manifestSchemaVersion = 2
+                startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+                outcome = $Outcome
+                payload = @{
+                    phase = $Phase; restartRequired = $false
+                    packageCount = $PackageCount; passedCount = $PassedCount
+                    failedRequiredCount = $(if ($PackageOutcome -eq 'passed') { 0 } else { 1 })
+                    installerAttemptCount = $AttemptCount
+                    terminalReasonCode = $terminal
+                    cleanupOutcome = 'not-attempted'
+                    packages = @(@{ id = 'example-agent'; version = '1.2.3'; order = 10; required = $true
+                                    outcome = $PackageOutcome; reasonCode = $(if ($PackageOutcome -eq 'passed') { $null } else { 'installer_failed' })
+                                    restartRequired = $false; installerAttempted = ($AttemptCount -gt 0) })
+                }
+            } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $Path -Encoding utf8
+        }
+    }
+
+    It 'authorizes a complete, self-consistent install' {
+        $runId = Get-RunIdentifier
+        $path = Join-Path (NewTempDir) 'install.json'
+        WriteInstallEvidence -Path $path -RunId $runId
+        (Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema).Authorized | Should -BeTrue
+    }
+
+    It 'refuses validate-phase evidence' {
+        # It is schema-valid, carries the right run, and reports a completed
+        # outcome. Only the phase says it cannot authorize a restart.
+        $runId = Get-RunIdentifier
+        $path = Join-Path (NewTempDir) 'install.json'
+        WriteInstallEvidence -Path $path -RunId $runId -Phase 'validate'
+        $decision = Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema
+        $decision.Authorized | Should -BeFalse
+        $decision.ReasonCode | Should -Be 'evidence_wrong_phase'
+    }
+
+    It 'refuses evidence from another stage' {
+        $runId = Get-RunIdentifier
+        $path = Join-Path (NewTempDir) 'install.json'
+        WriteInstallEvidence -Path $path -RunId $runId -Kind 'source-qualification'
+        (Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema).ReasonCode |
+            Should -BeIn @('evidence_wrong_kind', 'evidence_malformed')
+    }
+
+    It 'refuses internally inconsistent install evidence' {
+        # Counters that disagree with the package list describe two different
+        # runs, and neither of them authorizes anything.
+        $runId = Get-RunIdentifier
+        $path = Join-Path (NewTempDir) 'install.json'
+        WriteInstallEvidence -Path $path -RunId $runId -PackageCount 3 -PassedCount 3
+        $decision = Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema
+        $decision.Authorized | Should -BeFalse
+        $decision.ReasonCode | Should -Be 'evidence_inconsistent'
+    }
+
+    It 'refuses an attempt count that disagrees with the package flags' {
+        $runId = Get-RunIdentifier
+        $path = Join-Path (NewTempDir) 'install.json'
+        WriteInstallEvidence -Path $path -RunId $runId -AttemptCount 5
+        (Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema).ReasonCode |
+            Should -Be 'evidence_inconsistent'
+    }
+
+    It 'refuses a completed result carrying a terminal halt reason' {
+        $runId = Get-RunIdentifier
+        $path = Join-Path (NewTempDir) 'install.json'
+        WriteInstallEvidence -Path $path -RunId $runId -Outcome 'failed' -PackageOutcome 'failed' `
+            -PassedCount 0 -TerminalReason 'install_timeout_termination_failed'
+        (Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema).ReasonCode |
+            Should -Be 'install_not_complete'
+    }
+
+    It 'refuses <case>' -ForEach @(
+        @{ case = 'missing evidence';   expected = 'evidence_missing' }
+        @{ case = 'malformed evidence'; expected = 'evidence_malformed' }
+    ) {
+        $runId = Get-RunIdentifier
+        $path = Join-Path (NewTempDir) 'install.json'
+        if ($case -eq 'malformed evidence') { '{ not json' | Set-Content -LiteralPath $path -Encoding utf8 }
+        (Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema).ReasonCode |
+            Should -Be $expected
+    }
+
+    It 'refuses evidence belonging to another run' {
+        $path = Join-Path (NewTempDir) 'install.json'
+        WriteInstallEvidence -Path $path -RunId (Get-RunIdentifier)
+        (Test-RestartAuthorization -EvidencePath $path -RunId (Get-RunIdentifier) -SchemaPath $script:Schema).ReasonCode |
+            Should -Be 'evidence_run_id_mismatch'
+    }
+
+    It 'refuses when the halt marker is present, whatever the evidence says' {
+        $runId = Get-RunIdentifier
+        $dir = NewTempDir
+        $path = Join-Path $dir 'install.json'
+        $halt = Join-Path $dir 'halt.txt'
+        WriteInstallEvidence -Path $path -RunId $runId
+        Set-Content -LiteralPath $halt -Value 'halted' -NoNewline
+
+        (Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema -HaltMarkerPath $halt).ReasonCode |
+            Should -Be 'halt_marker_present'
+    }
+}
+
 Describe 'Remove-GuestBundle' {
 
     BeforeAll {
@@ -550,6 +669,33 @@ Describe 'Remove-GuestBundle' {
         Remove-GuestBundle -StagingRoot $run.StagingRoot -RunId $run.RunId | Should -Be 'failed'
     }
 
+    It 'refuses a directory whose sentinel belongs to another invocation' {
+        # The collision this exists for, executed rather than read: a colliding
+        # run refuses the existing directory and never writes a sentinel, so
+        # presence alone would authorize deleting the previous run's content.
+        $run = NewStagedRun
+        Set-Content -LiteralPath (Join-Path $run.BundlePath 'witness.txt') -Value 'prior run content' -NoNewline
+        Set-Content -LiteralPath (Join-Path $run.StagingRoot 'sentinel.txt') -Value 'nonce-from-a-previous-invocation' -NoNewline
+
+        # Cleanup authorized by nonce, not by the directory existing.
+        $decision = Test-CleanupAuthorization -SentinelPath (Join-Path $run.StagingRoot 'sentinel.txt') -ExpectedNonce 'nonce-for-this-invocation'
+        $decision | Should -BeFalse
+
+        Test-Path -LiteralPath (Join-Path $run.BundlePath 'witness.txt') | Should -BeTrue
+    }
+
+    It 'authorizes cleanup when the sentinel matches this invocation' {
+        $run = NewStagedRun
+        $nonce = 'nonce-for-this-invocation'
+        Set-Content -LiteralPath (Join-Path $run.StagingRoot 'sentinel.txt') -Value $nonce -NoNewline
+        Test-CleanupAuthorization -SentinelPath (Join-Path $run.StagingRoot 'sentinel.txt') -ExpectedNonce $nonce | Should -BeTrue
+    }
+
+    It 'refuses cleanup when no sentinel was ever written' {
+        $run = NewStagedRun
+        Test-CleanupAuthorization -SentinelPath (Join-Path $run.StagingRoot 'absent.txt') -ExpectedNonce 'anything' | Should -BeFalse
+    }
+
     It 'removes nothing under -WhatIf' {
         $run = NewStagedRun
         Remove-GuestBundle -StagingRoot $run.StagingRoot -RunId $run.RunId -WhatIf | Should -Be 'not-attempted'
@@ -599,7 +745,8 @@ Describe 'ConvertTo-EvidenceEnvelope' {
         # directly here is not in scope when a test runs.
         function ValidGuestPayload {
             @{ phase = 'install'; restartRequired = $false; packageCount = 0; passedCount = 0
-               failedRequiredCount = 0; cleanupOutcome = 'not-attempted'; packages = @() }
+               failedRequiredCount = 0; installerAttemptCount = 0
+               cleanupOutcome = 'not-attempted'; packages = @() }
         }
     }
 
@@ -626,7 +773,7 @@ Describe 'ConvertTo-EvidenceEnvelope' {
         $payload = ValidGuestPayload
         $payload.packages = @(@{ id = 'a'; version = '1.0'; order = 1; required = $true
                                  outcome = 'passed'; reasonCode = $null; restartRequired = $false
-                                 commandLine = 'msiexec /i thing.msi' })
+                                 installerAttempted = $false; commandLine = 'msiexec /i thing.msi' })
         { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome passed `
             -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload $payload } |
             Should -Throw '*envelope schema*'
@@ -637,7 +784,7 @@ Describe 'ConvertTo-EvidenceEnvelope' {
         # or an exception message in a field that looks legitimate.
         $payload = ValidGuestPayload
         $payload.packages = @(@{ id = 'a'; version = '1.0'; order = 1; required = $true
-                                 outcome = 'failed'; restartRequired = $false
+                                 outcome = 'failed'; restartRequired = $false; installerAttempted = $false
                                  reasonCode = 'failed opening /var/folders/secret/path' })
         { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome failed `
             -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload $payload } |
@@ -702,7 +849,8 @@ Describe 'ConvertTo-EvidenceEnvelope' {
         $payload = ValidGuestPayload
         $payload.packageCount = 1
         $payload.packages = @(@{ id = 'a'; version = '1.0.0-rc.1'; order = 1; required = $false
-                                 outcome = 'passed'; reasonCode = $null; restartRequired = $false })
+                                 outcome = 'passed'; reasonCode = $null; restartRequired = $false
+                                 installerAttempted = $false })
         { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome passed `
             -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload $payload } | Should -Not -Throw
     }

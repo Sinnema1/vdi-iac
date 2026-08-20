@@ -64,6 +64,7 @@ $hostCleanup = 'not-attempted'
 $guestCleanup = 'not-attempted'
 $verdict = $null
 $terminalReason = $null
+$bundleCleanupFailed = $false
 
 Write-Information "lab run $runId"
 
@@ -75,6 +76,11 @@ try {
         # Nothing was uploaded, so there is nothing on the guest to clean up.
         $terminalReason = 'bundle_assembly_failed'
         $guestCleanup = 'removed'
+
+        # The bundle's own cleanup outcome is carried forward rather than
+        # overwritten. A partial bundle that could not be removed is not the same
+        # as one that was, and reporting 'removed' would erase that.
+        if ($bundle.CleanupOutcome -eq 'failed') { $bundleCleanupFailed = $true }
     }
     elseif (-not $PSCmdlet.ShouldProcess($VarFile, 'Run the lab harness against the configured target')) {
         # -WhatIf still produces an envelope. A run that reports nothing is
@@ -146,6 +152,10 @@ finally {
     else {
         $hostCleanup = 'removed'
     }
+
+    # A bundle whose own cleanup failed leaves content on the host regardless of
+    # what happened afterwards.
+    if ($bundleCleanupFailed) { $hostCleanup = 'failed' }
 }
 
 if (-not $verdict) {

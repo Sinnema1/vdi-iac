@@ -48,6 +48,9 @@ $definition = Get-LabScenario -Name $Scenario
 Write-Information "scenario '$Scenario': $($definition.Description)"
 
 $runId = Get-RunIdentifier
+# Generated per invocation, exactly as the main runner does. Omitting it left
+# every scenario rejected by packer before the guest was ever reached.
+$cleanupNonce = -join ((1..32) | ForEach-Object { '{0:x}' -f (Get-Random -Minimum 0 -Maximum 16) })
 $startedUtc = [datetime]::UtcNow
 $runWork = New-RunDirectory -Root $WorkRoot -RunId $runId -Prefix 'scenario'
 $evidenceDirectory = Join-Path $runWork 'evidence'
@@ -76,11 +79,13 @@ $arguments = @(
     '-on-error=run-cleanup-provisioner'
     "-var-file=$VarFile"
     "-var", "run_id=$runId"
+    "-var", "cleanup_nonce=$cleanupNonce"
     "-var", "bundle_path=$($bundle.BundlePath)"
     "-var", "descriptor_sha256=$digest"
     "-var", "evidence_output_dir=$evidenceDirectory"
     "-var", "tools_source_dir=$(Join-Path $repoRoot 'source-qualification' 'scripts')"
     "-var", "guest_scripts_dir=$(Join-Path $repoRoot 'packer' 'scripts' 'guest')"
+    "-var", "contracts_source_dir=$(Join-Path $repoRoot 'contracts')"
     (Join-Path $repoRoot 'packer' 'harness')
 )
 
@@ -124,30 +129,11 @@ Write-Information "  host cleanup       : $hostCleanup"
 Write-Information "  guest cleanup      : $guestCleanup"
 Write-Information "  evidence           : $evidenceDirectory"
 
-$failures = [System.Collections.Generic.List[string]]::new()
+$scenarioVerdict = Get-LabScenarioVerdict -Definition $definition -Outcome $orchestration.outcome `
+    -ObservedReasonCode $observation.ReasonCode -InstallerAttemptCount $observation.InstallerAttemptCount `
+    -HostCleanupOutcome $hostCleanup -GuestCleanupOutcome $guestCleanup
 
-if ($orchestration.outcome -ne $definition.ExpectedOutcome) {
-    $failures.Add("outcome was '$($orchestration.outcome)', expected '$($definition.ExpectedOutcome)'")
-}
-
-# An outcome alone is not enough for the negatives: 'incomplete' is reachable for
-# reasons that have nothing to do with the control under test, including missing
-# evidence or a failed cleanup.
-if ($definition.ExpectedReasonCode -and $observation.ReasonCode -ne $definition.ExpectedReasonCode) {
-    $failures.Add("reason code was '$($observation.ReasonCode)', expected '$($definition.ExpectedReasonCode)'")
-}
-
-# The witness is a count from evidence, not an inference from output. An
-# installer that starts and then fails has still started.
-$installerRan = $observation.InstallerAttemptCount -gt 0
-if ($installerRan -ne $definition.ExpectInstalled) {
-    $failures.Add("installer attempts were $($observation.InstallerAttemptCount), expected installed: $($definition.ExpectInstalled)")
-}
-
-# These scenarios all run against a healthy communicator, so cleanup succeeding
-# is part of what they assert rather than a nice-to-have.
-if ($hostCleanup -ne 'removed') { $failures.Add("host cleanup was '$hostCleanup', expected 'removed'") }
-if ($guestCleanup -ne 'removed') { $failures.Add("guest cleanup was '$guestCleanup', expected 'removed'") }
+$failures = $scenarioVerdict.Failures
 
 if ($failures.Count -eq 0) {
     Write-Information "scenario '$Scenario': as expected"

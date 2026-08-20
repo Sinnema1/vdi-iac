@@ -32,6 +32,17 @@ $script:ExpectedPhases = @{
 # harness itself and cannot be read as a conclusive result.
 $script:LogicalFailureExitCode = 200
 
+# The only terminal reasons that describe a deliberate pre-restart halt. Any
+# other incomplete install leaves the missing validation phase unexplained, and
+# accepting it would let an unrelated failure pass as a designed stop.
+$script:PreRestartHaltReasons = @(
+    'install_timeout_termination_failed',
+    'descriptor_digest_mismatch',
+    'descriptor_invalid',
+    'run_id_mismatch',
+    'adapter_unsupported'
+)
+
 function Get-LabEvidenceOutcome {
     <#
     .SYNOPSIS
@@ -69,6 +80,7 @@ function Get-LabEvidenceOutcome {
 
     $expectedRunId = Assert-RunIdentifier -RunId $RunId
     $phases = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $documents = @{}
 
     # An install-only record is permitted only when the install evidence itself
     # says the run stopped deliberately. Deriving that from a console message
@@ -122,10 +134,25 @@ function Get-LabEvidenceOutcome {
             outcome             = $parsed.outcome
             failedRequiredCount = $parsed.payload.failedRequiredCount
         })
+
+        $documents[$parsed.payload.phase] = $parsed
     }
 
     if ($installOnly) {
         $install = $phases | Where-Object phase -EQ 'install' | Select-Object -First 1
+        $installDocument = $documents['install']
+        $installTerminal = if ($installDocument -and ($installDocument.payload.PSObject.Properties.Name -contains 'terminalReasonCode')) {
+            $installDocument.payload.terminalReasonCode
+        } else { $null }
+
+        # A missing validation phase is excused only by a terminal reason that
+        # describes a deliberate pre-restart stop. Absent, or present but naming
+        # some other failure, the missing phase is unexplained rather than by
+        # design -- and $null is not in the allowlist, so both cases refuse here.
+        if ($installTerminal -notin $script:PreRestartHaltReasons) {
+            return NewVerdict -Outcome 'incomplete' -Reason 'phase_missing' -Phases $phases -PackerExitCode $PackerExitCode
+        }
+
         if (-not $install -or $install.outcome -ne 'incomplete') {
             # The run claimed to have halted, but its install evidence does not
             # describe a halt. One of the two is wrong, so nothing is concluded.
@@ -136,6 +163,18 @@ function Get-LabEvidenceOutcome {
             return NewVerdict -Outcome 'incomplete' -Reason 'packer_failed' -Phases $phases -PackerExitCode $PackerExitCode
         }
         return NewVerdict -Outcome 'incomplete' -Reason 'phase_missing' -Phases $phases -PackerExitCode $PackerExitCode
+    }
+
+    # The two phases must describe the same run. Different package identities or a
+    # different manifest version means one of them belongs somewhere else, and a
+    # pass assembled from two unrelated records is not a pass.
+    $installPackages = @($documents['install'].payload.packages | ForEach-Object { $_.id }) | Sort-Object
+    $validatePackages = @($documents['validate'].payload.packages | ForEach-Object { $_.id }) | Sort-Object
+    if (($installPackages -join '|') -ne ($validatePackages -join '|')) {
+        return NewVerdict -Outcome 'incomplete' -Reason 'evidence_inconsistent' -Phases $phases -PackerExitCode $PackerExitCode
+    }
+    if ($documents['install'].manifestSchemaVersion -ne $documents['validate'].manifestSchemaVersion) {
+        return NewVerdict -Outcome 'incomplete' -Reason 'evidence_inconsistent' -Phases $phases -PackerExitCode $PackerExitCode
     }
 
     $outcome = if (@($phases | Where-Object outcome -EQ 'incomplete').Count -gt 0) { 'incomplete' }
@@ -245,12 +284,17 @@ function Get-LabOrchestrationEvidence {
     $cleanupSettled = ($HostCleanupOutcome -in @('removed', 'retained')) -and
                       ($GuestCleanupOutcome -in @('removed', 'retained'))
 
+    # A completed verdict of either kind requires settled cleanup. A run that
+    # failed cleanly and a run that failed and abandoned content on a machine are
+    # not the same result, and only one of them is fully accounted for.
+    $completed = $Verdict.Outcome -in @('passed', 'failed')
+
     $outcome = if ($HostCleanupOutcome -eq 'failed' -or $GuestCleanupOutcome -eq 'failed') { 'incomplete' }
-               elseif ($Verdict.Outcome -eq 'passed' -and -not $cleanupSettled) { 'incomplete' }
+               elseif ($completed -and -not $cleanupSettled) { 'incomplete' }
                else { $Verdict.Outcome }
 
     $terminal = if ($HostCleanupOutcome -eq 'failed' -or $GuestCleanupOutcome -eq 'failed') { 'cleanup_failed' }
-                elseif ($Verdict.Outcome -eq 'passed' -and -not $cleanupSettled) { 'cleanup_failed' }
+                elseif ($completed -and -not $cleanupSettled) { 'cleanup_failed' }
                 else { $Verdict.Reason }
 
     ConvertTo-EvidenceEnvelope -ResultKind 'build-orchestration' -RunId $RunId `

@@ -215,24 +215,23 @@ Describe 'harness ordering' {
     }
 
     It 'gates both cleanup paths on the ownership sentinel' {
-        # Without this the error path can run after a failed preflight -- a target
-        # that never identified itself -- and delete something it does not own.
-        ([regex]::Matches($script:Harness, "Test-Path -LiteralPath '\`$\{local\.sentinel_path\}'")).Count |
-            Should -BeGreaterOrEqual 2
+        # Both paths call the tested function rather than repeating the rule
+        # inline, so the decision has behavioral coverage instead of textual.
+        ([regex]::Matches($script:Harness, 'Test-CleanupAuthorization')).Count | Should -BeGreaterOrEqual 2
+        $script:Harness | Should -Match 'ExpectedNonce'
     }
 
     It 'retrieves install evidence before the restart gate' {
         # A failing provisioner stops the ones after it, so evidence collected
         # later than the gate would never be collected at all.
-        $installDownload = $script:Harness.IndexOf("install-`${local.evidence_name}`"`n    destination")
-        if ($installDownload -lt 0) { $installDownload = $script:Harness.IndexOf('direction   = "download"') }
-        $gate = $script:Harness.IndexOf('Refusing to restart a guest')
+        $installDownload = $script:Harness.IndexOf('direction   = "download"')
+        $gate = $script:Harness.IndexOf('Test-RestartAuthorization')
         $installDownload | Should -BeGreaterThan 0
         $installDownload | Should -BeLessThan $gate
     }
 
-    It 'stops before the restart when the install did not complete' {
-        $gate = $script:Harness.IndexOf('Refusing to restart a guest')
+    It 'decides the restart from install evidence, before restarting' {
+        $gate = $script:Harness.IndexOf('Test-RestartAuthorization')
         $restart = $script:Harness.IndexOf('windows-restart')
         $gate | Should -BeGreaterThan 0
         $gate | Should -BeLessThan $restart

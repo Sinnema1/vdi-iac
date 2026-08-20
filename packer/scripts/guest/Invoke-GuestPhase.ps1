@@ -74,6 +74,10 @@ function WriteBoundedEvidence {
             -Payload ([ordered]@{
                 phase = $Phase; restartRequired = $false
                 packageCount = 0; passedCount = 0; failedRequiredCount = 0
+                # An explicit zero, not an absent field. A pre-execution refusal
+                # is a claim that nothing was launched, and the witness has to
+                # state it rather than leave it unsaid.
+                installerAttemptCount = 0
                 terminalReasonCode = $ReasonCode
                 cleanupOutcome = 'not-attempted'
                 packages = @()

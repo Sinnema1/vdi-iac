@@ -160,54 +160,70 @@ Describe 'Get-LabScenarioObservation' {
 
 Describe 'a scenario fails when its expectations are not met' {
 
-    BeforeAll {
-        function EvaluateScenario {
-            <#
-                The runner's decision, isolated from packer so the three
-                weakenings can be exercised without a target. Mirrors
-                Invoke-LabScenario.ps1's assertions.
-            #>
-            param(
-                $Definition, [string] $ObservedReason, [int] $Attempts,
-                [string] $Outcome, [string] $HostCleanup = 'removed', [string] $GuestCleanup = 'removed'
-            )
-            $failures = @()
-            if ($Outcome -ne $Definition.ExpectedOutcome) { $failures += 'outcome' }
-            if ($Definition.ExpectedReasonCode -and $ObservedReason -ne $Definition.ExpectedReasonCode) { $failures += 'reason' }
-            if (($Attempts -gt 0) -ne $Definition.ExpectInstalled) { $failures += 'witness' }
-            if ($HostCleanup -ne 'removed') { $failures += 'host-cleanup' }
-            if ($GuestCleanup -ne 'removed') { $failures += 'guest-cleanup' }
-            $failures
-        }
-    }
-
     It 'passes when everything matches' {
-        $definition = Get-LabScenario -Name 'payload-tamper'
-        EvaluateScenario -Definition $definition -ObservedReason 'integrity_mismatch' -Attempts 0 -Outcome 'failed' |
-            Should -BeNullOrEmpty
+        # The production decision, not a copy of it. A test-only evaluator proves
+        # the copy works while the runner is free to diverge from it silently.
+        $verdict = Get-LabScenarioVerdict -Definition (Get-LabScenario -Name 'payload-tamper') `
+            -Outcome 'failed' -ObservedReasonCode 'integrity_mismatch' -InstallerAttemptCount 0 `
+            -HostCleanupOutcome 'removed' -GuestCleanupOutcome 'removed'
+        $verdict.Passed | Should -BeTrue
     }
 
     It 'fails on the wrong reason code, even with the expected outcome' {
-        # 'incomplete' and 'failed' are reachable for reasons unrelated to the
-        # control under test, so the outcome alone cannot carry the assertion.
-        $definition = Get-LabScenario -Name 'descriptor-tamper'
-        EvaluateScenario -Definition $definition -ObservedReason 'integrity_mismatch' -Attempts 0 -Outcome 'incomplete' |
-            Should -Contain 'reason'
+        # 'incomplete' is reachable through missing evidence or a failed cleanup,
+        # so the outcome alone cannot carry the assertion.
+        $verdict = Get-LabScenarioVerdict -Definition (Get-LabScenario -Name 'descriptor-tamper') `
+            -Outcome 'incomplete' -ObservedReasonCode 'integrity_mismatch' -InstallerAttemptCount 0 `
+            -HostCleanupOutcome 'removed' -GuestCleanupOutcome 'removed'
+        $verdict.Passed | Should -BeFalse
+        ($verdict.Failures -join ' ') | Should -Match 'reason code'
     }
 
     It 'fails when the installer started and then failed' {
-        $definition = Get-LabScenario -Name 'payload-tamper'
-        EvaluateScenario -Definition $definition -ObservedReason 'integrity_mismatch' -Attempts 1 -Outcome 'failed' |
-            Should -Contain 'witness'
+        $verdict = Get-LabScenarioVerdict -Definition (Get-LabScenario -Name 'payload-tamper') `
+            -Outcome 'failed' -ObservedReasonCode 'integrity_mismatch' -InstallerAttemptCount 1 `
+            -HostCleanupOutcome 'removed' -GuestCleanupOutcome 'removed'
+        $verdict.Passed | Should -BeFalse
+        ($verdict.Failures -join ' ') | Should -Match 'installer attempts'
     }
 
     It 'fails when <side> cleanup did not complete' -ForEach @(
-        @{ side = 'host';  hostOutcome = 'failed';        guestOutcome = 'removed' }
-        @{ side = 'guest'; hostOutcome = 'removed';       guestOutcome = 'not-attempted' }
+        @{ side = 'host';  hostOutcome = 'failed';  guestOutcome = 'removed' }
+        @{ side = 'guest'; hostOutcome = 'removed'; guestOutcome = 'not-attempted' }
     ) {
-        $definition = Get-LabScenario -Name 'payload-tamper'
-        EvaluateScenario -Definition $definition -ObservedReason 'integrity_mismatch' -Attempts 0 -Outcome 'failed' `
-            -HostCleanup $hostOutcome -GuestCleanup $guestOutcome | Should -Not -BeNullOrEmpty
+        $verdict = Get-LabScenarioVerdict -Definition (Get-LabScenario -Name 'payload-tamper') `
+            -Outcome 'failed' -ObservedReasonCode 'integrity_mismatch' -InstallerAttemptCount 0 `
+            -HostCleanupOutcome $hostOutcome -GuestCleanupOutcome $guestOutcome
+        $verdict.Passed | Should -BeFalse
+        ($verdict.Failures -join ' ') | Should -Match 'cleanup'
+    }
+
+    It 'reports every failure rather than only the first' {
+        $verdict = Get-LabScenarioVerdict -Definition (Get-LabScenario -Name 'payload-tamper') `
+            -Outcome 'passed' -ObservedReasonCode 'installer_failed' -InstallerAttemptCount 1 `
+            -HostCleanupOutcome 'failed' -GuestCleanupOutcome 'failed'
+        $verdict.Failures.Count | Should -BeGreaterOrEqual 4
+    }
+}
+
+Describe 'the scenario runner passes every variable the harness requires' {
+
+    It 'supplies each runtime variable that has no default' {
+        # Driven from the harness itself, so adding a required variable later
+        # fails here rather than at the first lab run. Two were added and the
+        # runner was not updated: packer rejected every scenario before the guest
+        # was reached.
+        $harness = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'packer' 'harness' 'lab-null.pkr.hcl') -Raw
+        $runner = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'scripts' 'ci' 'Invoke-LabScenario.ps1') -Raw
+        $example = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'packer' 'harness' 'lab.auto.pkrvars.hcl.example') -Raw
+
+        $declared = [regex]::Matches($harness, '(?m)^variable\s+"(?<name>[a-z_]+)"') | ForEach-Object { $_.Groups['name'].Value }
+
+        foreach ($name in $declared) {
+            $suppliedByRunner = $runner -match [regex]::Escape("`"$name=")
+            $suppliedByOperator = $example -match "(?m)^\s*$([regex]::Escape($name))\s*="
+            ($suppliedByRunner -or $suppliedByOperator) | Should -BeTrue -Because "'$name' must come from the runner or the operator's var file"
+        }
     }
 }
 

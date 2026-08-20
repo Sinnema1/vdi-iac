@@ -292,7 +292,7 @@ Describe 'real reparse points' -Skip:(-not $IsWindows) {
 
         $adapter = RecordingAdapter
         $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter $adapter
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter $adapter
 
         # Bounded evidence, not merely a thrown exception.
         $evidence.outcome | Should -Be 'failed'

@@ -186,7 +186,8 @@
                 "validation_inconclusive",
                 "path_rejected",
                 "adapter_unsupported",
-                "unexpected_error"
+                "unexpected_error",
+                "run_id_mismatch"
               ]
             }
           ]
@@ -344,7 +345,8 @@
                 "validation_inconclusive",
                 "path_rejected",
                 "adapter_unsupported",
-                "unexpected_error"
+                "unexpected_error",
+                "run_id_mismatch"
               ]
             }
           ]

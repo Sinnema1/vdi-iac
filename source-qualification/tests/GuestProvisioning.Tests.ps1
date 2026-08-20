@@ -348,7 +348,7 @@ Describe 'Invoke-GuestProvisioning' {
     It 'installs a verified package and returns an evidence envelope' {
         $bundle = NewBundleScenario
         $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter)
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter (FakeAdapter)
 
         $evidence.resultSchemaVersion | Should -Be 2
         $evidence.resultKind | Should -Be 'guest-provisioning'
@@ -366,7 +366,7 @@ Describe 'Invoke-GuestProvisioning' {
         $adapter = FakeAdapter -StartProcess { $script:started = $true; [PSCustomObject]@{ ExitCode = 0; TimedOut = $false; Terminated = $true } }
 
         $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter $adapter
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter $adapter
 
         $evidence.outcome | Should -Be 'failed'
         $evidence.payload.packages[0].reasonCode | Should -Be 'integrity_mismatch'
@@ -374,7 +374,7 @@ Describe 'Invoke-GuestProvisioning' {
 
     It 'refuses a descriptor whose digest does not match' {
         $bundle = NewBundleScenario
-        { Invoke-GuestProvisioning -BundlePath $bundle.BundlePath -ExpectedDescriptorSha256 ('f' * 64) -Adapter (FakeAdapter) } |
+        { Invoke-GuestProvisioning -BundlePath $bundle.BundlePath -ExpectedDescriptorSha256 ('f' * 64) -RunId $bundle.RunId -Adapter (FakeAdapter) } |
             Should -Throw '*digest mismatch*'
     }
 
@@ -382,7 +382,7 @@ Describe 'Invoke-GuestProvisioning' {
         $bundle = NewBundleScenario
         $adapter = FakeAdapter -StartProcess { [PSCustomObject]@{ ExitCode = 3010; TimedOut = $false; Terminated = $true } }
         $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter $adapter
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter $adapter
 
         $evidence.outcome | Should -Be 'passed'
         $evidence.payload.restartRequired | Should -BeTrue
@@ -392,7 +392,7 @@ Describe 'Invoke-GuestProvisioning' {
         $bundle = NewBundleScenario
         $adapter = FakeAdapter -StartProcess { [PSCustomObject]@{ ExitCode = $null; TimedOut = $true; Terminated = $false } }
         $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter $adapter
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter $adapter
 
         $evidence.outcome | Should -Be 'incomplete'
         $evidence.payload.terminalReasonCode | Should -Be 'install_timeout_termination_failed'
@@ -403,12 +403,12 @@ Describe 'Invoke-GuestProvisioning' {
         # install would observe a state the machine will not be in afterwards.
         $bundle = NewBundleScenario
         $install = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter)
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter (FakeAdapter)
         $install.payload.packages[0].validation | Should -BeNullOrEmpty
 
         $root = NewValidationRoot -Files @('Example/Agent/agent.exe')
         $validate = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath -Phase validate `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter -Root $root)
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter (FakeAdapter -Root $root)
 
         $validate.outcome | Should -Be 'passed'
         $validate.payload.packages[0].validation.Count | Should -Be 1
@@ -417,7 +417,7 @@ Describe 'Invoke-GuestProvisioning' {
     It 'fails the validate phase when the expected state is absent' {
         $bundle = NewBundleScenario
         $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath -Phase validate `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter -Root (NewValidationRoot))
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter (FakeAdapter -Root (NewValidationRoot))
         $evidence.outcome | Should -Be 'failed'
         $evidence.payload.packages[0].reasonCode | Should -Be 'validation_failed'
     }
@@ -428,7 +428,7 @@ Describe 'Invoke-GuestProvisioning' {
         $bundle = NewBundleScenario
         $adapter = FakeAdapter -StartProcess { [PSCustomObject]@{ ExitCode = 7; TimedOut = $false; Terminated = $true } }
         $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter $adapter
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter $adapter
 
         $json = $evidence | ConvertTo-Json -Depth 16
         $json | Should -Not -Match '/quiet'
@@ -475,7 +475,7 @@ Describe 'guest path confinement' {
         $null = New-Item -ItemType SymbolicLink -Path $payloadDir -Target $outside
 
         $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter -Root (NewValidationRoot))
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter (FakeAdapter -Root (NewValidationRoot))
 
         $evidence.outcome | Should -Be 'failed'
         $evidence.payload.packages[0].reasonCode | Should -Be 'path_rejected'
@@ -561,7 +561,7 @@ Describe 'Remove-GuestBundle' {
         # evidence retrieval, then cleanup, then host cleanup, then evaluation.
         $bundle = NewBundleScenario
         $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter -Root (NewValidationRoot))
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId -Adapter (FakeAdapter -Root (NewValidationRoot))
 
         $evidence.payload.cleanupOutcome | Should -Be 'not-attempted'
         Test-Path -LiteralPath $bundle.BundlePath | Should -BeTrue
@@ -584,7 +584,7 @@ Describe 'production guest adapter' {
         $bundle = NewBundleScenario -OptionalOnly
         $logDirectory = Join-Path $bundle.BundlePath 'logs'
 
-        { Invoke-GuestProvisioning -BundlePath $bundle.BundlePath -ExpectedDescriptorSha256 $bundle.DescriptorSha256 } |
+        { Invoke-GuestProvisioning -BundlePath $bundle.BundlePath -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -RunId $bundle.RunId } |
             Should -Throw '*Windows*'
 
         Test-Path -LiteralPath $logDirectory | Should -BeFalse

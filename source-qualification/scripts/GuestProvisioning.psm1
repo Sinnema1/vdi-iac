@@ -487,6 +487,14 @@ function Invoke-GuestProvisioning {
         payload hashes can be rewritten together so that every in-bundle check
         passes; only a digest that did not travel with the bundle catches that.
 
+    .PARAMETER RunId
+        The run identifier the orchestrator delivered out of band, alongside the
+        descriptor digest. It is compared against the identifier inside the
+        authenticated descriptor, so a bundle that authenticates correctly but
+        belongs to a different run -- a replay of an earlier upload, or a
+        directory left behind by a previous pass -- is refused rather than
+        installed.
+
     .PARAMETER Phase
         'install' runs verification and installation. 'validate' runs the
         post-restart checks against the same descriptor.
@@ -500,17 +508,29 @@ function Invoke-GuestProvisioning {
     param(
         [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $BundlePath,
         [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ExpectedDescriptorSha256,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RunId,
         [Parameter()] [ValidateSet('install','validate')] [string] $Phase = 'install',
         [Parameter()] $Adapter,
         [Parameter()] [ValidateNotNullOrEmpty()] [string] $LogDirectory
     )
 
     $startedUtc = [datetime]::UtcNow
+    $expectedRunId = Assert-RunIdentifier -RunId $RunId
     if (-not $Adapter) { $Adapter = Get-GuestAdapter }
     if (-not $LogDirectory) { $LogDirectory = Join-Path $BundlePath 'logs' }
 
     $descriptorPath = Join-Path $BundlePath 'descriptor.json'
     $descriptor = Test-TransferDescriptor -Path $descriptorPath -ExpectedSha256 $ExpectedDescriptorSha256
+
+    # The digest proves the descriptor is one we produced. It does not prove it
+    # is the one for *this* run: an earlier bundle, or a directory left behind by
+    # a previous pass, authenticates perfectly well against its own digest.
+    # Comparing against the identifier delivered out of band closes that.
+    if (-not [string]::Equals($descriptor.runId, $expectedRunId, [System.StringComparison]::Ordinal)) {
+        $exception = [System.Exception]::new('The descriptor belongs to a different run than the one this phase was given.')
+        $exception.Data['ReasonCode'] = 'run_id_mismatch'
+        throw $exception
+    }
 
     if (-not (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
         $null = New-Item -ItemType Directory -Path $LogDirectory -Force
@@ -581,7 +601,7 @@ function Invoke-GuestProvisioning {
                elseif ($failedRequired.Count -gt 0) { 'failed' }
                else { 'passed' }
 
-    ConvertTo-EvidenceEnvelope -ResultKind 'guest-provisioning' -RunId $descriptor.runId `
+    ConvertTo-EvidenceEnvelope -ResultKind 'guest-provisioning' -RunId $expectedRunId `
         -Outcome $outcome -StartedUtc $startedUtc `
         -ManifestSchemaVersion ([int] $descriptor.manifestSchemaVersion) -Payload ([ordered]@{
             phase = $Phase

@@ -201,7 +201,14 @@ function Invoke-PackageValidation {
                         $record.ReasonCode = 'root_unavailable'
                         break
                     }
-                    $path = Join-Path $root ($check.relativePath -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+                    # Joined segment by segment rather than by substituting
+                    # separators into the string: Windows normalizes separators
+                    # across the whole path, so a substituted string and a joined
+                    # one do not agree.
+                    $path = $root
+                    foreach ($segment in $check.relativePath.Split('/')) {
+                        if ($segment) { $path = Join-Path $path $segment }
+                    }
 
                     if (-not (& $Adapter.TestFile $path)) {
                         $record.Outcome = 'failed'

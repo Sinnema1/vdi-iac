@@ -52,6 +52,17 @@ BeforeAll {
         }
     }
 
+    function ExpectedPath {
+        # Built exactly as the module builds it, so the fake's keys agree with
+        # what the module looks up on any platform. Concatenating a separator by
+        # hand does not, because Windows normalizes separators across the whole
+        # path.
+        param([string] $Root, [string] $Relative)
+        $path = $Root
+        foreach ($segment in $Relative.Split('/')) { if ($segment) { $path = Join-Path $path $segment } }
+        $path
+    }
+
     function RawResult {
         param($ExitCode, [switch] $TimedOut, [bool] $Terminated = $true)
         [PSCustomObject]@{ ExitCode = $ExitCode; TimedOut = [bool] $TimedOut; Terminated = $Terminated }
@@ -198,7 +209,7 @@ Describe 'Invoke-PackageValidation' {
 
     It 'passes when every check passes' {
         $checks = @([PSCustomObject]@{ id = 'present'; kind = 'file-exists'; root = 'programFiles'; relativePath = 'Example/a.exe' })
-        $adapter = FakeAdapter -Files @{ ('/roots/programFiles' + [System.IO.Path]::DirectorySeparatorChar + 'Example' + [System.IO.Path]::DirectorySeparatorChar + 'a.exe') = $true }
+        $adapter = FakeAdapter -Files @{ (ExpectedPath '/roots/programFiles' 'Example/a.exe') = $true }
         (Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter $adapter).Outcome | Should -Be 'passed'
     }
 
@@ -221,7 +232,7 @@ Describe 'Invoke-PackageValidation' {
     }
 
     It 'reports inconclusive when a file carries no version information' {
-        $path = '/roots/programFiles' + [System.IO.Path]::DirectorySeparatorChar + 'Example' + [System.IO.Path]::DirectorySeparatorChar + 'a.exe'
+        $path = ExpectedPath '/roots/programFiles' 'Example/a.exe'
         $checks = @([PSCustomObject]@{ id = 'ver'; kind = 'file-version'; root = 'programFiles'
                                        relativePath = 'Example/a.exe'; versionField = 'file'; expectedVersion = '4.2.1' })
         $adapter = FakeAdapter -Files @{ $path = $true }
@@ -233,7 +244,7 @@ Describe 'Invoke-PackageValidation' {
     It 'treats <observed> as equal to expected 7.0.1024' -ForEach @(
         @{ observed = '7.0.1024' }, @{ observed = '7.0.1024.0' }
     ) {
-        $path = '/roots/programFiles' + [System.IO.Path]::DirectorySeparatorChar + 'Example' + [System.IO.Path]::DirectorySeparatorChar + 'a.exe'
+        $path = ExpectedPath '/roots/programFiles' 'Example/a.exe'
         $checks = @([PSCustomObject]@{ id = 'ver'; kind = 'file-version'; root = 'programFiles'
                                        relativePath = 'Example/a.exe'; versionField = 'file'; expectedVersion = '7.0.1024' })
         $adapter = FakeAdapter -Files @{ $path = $true } -Versions @{ $path = $observed }
@@ -241,7 +252,7 @@ Describe 'Invoke-PackageValidation' {
     }
 
     It 'reports a version mismatch as failed' {
-        $path = '/roots/programFiles' + [System.IO.Path]::DirectorySeparatorChar + 'Example' + [System.IO.Path]::DirectorySeparatorChar + 'a.exe'
+        $path = ExpectedPath '/roots/programFiles' 'Example/a.exe'
         $checks = @([PSCustomObject]@{ id = 'ver'; kind = 'file-version'; root = 'programFiles'
                                        relativePath = 'Example/a.exe'; versionField = 'file'; expectedVersion = '7.0.1024' })
         $adapter = FakeAdapter -Files @{ $path = $true } -Versions @{ $path = '7.0.1024.1' }
@@ -365,7 +376,7 @@ Describe 'Invoke-GuestProvisioning' {
             -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter)
         $install.payload.packages[0].Validation | Should -BeNullOrEmpty
 
-        $path = '/roots/programFiles' + [System.IO.Path]::DirectorySeparatorChar + 'Example' + [System.IO.Path]::DirectorySeparatorChar + 'Agent' + [System.IO.Path]::DirectorySeparatorChar + 'agent.exe'
+        $path = ExpectedPath '/roots/programFiles' 'Example/Agent/agent.exe'
         $validate = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath -Phase validate `
             -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter -Files @{ $path = $true })
 

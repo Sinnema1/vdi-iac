@@ -10,6 +10,16 @@
     so a real child cannot return 3010 on Linux at all.
 #>
 
+# Evaluated at discovery: Pester resolves -Skip while discovering tests, before
+# BeforeAll runs, so a probe placed there leaves every link test silently skipped.
+$script:LinksSupported = $(
+    $probe = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+    $null = New-Item -ItemType Directory -Path $probe -Force
+    try { $null = New-Item -ItemType SymbolicLink -Path (Join-Path $probe 'l') -Target $probe -ErrorAction Stop; $true }
+    catch { $false }
+    finally { Remove-Item -LiteralPath $probe -Recurse -Force -ErrorAction SilentlyContinue }
+)
+
 BeforeAll {
     $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
     $scripts = Join-Path $script:RepoRoot 'source-qualification' 'scripts'
@@ -52,6 +62,45 @@ BeforeAll {
         }
     }
 
+    function NewBundleScenario {
+            <#
+                A real bundle produced by the host path, so the guest phase is
+                exercised against something the assembler actually built rather
+                than a hand-written descriptor.
+            #>
+            param([switch] $CorruptPayloadAfterAssembly)
+
+            $base = NewTempDir
+            $source = Join-Path $base 'src'
+            $relative = 'example-agent/1.2.3/payload.exe'
+            $full = Join-Path $source $relative
+            $null = New-Item -ItemType Directory -Path (Split-Path -Parent $full) -Force
+            Set-Content -LiteralPath $full -Value 'payload bytes' -Encoding utf8 -NoNewline
+            $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
+
+            $manifestPath = Join-Path $base 'manifest.json'
+            @{ schemaVersion = 2; packages = @(@{
+                id = 'example-agent'; version = '1.2.3'; source = "file://$relative"
+                sha256 = $hash; order = 10; required = $true
+                installer = @{ kind = 'exe'; arguments = @('/quiet'); timeoutSeconds = 900
+                               restartPolicy = 'allow-deferred'
+                               exitCodes = @{ success = @(0); restartRequired = @(3010) } }
+                validation = @(@{ id = 'agent-binary'; kind = 'file-exists'
+                                  root = 'programFiles'; relativePath = 'Example/Agent/agent.exe' })
+            })} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
+            $bundle = New-TransferBundle -ManifestPath $manifestPath -SourceRoot $source -BundleRoot (Join-Path $base 'bundles')
+
+            if ($CorruptPayloadAfterAssembly) {
+                # Altering the payload after the host verified it is what guest
+                # re-verification exists to catch.
+                $payload = Join-Path $bundle.BundlePath 'packages' 'example-agent' 'payload.exe'
+                Set-Content -LiteralPath $payload -Value 'tampered' -Encoding utf8 -NoNewline
+            }
+
+            $bundle
+        }
+
     function ExpectedPath {
         # Built exactly as the module builds it, so the fake's keys agree with
         # what the module looks up on any platform. Concatenating a separator by
@@ -68,6 +117,23 @@ BeforeAll {
         [PSCustomObject]@{ ExitCode = $ExitCode; TimedOut = [bool] $TimedOut; Terminated = $Terminated }
     }
 
+    function NewValidationRoot {
+        <#
+            A real directory, because confinement is a filesystem property: the
+            resolver walks actual components looking for a redirection, so a
+            fictional root cannot exercise it.
+        #>
+        param([string[]] $Files = @())
+        $root = NewTempDir
+        foreach ($relative in $Files) {
+            $full = $root
+            foreach ($segment in $relative.Split('/')) { $full = Join-Path $full $segment }
+            $null = New-Item -ItemType Directory -Path (Split-Path -Parent $full) -Force
+            Set-Content -LiteralPath $full -Value 'content' -NoNewline
+        }
+        $root
+    }
+
     function FakeAdapter {
         <#
             Records what it was asked to do and returns what the test dictates.
@@ -75,20 +141,21 @@ BeforeAll {
         #>
         param(
             [scriptblock] $StartProcess = { [PSCustomObject]@{ ExitCode = 0; TimedOut = $false; Terminated = $true } },
-            [hashtable] $Files = @{}, [hashtable] $Versions = @{}, [string[]] $Services = @(),
-            [scriptblock] $ResolveRoot = { param($r) '/roots/' + $r }
+            [string] $Root, [hashtable] $Versions = @{}, [string[]] $Services = @()
         )
         # Bound to locals before capture: static analysis cannot see a parameter
         # referenced only inside a closure, and would report each as unused.
-        $fileMap = $Files
+        $rootPath = $Root
         $versionMap = $Versions
         $serviceNames = $Services
 
         [PSCustomObject]@{
             Name = 'fake'
             StartProcess = $StartProcess
-            ResolveRoot = $ResolveRoot
-            TestFile = { param($p) $fileMap.ContainsKey($p) }.GetNewClosure()
+            # A real directory. File presence is answered by the filesystem, so
+            # the confinement walk has something to walk.
+            ResolveRoot = { $rootPath }.GetNewClosure()
+            TestFile = { param($p) Test-Path -LiteralPath $p -PathType Leaf }
             GetFileVersion = { param($p) if ($versionMap.ContainsKey($p)) { $versionMap[$p] } else { $null } }.GetNewClosure()
             TestService = { param($n) $serviceNames -contains $n }.GetNewClosure()
         }
@@ -209,56 +276,60 @@ Describe 'Invoke-PackageValidation' {
 
     It 'passes when every check passes' {
         $checks = @([PSCustomObject]@{ id = 'present'; kind = 'file-exists'; root = 'programFiles'; relativePath = 'Example/a.exe' })
-        $adapter = FakeAdapter -Files @{ (ExpectedPath '/roots/programFiles' 'Example/a.exe') = $true }
+        $adapter = FakeAdapter -Root (NewValidationRoot -Files @('Example/a.exe'))
         (Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter $adapter).Outcome | Should -Be 'passed'
     }
 
     It 'fails when a file is absent' {
         $checks = @([PSCustomObject]@{ id = 'present'; kind = 'file-exists'; root = 'programFiles'; relativePath = 'Example/a.exe' })
-        $result = Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter (FakeAdapter)
+        $result = Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter (FakeAdapter -Root (NewValidationRoot))
         $result.Outcome | Should -Be 'failed'
-        $result.Checks[0].ReasonCode | Should -Be 'file_absent'
+        $result.Checks[0].reasonCode | Should -Be 'file_absent'
     }
 
     It 'reports inconclusive, not failed, when a check could not run' {
         # An adapter that threw established nothing. Calling that a failure would
         # claim knowledge the run does not have.
         $checks = @([PSCustomObject]@{ id = 'svc'; kind = 'service-exists'; serviceName = 'ExampleAgent' })
-        $adapter = FakeAdapter
+        $adapter = FakeAdapter -Root (NewValidationRoot)
         $adapter.TestService = { throw 'service control manager unavailable' }
         $result = Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter $adapter
         $result.Outcome | Should -Be 'inconclusive'
-        $result.Checks[0].ReasonCode | Should -Be 'check_error'
+        $result.Checks[0].reasonCode | Should -Be 'check_error'
     }
 
     It 'reports inconclusive when a file carries no version information' {
-        $path = ExpectedPath '/roots/programFiles' 'Example/a.exe'
+        # No version registered for this path, so the adapter returns null: the
+        # file is present but the check established nothing.
+        $root = NewValidationRoot -Files @('Example/a.exe')
         $checks = @([PSCustomObject]@{ id = 'ver'; kind = 'file-version'; root = 'programFiles'
                                        relativePath = 'Example/a.exe'; versionField = 'file'; expectedVersion = '4.2.1' })
-        $adapter = FakeAdapter -Files @{ $path = $true }
+        $adapter = FakeAdapter -Root $root
         $result = Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter $adapter
         $result.Outcome | Should -Be 'inconclusive'
-        $result.Checks[0].ReasonCode | Should -Be 'version_unavailable'
+        $result.Checks[0].reasonCode | Should -Be 'version_unavailable'
     }
 
     It 'treats <observed> as equal to expected 7.0.1024' -ForEach @(
         @{ observed = '7.0.1024' }, @{ observed = '7.0.1024.0' }
     ) {
-        $path = ExpectedPath '/roots/programFiles' 'Example/a.exe'
+        $root = NewValidationRoot -Files @('Example/a.exe')
+        $path = ExpectedPath $root 'Example/a.exe'
         $checks = @([PSCustomObject]@{ id = 'ver'; kind = 'file-version'; root = 'programFiles'
                                        relativePath = 'Example/a.exe'; versionField = 'file'; expectedVersion = '7.0.1024' })
-        $adapter = FakeAdapter -Files @{ $path = $true } -Versions @{ $path = $observed }
+        $adapter = FakeAdapter -Root $root -Versions @{ $path = $observed }
         (Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter $adapter).Outcome | Should -Be 'passed'
     }
 
     It 'reports a version mismatch as failed' {
-        $path = ExpectedPath '/roots/programFiles' 'Example/a.exe'
+        $root = NewValidationRoot -Files @('Example/a.exe')
+        $path = ExpectedPath $root 'Example/a.exe'
         $checks = @([PSCustomObject]@{ id = 'ver'; kind = 'file-version'; root = 'programFiles'
                                        relativePath = 'Example/a.exe'; versionField = 'file'; expectedVersion = '7.0.1024' })
-        $adapter = FakeAdapter -Files @{ $path = $true } -Versions @{ $path = '7.0.1024.1' }
+        $adapter = FakeAdapter -Root $root -Versions @{ $path = '7.0.1024.1' }
         $result = Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter $adapter
         $result.Outcome | Should -Be 'failed'
-        $result.Checks[0].ReasonCode | Should -Be 'version_mismatch'
+        $result.Checks[0].reasonCode | Should -Be 'version_mismatch'
     }
 
     It 'lets one failed check outrank an inconclusive one' {
@@ -266,54 +337,13 @@ Describe 'Invoke-PackageValidation' {
             [PSCustomObject]@{ id = 'absent'; kind = 'file-exists'; root = 'programFiles'; relativePath = 'Example/a.exe' }
             [PSCustomObject]@{ id = 'svc'; kind = 'service-exists'; serviceName = 'ExampleAgent' }
         )
-        $adapter = FakeAdapter
+        $adapter = FakeAdapter -Root (NewValidationRoot)
         $adapter.TestService = { throw 'unavailable' }
         (Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter $adapter).Outcome | Should -Be 'failed'
     }
 }
 
 Describe 'Invoke-GuestProvisioning' {
-
-    BeforeAll {
-        function NewBundleScenario {
-            <#
-                A real bundle produced by the host path, so the guest phase is
-                exercised against something the assembler actually built rather
-                than a hand-written descriptor.
-            #>
-            param([switch] $CorruptPayloadAfterAssembly)
-
-            $base = NewTempDir
-            $source = Join-Path $base 'src'
-            $relative = 'example-agent/1.2.3/payload.exe'
-            $full = Join-Path $source $relative
-            $null = New-Item -ItemType Directory -Path (Split-Path -Parent $full) -Force
-            Set-Content -LiteralPath $full -Value 'payload bytes' -Encoding utf8 -NoNewline
-            $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
-
-            $manifestPath = Join-Path $base 'manifest.json'
-            @{ schemaVersion = 2; packages = @(@{
-                id = 'example-agent'; version = '1.2.3'; source = "file://$relative"
-                sha256 = $hash; order = 10; required = $true
-                installer = @{ kind = 'exe'; arguments = @('/quiet'); timeoutSeconds = 900
-                               restartPolicy = 'allow-deferred'
-                               exitCodes = @{ success = @(0); restartRequired = @(3010) } }
-                validation = @(@{ id = 'agent-binary'; kind = 'file-exists'
-                                  root = 'programFiles'; relativePath = 'Example/Agent/agent.exe' })
-            })} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding utf8
-
-            $bundle = New-TransferBundle -ManifestPath $manifestPath -SourceRoot $source -BundleRoot (Join-Path $base 'bundles')
-
-            if ($CorruptPayloadAfterAssembly) {
-                # Altering the payload after the host verified it is what guest
-                # re-verification exists to catch.
-                $payload = Join-Path $bundle.BundlePath 'packages' 'example-agent' 'payload.exe'
-                Set-Content -LiteralPath $payload -Value 'tampered' -Encoding utf8 -NoNewline
-            }
-
-            $bundle
-        }
-    }
 
     It 'installs a verified package and returns an evidence envelope' {
         $bundle = NewBundleScenario
@@ -339,7 +369,7 @@ Describe 'Invoke-GuestProvisioning' {
             -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter $adapter
 
         $evidence.outcome | Should -Be 'failed'
-        $evidence.payload.packages[0].ReasonCode | Should -Be 'integrity_mismatch'
+        $evidence.payload.packages[0].reasonCode | Should -Be 'integrity_mismatch'
     }
 
     It 'refuses a descriptor whose digest does not match' {
@@ -374,22 +404,22 @@ Describe 'Invoke-GuestProvisioning' {
         $bundle = NewBundleScenario
         $install = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
             -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter)
-        $install.payload.packages[0].Validation | Should -BeNullOrEmpty
+        $install.payload.packages[0].validation | Should -BeNullOrEmpty
 
-        $path = ExpectedPath '/roots/programFiles' 'Example/Agent/agent.exe'
+        $root = NewValidationRoot -Files @('Example/Agent/agent.exe')
         $validate = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath -Phase validate `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter -Files @{ $path = $true })
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter -Root $root)
 
         $validate.outcome | Should -Be 'passed'
-        $validate.payload.packages[0].Validation.Count | Should -Be 1
+        $validate.payload.packages[0].validation.Count | Should -Be 1
     }
 
     It 'fails the validate phase when the expected state is absent' {
         $bundle = NewBundleScenario
         $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath -Phase validate `
-            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter)
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter -Root (NewValidationRoot))
         $evidence.outcome | Should -Be 'failed'
-        $evidence.payload.packages[0].ReasonCode | Should -Be 'validation_failed'
+        $evidence.payload.packages[0].reasonCode | Should -Be 'validation_failed'
     }
 
     It 'keeps arguments and paths out of evidence' {
@@ -403,35 +433,186 @@ Describe 'Invoke-GuestProvisioning' {
         $json = $evidence | ConvertTo-Json -Depth 16
         $json | Should -Not -Match '/quiet'
         $json | Should -Not -Match ([regex]::Escape($bundle.BundlePath))
-        $evidence.payload.packages[0].ReasonCode | Should -Be 'installer_failed'
+        $evidence.payload.packages[0].reasonCode | Should -Be 'installer_failed'
+    }
+}
+
+Describe 'guest path confinement' {
+
+    It 'refuses a validation path redirected by a link' -Skip:(-not $script:LinksSupported) {
+        # A link beneath a validation root would let a check report on a file
+        # outside it. Portable case now; the NTFS junction equivalent is a
+        # Stage 4 Windows component test.
+        $base = NewTempDir
+        $root = Join-Path $base 'root'
+        $outside = Join-Path $base 'outside'
+        $null = New-Item -ItemType Directory -Path $root, $outside -Force
+        Set-Content -LiteralPath (Join-Path $outside 'a.exe') -Value 'outside' -NoNewline
+        $null = New-Item -ItemType SymbolicLink -Path (Join-Path $root 'Example') -Target $outside
+
+        $checks = @([PSCustomObject]@{ id = 'linked'; kind = 'file-exists'; root = 'programFiles'; relativePath = 'Example/a.exe' })
+        $result = Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter (FakeAdapter -Root $root)
+
+        $result.Outcome | Should -Be 'failed'
+        $result.Checks[0].reasonCode | Should -Be 'path_rejected'
+    }
+
+    It 'refuses a validation path that escapes its root' {
+        $checks = @([PSCustomObject]@{ id = 'escape'; kind = 'file-exists'; root = 'programFiles'; relativePath = 'Example/../../outside.exe' })
+        $result = Invoke-PackageValidation -Entry (ExeEntry -Validation $checks) -Adapter (FakeAdapter -Root (NewValidationRoot))
+        $result.Checks[0].reasonCode | Should -Be 'path_rejected'
+    }
+
+    It 'refuses a bundle payload reached through a link' -Skip:(-not $script:LinksSupported) {
+        # A link inside an uploaded bundle would let a verified hash stand in for
+        # a file somewhere else entirely.
+        $bundle = NewBundleScenario
+        $payloadDir = Join-Path $bundle.BundlePath 'packages' 'example-agent'
+        $outside = Join-Path (NewTempDir) 'elsewhere'
+        $null = New-Item -ItemType Directory -Path $outside -Force
+        Copy-Item -LiteralPath (Join-Path $payloadDir 'payload.exe') -Destination (Join-Path $outside 'payload.exe')
+        Remove-Item -LiteralPath $payloadDir -Recurse -Force
+        $null = New-Item -ItemType SymbolicLink -Path $payloadDir -Target $outside
+
+        $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter -Root (NewValidationRoot))
+
+        $evidence.outcome | Should -Be 'failed'
+        $evidence.payload.packages[0].reasonCode | Should -Be 'path_rejected'
+    }
+}
+
+Describe 'Remove-GuestBundle' {
+
+    It 'removes an uploaded bundle and says so' {
+        $dir = NewTempDir
+        Set-Content -LiteralPath (Join-Path $dir 'descriptor.json') -Value '{}' -NoNewline
+        Remove-GuestBundle -BundlePath $dir | Should -Be 'removed'
+        Test-Path -LiteralPath $dir | Should -BeFalse
+    }
+
+    It 'reports removed when there was nothing to remove' {
+        Remove-GuestBundle -BundlePath (Join-Path (NewTempDir) 'absent') | Should -Be 'removed'
+    }
+
+    It 'reports retained when asked to keep the bundle' {
+        $dir = NewTempDir
+        Remove-GuestBundle -BundlePath $dir -KeepBundle | Should -Be 'retained'
+        Test-Path -LiteralPath $dir | Should -BeTrue
+    }
+
+    It 'reports failed rather than throwing when removal will not go' {
+        $dir = NewTempDir
+        Mock -ModuleName GuestProvisioning Remove-Item { throw 'in use' }
+        Remove-GuestBundle -BundlePath $dir | Should -Be 'failed'
+    }
+
+    It 'removes nothing under -WhatIf' {
+        $dir = NewTempDir
+        Remove-GuestBundle -BundlePath $dir -WhatIf | Should -Be 'not-attempted'
+        Test-Path -LiteralPath $dir | Should -BeTrue
+    }
+
+    It 'is not called by the provisioning phase, which cannot know evidence was retrieved' {
+        # The boundary this records: ordering belongs to the host. Stage 5 runs
+        # evidence retrieval, then cleanup, then host cleanup, then evaluation.
+        $bundle = NewBundleScenario
+        $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter (FakeAdapter -Root (NewValidationRoot))
+
+        $evidence.payload.cleanupOutcome | Should -Be 'not-attempted'
+        Test-Path -LiteralPath $bundle.BundlePath | Should -BeTrue
+    }
+}
+
+Describe 'production guest adapter' {
+
+    It 'refuses to <member> on a platform it cannot support' -Skip:$IsWindows -ForEach @(
+        @{ member = 'start a process' }, @{ member = 'resolve a root' }, @{ member = 'check a service' }
+    ) {
+        # Describing the adapter as Windows-only is a comment. Refusing before
+        # anything is launched is the control.
+        $adapter = Get-GuestAdapter
+        $call = switch ($member) {
+            'start a process' { { & $adapter.StartProcess '/bin/echo' @('hi') 5 } }
+            'resolve a root'  { { & $adapter.ResolveRoot 'programFiles' } }
+            'check a service' { { & $adapter.TestService 'Example' } }
+        }
+        $call | Should -Throw '*Windows*'
     }
 }
 
 Describe 'ConvertTo-EvidenceEnvelope' {
 
-    It 'refuses a payload carrying <key>' -ForEach @(
-        @{ key = 'arguments' }, @{ key = 'commandLine' }, @{ key = 'properties' }
-        @{ key = 'stdout' }, @{ key = 'exception' }, @{ key = 'password' }
-    ) {
-        { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome passed `
-            -StartedUtc ([datetime]::UtcNow) -Payload @{ $key = 'value' } } |
-            Should -Throw "*'$key'*"
+    BeforeAll {
+        # In BeforeAll, not bare in the Describe: Pester discovers It blocks
+        # before running Describe-level statements, so a function defined
+        # directly here is not in scope when a test runs.
+        function ValidGuestPayload {
+            @{ phase = 'install'; restartRequired = $false; packageCount = 0; passedCount = 0
+               failedRequiredCount = 0; cleanupOutcome = 'not-attempted'; packages = @() }
+        }
     }
 
-    It 'refuses a forbidden key nested inside the payload' {
+    It 'accepts a payload matching the closed definition for its kind' {
         { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome passed `
-            -StartedUtc ([datetime]::UtcNow) -Payload @{ packages = @(@{ id = 'a'; arguments = @('/quiet') }) } } |
-            Should -Throw '*arguments*'
+            -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload (ValidGuestPayload) } | Should -Not -Throw
+    }
+
+    It 'refuses a payload carrying the extra field <field>' -ForEach @(
+        @{ field = 'arguments' }, @{ field = 'commandLine' }, @{ field = 'properties' }
+        @{ field = 'stdout' }, @{ field = 'exception' }, @{ field = 'sourcePath' }
+    ) {
+        # The payload is a closed definition, not an open object filtered by a
+        # denylist. A value that must never appear cannot be carried under a
+        # different name, because any unlisted name is refused.
+        $payload = ValidGuestPayload
+        $payload[$field] = 'value'
+        { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome passed `
+            -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload $payload } |
+            Should -Throw '*envelope schema*'
+    }
+
+    It 'refuses an extra field nested in a package record' {
+        $payload = ValidGuestPayload
+        $payload.packages = @(@{ id = 'a'; version = '1.0'; order = 1; required = $true
+                                 outcome = 'passed'; reasonCode = $null; restartRequired = $false
+                                 commandLine = 'msiexec /i thing.msi' })
+        { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome passed `
+            -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload $payload } |
+            Should -Throw '*envelope schema*'
+    }
+
+    It 'refuses a reason code outside the bounded set' {
+        # Reason codes are enumerated, so a free-form string cannot carry a path
+        # or an exception message in a field that looks legitimate.
+        $payload = ValidGuestPayload
+        $payload.packages = @(@{ id = 'a'; version = '1.0'; order = 1; required = $true
+                                 outcome = 'failed'; restartRequired = $false
+                                 reasonCode = 'failed opening /var/folders/secret/path' })
+        { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome failed `
+            -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload $payload } |
+            Should -Throw '*envelope schema*'
+    }
+
+    It 'refuses a source-qualification payload under the guest kind' {
+        # The discriminator selects the definition, so a payload valid for one
+        # stage is not silently accepted for another.
+        $payload = @{ packageCount = 0; passedCount = 0; failedRequiredCount = 0
+                      failedOptionalCount = 0; cleanupOutcome = 'removed'; packages = @() }
+        { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome passed `
+            -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload $payload } |
+            Should -Throw '*envelope schema*'
     }
 
     It 'refuses a non-canonical run identifier' {
         { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId 'NOT-A-UUID' -Outcome passed `
-            -StartedUtc ([datetime]::UtcNow) -Payload @{} } | Should -Throw '*canonical lowercase UUID*'
+            -StartedUtc ([datetime]::UtcNow) -Payload (ValidGuestPayload) } | Should -Throw '*canonical lowercase UUID*'
     }
 
     It 'stamps the result version rather than the manifest version' {
-        $e = ConvertTo-EvidenceEnvelope -ResultKind source-qualification -RunId (Get-RunIdentifier) -Outcome passed `
-            -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 1 -Payload @{}
+        $e = ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome passed `
+            -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 1 -Payload (ValidGuestPayload)
         $e.resultSchemaVersion | Should -Be 2
         $e.manifestSchemaVersion | Should -Be 1
         $e.PSObject.Properties.Name | Should -Not -Contain 'schemaVersion'

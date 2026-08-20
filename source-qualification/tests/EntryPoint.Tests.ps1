@@ -224,7 +224,7 @@ Describe 'Invoke-SourceQualification.ps1 exit codes' {
         Test-Path -LiteralPath $evidence | Should -BeTrue
 
         $parsed = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
-        $parsed.Packages[0].ReasonCode | Should -Be 'source_not_found'
+        $parsed.payload.packages[0].reasonCode | Should -Be 'source_not_found'
 
         # The staged path derives from the source root and would leak the same
         # information by another route, so both are excluded.
@@ -240,7 +240,7 @@ Describe 'Invoke-SourceQualification.ps1 exit codes' {
         Test-Path -LiteralPath $evidence | Should -BeTrue
 
         $parsed = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
-        $parsed.Packages[0].ReasonCode | Should -Be 'integrity_mismatch'
+        $parsed.payload.packages[0].reasonCode | Should -Be 'integrity_mismatch'
         AssertEvidenceExcludes -EvidencePath $evidence -Fragments @($f.SourceRoot, $f.Base)
     }
 }

@@ -27,6 +27,133 @@ $script:MsiSuccess = 0
 $script:MsiSuccessRestartRequired = 3010
 $script:MsiRebootInitiated = 1641
 
+function ResolveConfinedPath {
+    <#
+    .SYNOPSIS
+        Joins a relative path beneath a root and refuses any redirection in it.
+
+    .DESCRIPTION
+        Module-internal. The same rule Increment 1 proved for source resolution,
+        applied on the guest side to both payloads and validation targets.
+
+        A lexical check is not sufficient. Normalizing catches dot-segment
+        traversal but not symbolic links, junctions, or other reparse points, so
+        a link placed inside a bundle or beneath a validation root would satisfy
+        a prefix comparison while reaching an arbitrary file. Every existing
+        component beneath the root is checked, and any redirection is refused
+        rather than followed.
+
+        Two independent signals: LinkTarget covers symbolic links and junctions,
+        and the ReparsePoint attribute covers the wider family for which
+        LinkTarget is empty.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Root,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RelativePath
+    )
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        throw (NewGuestError -Code 'path_rejected' -Message "Root not found: $Root")
+    }
+
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    $rootTarget = if ($rootItem.LinkTarget) { $rootItem.ResolveLinkTarget($true) } else { $null }
+    $rootFull = if ($rootTarget) { [System.IO.Path]::GetFullPath($rootTarget.FullName) }
+                else { [System.IO.Path]::GetFullPath($rootItem.FullName) }
+
+    # Joined segment by segment: Windows normalizes separators across a whole
+    # path, so substituting them into the string and joining once does not agree
+    # with a path built the same way elsewhere.
+    $candidate = $rootFull
+    foreach ($segment in $RelativePath.Split('/')) {
+        if ($segment) { $candidate = Join-Path $candidate $segment }
+    }
+    $candidate = [System.IO.Path]::GetFullPath($candidate)
+
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    $prefix = $rootFull.TrimEnd($separator) + $separator
+    if (-not $candidate.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+        throw (NewGuestError -Code 'path_rejected' -Message "Path '$RelativePath' resolves outside its root.")
+    }
+
+    $walked = $rootFull.TrimEnd($separator)
+    foreach ($segment in $candidate.Substring($prefix.Length).Split($separator)) {
+        if (-not $segment) { continue }
+        $walked = Join-Path $walked $segment
+        if (-not (Test-Path -LiteralPath $walked)) { continue }
+        $item = Get-Item -LiteralPath $walked -Force
+        $isReparse = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint
+        if ($item.LinkTarget -or $isReparse) {
+            throw (NewGuestError -Code 'path_rejected' -Message "Path '$RelativePath' is redirected at '$segment'.")
+        }
+    }
+
+    $candidate
+}
+
+function NewGuestError {
+    <#
+    .SYNOPSIS
+        Builds an exception carrying a bounded reason code.
+
+    .NOTES
+        Module-internal. The name omits a dash: it constructs a value rather than
+        changing state.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Exception])]
+    param(
+        [Parameter(Mandatory)] [ValidateSet('path_rejected','adapter_unsupported','integrity_mismatch','unexpected_error')] [string] $Code,
+        [Parameter(Mandatory)] [string] $Message
+    )
+    $exception = [System.Exception]::new($Message)
+    $exception.Data['ReasonCode'] = $Code
+    $exception
+}
+
+function Remove-GuestBundle {
+    <#
+    .SYNOPSIS
+        Removes an uploaded bundle from the guest, bounded and observable.
+
+    .DESCRIPTION
+        The primitive only. Ordering belongs to the host: evidence must be
+        retrieved before the directory holding it is deleted, and Stage 3 running
+        inside the guest cannot know whether that retrieval has happened.
+
+        Invoke-GuestProvisioning therefore never calls this, and its evidence
+        records a cleanup outcome of not-attempted. Stage 5 orders evidence
+        retrieval, then this, then host cleanup, then evaluation, and records the
+        outcome this returns.
+
+    .OUTPUTS
+        removed, retained, or failed. Never a bare boolean: a caller has to be
+        able to tell "there was nothing to remove" from "it would not go".
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $BundlePath,
+        [Parameter()] [switch] $KeepBundle
+    )
+
+    if ($KeepBundle) { return 'retained' }
+    if (-not (Test-Path -LiteralPath $BundlePath)) { return 'removed' }
+    if (-not $PSCmdlet.ShouldProcess($BundlePath, 'Remove guest bundle')) { return 'not-attempted' }
+
+    try {
+        Remove-Item -LiteralPath $BundlePath -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Verbose "Guest bundle cleanup failed: $($_.Exception.Message)"
+        return 'failed'
+    }
+
+    if (Test-Path -LiteralPath $BundlePath) { 'failed' } else { 'removed' }
+}
+
 function Get-NormalizedInstallerResult {
     <#
     .SYNOPSIS
@@ -187,50 +314,54 @@ function Invoke-PackageValidation {
     $checks = [System.Collections.Generic.List[PSCustomObject]]::new()
 
     foreach ($check in $Entry.validation) {
-        $record = [ordered]@{ Id = $check.id; Kind = $check.kind; Outcome = 'inconclusive'; ReasonCode = $null }
+        $record = [ordered]@{ id = $check.id; kind = $check.kind; outcome = 'inconclusive'; reasonCode = $null }
 
         try {
             switch ($check.kind) {
                 'service-exists' {
-                    $record.Outcome = if (& $Adapter.TestService $check.serviceName) { 'passed' } else { 'failed' }
-                    if ($record.Outcome -eq 'failed') { $record.ReasonCode = 'service_absent' }
+                    $record.outcome = if (& $Adapter.TestService $check.serviceName) { 'passed' } else { 'failed' }
+                    if ($record.outcome -eq 'failed') { $record.reasonCode = 'service_absent' }
                 }
                 default {
                     $root = & $Adapter.ResolveRoot $check.root
                     if ([string]::IsNullOrWhiteSpace($root)) {
-                        $record.ReasonCode = 'root_unavailable'
+                        $record.reasonCode = 'root_unavailable'
                         break
                     }
-                    # Joined segment by segment rather than by substituting
-                    # separators into the string: Windows normalizes separators
-                    # across the whole path, so a substituted string and a joined
-                    # one do not agree.
-                    $path = $root
-                    foreach ($segment in $check.relativePath.Split('/')) {
-                        if ($segment) { $path = Join-Path $path $segment }
+
+                    # Confined and reparse-checked before the file is touched. A
+                    # link beneath a validation root would otherwise let a check
+                    # report on a file outside it.
+                    try {
+                        $path = ResolveConfinedPath -Root $root -RelativePath $check.relativePath
+                    }
+                    catch {
+                        $record.outcome = 'failed'
+                        $record.reasonCode = 'path_rejected'
+                        break
                     }
 
                     if (-not (& $Adapter.TestFile $path)) {
-                        $record.Outcome = 'failed'
-                        $record.ReasonCode = 'file_absent'
+                        $record.outcome = 'failed'
+                        $record.reasonCode = 'file_absent'
                         break
                     }
                     if ($check.kind -eq 'file-exists') {
-                        $record.Outcome = 'passed'
+                        $record.outcome = 'passed'
                         break
                     }
 
                     $observed = & $Adapter.GetFileVersion $path $check.versionField
                     if ([string]::IsNullOrWhiteSpace($observed)) {
-                        $record.ReasonCode = 'version_unavailable'
+                        $record.reasonCode = 'version_unavailable'
                         break
                     }
                     if (TestVersionEquals -Expected $check.expectedVersion -Observed $observed) {
-                        $record.Outcome = 'passed'
+                        $record.outcome = 'passed'
                     }
                     else {
-                        $record.Outcome = 'failed'
-                        $record.ReasonCode = 'version_mismatch'
+                        $record.outcome = 'failed'
+                        $record.reasonCode = 'version_mismatch'
                     }
                 }
             }
@@ -238,15 +369,15 @@ function Invoke-PackageValidation {
         catch {
             # An adapter that threw did not establish anything, so the check is
             # inconclusive rather than failed.
-            $record.ReasonCode = 'check_error'
+            $record.reasonCode = 'check_error'
             Write-Verbose "Check '$($check.id)' could not complete: $($_.Exception.Message)"
         }
 
         $checks.Add([PSCustomObject] $record)
     }
 
-    $outcome = if (@($checks | Where-Object Outcome -EQ 'failed').Count -gt 0) { 'failed' }
-               elseif (@($checks | Where-Object Outcome -EQ 'inconclusive').Count -gt 0) { 'inconclusive' }
+    $outcome = if (@($checks | Where-Object outcome -EQ 'failed').Count -gt 0) { 'failed' }
+               elseif (@($checks | Where-Object outcome -EQ 'inconclusive').Count -gt 0) { 'inconclusive' }
                else { 'passed' }
 
     [PSCustomObject]@{ Outcome = $outcome; Checks = $checks.ToArray() }
@@ -349,20 +480,23 @@ function Invoke-GuestProvisioning {
 
     foreach ($entry in $descriptor.packages) {
         $record = [ordered]@{
-            Id = $entry.id; Version = $entry.version; Order = $entry.order
-            Required = $entry.required; Outcome = 'failed'; ReasonCode = $null
-            RestartRequired = $false; Validation = $null
+            id = $entry.id; version = $entry.version; order = $entry.order
+            required = $entry.required; outcome = 'failed'; reasonCode = $null
+            restartRequired = $false; validation = $null
         }
 
         try {
-            $payloadPath = Join-Path $BundlePath ($entry.payloadPath -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+            # Confined and reparse-checked before the payload is hashed or run. A
+            # link inside an uploaded bundle would otherwise let a verified hash
+            # stand in for a file somewhere else entirely.
+            $payloadPath = ResolveConfinedPath -Root $BundlePath -RelativePath $entry.payloadPath
 
             if ($Phase -eq 'install') {
                 # The same expected hash the host used, carried in the descriptor
                 # and authenticated with it. Never recomputed as expected.
                 $integrity = Test-PackageIntegrity -Path $payloadPath -ExpectedSha256 $entry.sha256
                 if (-not $integrity.Matched) {
-                    $record.ReasonCode = 'integrity_mismatch'
+                    $record.reasonCode = 'integrity_mismatch'
                     $results.Add([PSCustomObject] $record)
                     continue
                 }
@@ -371,9 +505,9 @@ function Invoke-GuestProvisioning {
                 $raw = & $Adapter.StartProcess $invocation.FilePath $invocation.ArgumentList $entry.installer.timeoutSeconds
                 $verdict = Get-NormalizedInstallerResult -Entry $entry -RawResult $raw
 
-                $record.Outcome = $verdict.Outcome
-                $record.ReasonCode = $verdict.ReasonCode
-                $record.RestartRequired = $verdict.RestartRequired
+                $record.outcome = $verdict.Outcome
+                $record.reasonCode = $verdict.ReasonCode
+                $record.restartRequired = $verdict.RestartRequired
                 if ($verdict.RestartRequired) { $restartRequired = $true }
 
                 if ($verdict.Outcome -eq 'incomplete') {
@@ -386,21 +520,21 @@ function Invoke-GuestProvisioning {
             }
             else {
                 $validation = Invoke-PackageValidation -Entry $entry -Adapter $Adapter
-                $record.Validation = $validation.Checks
-                $record.Outcome = if ($validation.Outcome -eq 'passed') { 'passed' } else { 'failed' }
-                if ($validation.Outcome -ne 'passed') { $record.ReasonCode = "validation_$($validation.Outcome)" }
+                $record.validation = $validation.Checks
+                $record.outcome = if ($validation.Outcome -eq 'passed') { 'passed' } else { 'failed' }
+                if ($validation.Outcome -ne 'passed') { $record.reasonCode = "validation_$($validation.Outcome)" }
             }
         }
         catch {
             $code = $_.Exception.Data['ReasonCode']
-            $record.ReasonCode = if ($code) { $code } else { 'unexpected_error' }
-            Write-Verbose "Package '$($entry.id)' failed with $($record.ReasonCode): $($_.Exception.Message)"
+            $record.reasonCode = if ($code) { $code } else { 'unexpected_error' }
+            Write-Verbose "Package '$($entry.id)' failed with $($record.reasonCode): $($_.Exception.Message)"
         }
 
         $results.Add([PSCustomObject] $record)
     }
 
-    $failedRequired = @($results | Where-Object { $_.Outcome -ne 'passed' -and $_.Required })
+    $failedRequired = @($results | Where-Object { $_.outcome -ne 'passed' -and $_.required })
     $outcome = if ($terminal) { 'incomplete' }
                elseif ($failedRequired.Count -gt 0) { 'failed' }
                else { 'passed' }
@@ -411,11 +545,16 @@ function Invoke-GuestProvisioning {
             phase = $Phase
             restartRequired = $restartRequired
             packageCount = $results.Count
-            passedCount = @($results | Where-Object Outcome -EQ 'passed').Count
+            passedCount = @($results | Where-Object outcome -EQ 'passed').Count
             failedRequiredCount = $failedRequired.Count
             terminalReasonCode = $terminal
+            # Ordering belongs to the host: evidence must be retrieved before the
+            # directory holding it is removed, and this phase cannot know whether
+            # that has happened. Stage 5 calls Remove-GuestBundle and records what
+            # it returns.
+            cleanupOutcome = 'not-attempted'
             packages = $results.ToArray()
         })
 }
 
-Export-ModuleMember -Function Get-NormalizedInstallerResult, Get-InstallerInvocation, Invoke-PackageValidation, Invoke-GuestProvisioning
+Export-ModuleMember -Function Get-NormalizedInstallerResult, Get-InstallerInvocation, Invoke-PackageValidation, Invoke-GuestProvisioning, Remove-GuestBundle

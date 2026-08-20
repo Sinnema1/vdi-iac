@@ -24,6 +24,36 @@ Set-StrictMode -Version 3.0
 # still writing to the guest must never meet a reboot, so the wait is bounded
 # and its failure is reported rather than assumed away.
 $script:TerminationGraceSeconds = 30
+$script:MinimumPowerShellVersion = [version]'7.4.0'
+
+function AssertGuestPlatform {
+    <#
+    .SYNOPSIS
+        Refuses to run the production adapter anywhere it cannot mean what it says.
+
+    .DESCRIPTION
+        Module-internal. Called before anything is launched, not only before a
+        filesystem lookup: describing the adapter as Windows-only while its
+        process member happily executes on any host is a comment, not a control.
+
+        The PowerShell floor is a version, not a major: ProcessStartInfo
+        .ArgumentList needs a modern runtime, and a major-only check accepts
+        releases that no longer receive fixes.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not $IsWindows) {
+        $exception = [System.Exception]::new('The production guest adapter runs on Windows only. Tests inject a fake adapter instead.')
+        $exception.Data['ReasonCode'] = 'adapter_unsupported'
+        throw $exception
+    }
+    if ($PSVersionTable.PSVersion -lt $script:MinimumPowerShellVersion) {
+        $exception = [System.Exception]::new("The production guest adapter needs PowerShell $script:MinimumPowerShellVersion or later; this host has $($PSVersionTable.PSVersion).")
+        $exception.Data['ReasonCode'] = 'adapter_unsupported'
+        throw $exception
+    }
+}
 
 function Get-GuestAdapter {
     <#
@@ -48,6 +78,8 @@ function Get-GuestAdapter {
         StartProcess = {
             param([string] $FilePath, [string[]] $ArgumentList, [int] $TimeoutSeconds)
 
+            AssertGuestPlatform
+
             $info = [System.Diagnostics.ProcessStartInfo]::new()
             $info.FileName = $FilePath
             $info.UseShellExecute = $false
@@ -71,18 +103,25 @@ function Get-GuestAdapter {
             # killing only the parent leaves the machine being modified by a
             # process nothing is waiting for.
             try { $process.Kill($true) } catch { Write-Verbose "Kill failed: $($_.Exception.Message)" }
-            $confirmed = $process.WaitForExit($script:TerminationGraceSeconds * 1000)
+            $null = $process.WaitForExit($script:TerminationGraceSeconds * 1000)
 
-            [PSCustomObject]@{ ExitCode = $null; TimedOut = $true; Terminated = $confirmed }
+            # Terminated stays false. WaitForExit reports on the process this
+            # object represents, and .NET does not extend that to descendants
+            # killed as part of the tree, so a parent that exited says nothing
+            # about whether a child is still writing to the guest.
+            #
+            # Reporting an unconfirmed kill as confirmed would turn an
+            # 'incomplete' run -- nothing known about the machine -- into a plain
+            # package failure. Until a mechanism actually enumerates the tree,
+            # this adapter refuses to claim it.
+            [PSCustomObject]@{ ExitCode = $null; TimedOut = $true; Terminated = $false }
         }
 
         # Allowlisted roots only. A validation check never names an absolute path.
         ResolveRoot = {
             param([string] $Root)
 
-            if (-not $IsWindows) {
-                throw "Guest filesystem roots resolve on Windows only; this adapter is running on $([System.Environment]::OSVersion.Platform)."
-            }
+            AssertGuestPlatform
             switch ($Root) {
                 'programFiles'    { $env:ProgramFiles }
                 'programFilesX86' { ${env:ProgramFiles(x86)} }
@@ -111,9 +150,7 @@ function Get-GuestAdapter {
         TestService = {
             param([string] $Name)
 
-            if (-not $IsWindows) {
-                throw 'Service checks run on Windows only.'
-            }
+            AssertGuestPlatform
             $null -ne (Get-Service -Name $Name -ErrorAction SilentlyContinue)
         }
     }

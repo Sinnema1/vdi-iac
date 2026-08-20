@@ -19,6 +19,10 @@
 
 Set-StrictMode -Version 3.0
 
+foreach ($dependency in 'RunIdentity', 'Evidence') {
+    Import-Module (Join-Path $PSScriptRoot "$dependency.psm1")
+}
+
 function NewQualificationError {
     <#
     .SYNOPSIS
@@ -230,14 +234,15 @@ function Invoke-SourceQualification {
         Retain staged content. Intended for diagnosis, not for normal runs.
 
     .OUTPUTS
-        PSCustomObject with Outcome, CleanupOutcome, RunId, Packages, and counts.
+        An evidence envelope (ADR 5): resultSchemaVersion 2, resultKind
+        source-qualification, and a payload validated against the closed
+        definition for that kind.
 
         Outcome is 'passed' when every required package qualified, 'failed' when
         one did not, and 'incomplete' when staging could not be removed -- which
         is a property of the run rather than of any package.
 
-        Package results carry a bounded ReasonCode, never an exception message.
-        Evidence is not inherently safe to publish; see the entry script.
+        Package results carry a bounded reason code, never an exception message.
     #>
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
@@ -245,7 +250,12 @@ function Invoke-SourceQualification {
         [Parameter(Mandatory)] $Manifest,
         [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SourceRoot,
         [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $StagingRoot,
-        [Parameter()] [switch] $KeepStaging
+        [Parameter()] [switch] $KeepStaging,
+
+        # Supplied by the orchestrator when a run spans stages, so evidence from
+        # qualification, transfer, and the guest correlates. Generated only when
+        # this stage runs standalone.
+        [Parameter()] [string] $RunId
     )
 
     # A missing source root is a run-level configuration error, not a property of
@@ -256,7 +266,7 @@ function Invoke-SourceQualification {
         throw "Source root not found: $SourceRoot"
     }
 
-    $runId = [guid]::NewGuid().ToString()
+    $runId = if ([string]::IsNullOrWhiteSpace($RunId)) { Get-RunIdentifier } else { Assert-RunIdentifier -RunId $RunId }
     $stagingDirectory = Join-Path $StagingRoot "source-qualification-$runId"
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     $startedUtc = [datetime]::UtcNow
@@ -266,14 +276,14 @@ function Invoke-SourceQualification {
 
         foreach ($package in $Manifest.Packages) {
             $result = [ordered]@{
-                Id         = $package.id
-                Version    = $package.version
-                Order      = $package.order
-                Required   = $package.required
-                Outcome    = 'failed'
-                ReasonCode = $null
-                Expected   = $package.sha256
-                Actual     = $null
+                id         = $package.id
+                version    = $package.version
+                order      = $package.order
+                required   = $package.required
+                outcome    = 'failed'
+                reasonCode = $null
+                expected   = $package.sha256
+                actual     = $null
             }
 
             try {
@@ -282,12 +292,12 @@ function Invoke-SourceQualification {
                 $staged = Copy-PackageToStaging -SourcePath $resolved -StagingDirectory $packageStaging
                 $integrity = Test-PackageIntegrity -Path $staged -ExpectedSha256 $package.sha256
 
-                $result.Actual = $integrity.Actual
+                $result.actual = $integrity.Actual
                 if ($integrity.Matched) {
-                    $result.Outcome = 'passed'
+                    $result.outcome = 'passed'
                 }
                 else {
-                    $result.ReasonCode = 'integrity_mismatch'
+                    $result.reasonCode = 'integrity_mismatch'
                 }
             }
             catch {
@@ -295,8 +305,8 @@ function Invoke-SourceQualification {
                 # absolute paths and other runtime-derived values, and evidence
                 # is not a safe place for them.
                 $code = $_.Exception.Data['ReasonCode']
-                $result.ReasonCode = if ($code) { $code } else { 'unexpected_error' }
-                Write-Verbose "Package '$($package.id)' failed with $($result.ReasonCode): $($_.Exception.Message)"
+                $result.reasonCode = if ($code) { $code } else { 'unexpected_error' }
+                Write-Verbose "Package '$($package.id)' failed with $($result.reasonCode): $($_.Exception.Message)"
             }
 
             $results.Add([PSCustomObject]$result)
@@ -324,8 +334,8 @@ function Invoke-SourceQualification {
         }
     }
 
-    $failedRequired = @($results | Where-Object { $_.Outcome -ne 'passed' -and $_.Required })
-    $failedOptional = @($results | Where-Object { $_.Outcome -ne 'passed' -and -not $_.Required })
+    $failedRequired = @($results | Where-Object { $_.outcome -ne 'passed' -and $_.required })
+    $failedOptional = @($results | Where-Object { $_.outcome -ne 'passed' -and -not $_.required })
 
     # A cleanup failure is not a package failure, so it does not become 'failed'.
     # It is an inability to complete the run cleanly, which the caller must be
@@ -334,19 +344,16 @@ function Invoke-SourceQualification {
                elseif ($failedRequired.Count -gt 0) { 'failed' }
                else { 'passed' }
 
-    [PSCustomObject]@{
-        SchemaVersion        = 1
-        RunId                = $runId
-        StartedUtc           = $startedUtc.ToString('o')
-        CompletedUtc         = [datetime]::UtcNow.ToString('o')
-        Outcome              = $outcome
-        CleanupOutcome       = $cleanupOutcome
-        PackageCount         = $results.Count
-        PassedCount          = @($results | Where-Object Outcome -EQ 'passed').Count
-        FailedRequiredCount  = $failedRequired.Count
-        FailedOptionalCount  = $failedOptional.Count
-        Packages             = $results.ToArray()
-    }
+    ConvertTo-EvidenceEnvelope -ResultKind 'source-qualification' -RunId $runId `
+        -Outcome $outcome -StartedUtc $startedUtc `
+        -ManifestSchemaVersion ([int] $Manifest.SchemaVersion) -Payload ([ordered]@{
+            packageCount        = $results.Count
+            passedCount         = @($results | Where-Object outcome -EQ 'passed').Count
+            failedRequiredCount = $failedRequired.Count
+            failedOptionalCount = $failedOptional.Count
+            cleanupOutcome      = $cleanupOutcome
+            packages            = $results.ToArray()
+        })
 }
 
 Export-ModuleMember -Function Resolve-PackageSource, Copy-PackageToStaging, Test-PackageIntegrity, Invoke-SourceQualification

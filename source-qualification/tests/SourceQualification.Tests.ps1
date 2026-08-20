@@ -223,9 +223,9 @@ Describe 'Invoke-SourceQualification' {
         )
         $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
 
-        $result.Outcome | Should -Be 'passed'
-        $result.PassedCount | Should -Be 2
-        $result.FailedRequiredCount | Should -Be 0
+        $result.outcome | Should -Be 'passed'
+        $result.payload.passedCount | Should -Be 2
+        $result.payload.failedRequiredCount | Should -Be 0
     }
 
     It 'fails the run when a required package mismatches' {
@@ -235,9 +235,9 @@ Describe 'Invoke-SourceQualification' {
         )
         $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
 
-        $result.Outcome | Should -Be 'failed'
-        $result.FailedRequiredCount | Should -Be 1
-        $result.Packages[0].ReasonCode | Should -Be 'integrity_mismatch'
+        $result.outcome | Should -Be 'failed'
+        $result.payload.failedRequiredCount | Should -Be 1
+        $result.payload.packages[0].reasonCode | Should -Be 'integrity_mismatch'
     }
 
     It 'records an optional failure without failing the run' {
@@ -248,9 +248,9 @@ Describe 'Invoke-SourceQualification' {
         )
         $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
 
-        $result.Outcome | Should -Be 'passed'
-        $result.FailedOptionalCount | Should -Be 1
-        $result.FailedRequiredCount | Should -Be 0
+        $result.outcome | Should -Be 'passed'
+        $result.payload.failedOptionalCount | Should -Be 1
+        $result.payload.failedRequiredCount | Should -Be 0
     }
 
     It 'records a missing source as a failure rather than throwing' {
@@ -260,8 +260,8 @@ Describe 'Invoke-SourceQualification' {
         )
         $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
 
-        $result.Outcome | Should -Be 'failed'
-        $result.Packages[0].ReasonCode | Should -Be 'source_not_found'
+        $result.outcome | Should -Be 'failed'
+        $result.payload.packages[0].reasonCode | Should -Be 'source_not_found'
     }
 
     It 'removes staging when the run completes' {
@@ -311,8 +311,8 @@ Describe 'Invoke-SourceQualification' {
             [PSCustomObject]@{ id='a'; version='1'; source='file://a/1/a.msi'; sha256=(Get-Sha (Join-Path $root 'a/1/a.msi')); order=10; required=$true }
         )
         $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
-        $result.CleanupOutcome | Should -Be 'removed'
-        $result.Outcome | Should -Be 'passed'
+        $result.payload.cleanupOutcome | Should -Be 'removed'
+        $result.outcome | Should -Be 'passed'
     }
 
     It 'reports retained cleanup when staging is kept' {
@@ -321,7 +321,7 @@ Describe 'Invoke-SourceQualification' {
             [PSCustomObject]@{ id='a'; version='1'; source='file://a/1/a.msi'; sha256=(Get-Sha (Join-Path $root 'a/1/a.msi')); order=10; required=$true }
         )
         $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir) -KeepStaging
-        $result.CleanupOutcome | Should -Be 'retained'
+        $result.payload.cleanupOutcome | Should -Be 'retained'
     }
 
     It 'cannot report success when cleanup fails' {
@@ -337,10 +337,10 @@ Describe 'Invoke-SourceQualification' {
 
         $result = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
 
-        $result.PassedCount | Should -Be 1
-        $result.FailedRequiredCount | Should -Be 0
-        $result.CleanupOutcome | Should -Be 'failed'
-        $result.Outcome | Should -Be 'incomplete'
+        $result.payload.passedCount | Should -Be 1
+        $result.payload.failedRequiredCount | Should -Be 0
+        $result.payload.cleanupOutcome | Should -Be 'failed'
+        $result.outcome | Should -Be 'incomplete'
     }
 
     It 'gives each run a distinct identifier' {
@@ -351,6 +351,6 @@ Describe 'Invoke-SourceQualification' {
         $first = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
         $second = Invoke-SourceQualification -Manifest $manifest -SourceRoot $root -StagingRoot (NewTempDir)
 
-        $first.RunId | Should -Not -Be $second.RunId
+        $first.runId | Should -Not -Be $second.runId
     }
 }

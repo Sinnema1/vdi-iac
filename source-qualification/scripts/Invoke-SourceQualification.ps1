@@ -100,22 +100,23 @@ if ($EvidencePath) {
     }
 }
 
-foreach ($package in $result.Packages) {
-    $label = if ($package.Required) { 'required' } else { 'optional' }
-    if ($package.Outcome -eq 'passed') {
-        Write-Information ("  passed  {0} {1} ({2})" -f $package.Id, $package.Version, $label)
+foreach ($package in $result.payload.packages) {
+    $label = if ($package.required) { 'required' } else { 'optional' }
+    if ($package.outcome -eq 'passed') {
+        Write-Information ("  passed  {0} {1} ({2})" -f $package.id, $package.version, $label)
     }
     else {
-        Write-Information ("  FAILED  {0} {1} ({2}) -- {3}" -f $package.Id, $package.Version, $label, $package.ReasonCode)
+        Write-Information ("  FAILED  {0} {1} ({2}) -- {3}" -f $package.id, $package.version, $label, $package.reasonCode)
     }
 }
 
 Write-Information ("source-qualification: {0} -- {1}/{2} passed, {3} required failure(s), {4} optional failure(s), cleanup {5}" -f
-    $result.Outcome, $result.PassedCount, $result.PackageCount, $result.FailedRequiredCount, $result.FailedOptionalCount, $result.CleanupOutcome)
+    $result.outcome, $result.payload.passedCount, $result.payload.packageCount,
+    $result.payload.failedRequiredCount, $result.payload.failedOptionalCount, $result.payload.cleanupOutcome)
 
 $result
 
-switch ($result.Outcome) {
+switch ($result.outcome) {
     'passed'     { exit 0 }
     'failed'     { exit 1 }
     'incomplete' { exit 2 }

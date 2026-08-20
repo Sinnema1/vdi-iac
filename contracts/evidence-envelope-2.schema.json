@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://example.invalid/schemas/evidence-envelope-2.json",
   "title": "Evidence Envelope, version 2",
-  "description": "Common envelope for every stage's evidence. ResultKind selects the payload shape; the envelope version covers the envelope only, so a payload changing shape is a payload change and not an envelope one.",
+  "description": "Common envelope for every stage's evidence. resultKind selects a closed payload definition: a payload is not an open object, so a path, an argument, raw output, or exception text cannot be smuggled through a renamed key.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -16,16 +16,14 @@
   ],
   "properties": {
     "resultSchemaVersion": {
-      "description": "Shape of this envelope. Version 1 was the Increment 1 result, which named this field schemaVersion and could be mistaken for the manifest version.",
       "enum": [
         2
       ]
     },
     "resultKind": {
-      "description": "Which stage produced this. Required, so a consumer never infers the shape from whichever fields happen to be present.",
+      "description": "Which stage produced this. build-orchestration is deliberately absent until its payload is defined.",
       "enum": [
         "source-qualification",
-        "build-orchestration",
         "guest-provisioning"
       ]
     },
@@ -34,7 +32,6 @@
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     },
     "manifestSchemaVersion": {
-      "description": "Manifest version the run consumed. Absent when a stage consumed no manifest.",
       "enum": [
         1,
         2
@@ -49,7 +46,6 @@
       "format": "date-time"
     },
     "outcome": {
-      "description": "passed: the stage did what it was asked. failed: an expected failure it is designed to report. incomplete: the stage could not finish cleanly, so its own state is not fully known.",
       "enum": [
         "passed",
         "failed",
@@ -58,12 +54,356 @@
       ]
     },
     "toolVersion": {
-      "description": "Runtime that produced the evidence, so a result is attributable.",
       "type": "string",
       "pattern": "^[ -~]{1,64}$"
     },
     "payload": {
       "type": "object"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "resultKind": {
+          "enum": [
+            "source-qualification"
+          ]
+        },
+        "payload": {
+          "$ref": "#/definitions/sourceQualificationPayload"
+        }
+      }
+    },
+    {
+      "properties": {
+        "resultKind": {
+          "enum": [
+            "guest-provisioning"
+          ]
+        },
+        "payload": {
+          "$ref": "#/definitions/guestProvisioningPayload"
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "sourceQualificationPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packageCount",
+        "passedCount",
+        "failedRequiredCount",
+        "failedOptionalCount",
+        "cleanupOutcome",
+        "packages"
+      ],
+      "properties": {
+        "packageCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedRequiredCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedOptionalCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cleanupOutcome": {
+          "enum": [
+            "removed",
+            "retained",
+            "failed",
+            "not-attempted"
+          ]
+        },
+        "packages": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/definitions/qualificationPackage"
+          }
+        }
+      }
+    },
+    "guestProvisioningPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "restartRequired",
+        "packageCount",
+        "passedCount",
+        "failedRequiredCount",
+        "cleanupOutcome",
+        "packages"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "install",
+            "validate"
+          ]
+        },
+        "restartRequired": {
+          "type": "boolean"
+        },
+        "packageCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedRequiredCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "terminalReasonCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "integrity_mismatch",
+                "installer_failed",
+                "installer_initiated_reboot",
+                "restart_forbidden",
+                "install_timeout",
+                "install_timeout_termination_failed",
+                "validation_failed",
+                "validation_inconclusive",
+                "path_rejected",
+                "adapter_unsupported",
+                "unexpected_error"
+              ]
+            }
+          ]
+        },
+        "cleanupOutcome": {
+          "description": "Guest bundle removal is ordered by the host in Stage 5, after evidence retrieval, so a phase that did not perform it records not-attempted.",
+          "enum": [
+            "removed",
+            "retained",
+            "failed",
+            "not-attempted"
+          ]
+        },
+        "packages": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/definitions/guestPackage"
+          }
+        }
+      }
+    },
+    "qualificationPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "order",
+        "required",
+        "outcome",
+        "reasonCode"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "maxLength": 64
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[ -~]{1,64}$"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9999
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        },
+        "reasonCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "source_root_not_found",
+                "source_not_found",
+                "source_outside_root",
+                "source_link_rejected",
+                "unsupported_scheme",
+                "integrity_mismatch",
+                "staging_failed",
+                "unexpected_error"
+              ]
+            }
+          ]
+        },
+        "expected": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "actual": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          ]
+        }
+      }
+    },
+    "guestPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "order",
+        "required",
+        "outcome",
+        "reasonCode",
+        "restartRequired"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "maxLength": 64
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[ -~]{1,64}$"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9999
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "failed",
+            "incomplete"
+          ]
+        },
+        "reasonCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "integrity_mismatch",
+                "installer_failed",
+                "installer_initiated_reboot",
+                "restart_forbidden",
+                "install_timeout",
+                "install_timeout_termination_failed",
+                "validation_failed",
+                "validation_inconclusive",
+                "path_rejected",
+                "adapter_unsupported",
+                "unexpected_error"
+              ]
+            }
+          ]
+        },
+        "restartRequired": {
+          "type": "boolean"
+        },
+        "validation": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "$ref": "#/definitions/validationCheck"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "validationCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "outcome",
+        "reasonCode"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "maxLength": 64
+        },
+        "kind": {
+          "enum": [
+            "file-exists",
+            "file-version",
+            "service-exists"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "failed",
+            "inconclusive"
+          ]
+        },
+        "reasonCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "file_absent",
+                "version_mismatch",
+                "version_unavailable",
+                "service_absent",
+                "root_unavailable",
+                "path_rejected",
+                "check_error"
+              ]
+            }
+          ]
+        }
+      }
     }
   }
 }

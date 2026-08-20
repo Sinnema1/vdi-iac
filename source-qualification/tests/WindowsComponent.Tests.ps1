@@ -49,6 +49,48 @@ BeforeAll {
         "exit $ExitCode" | Set-Content -LiteralPath $script -Encoding utf8
         $script
     }
+
+    function NewAuthenticatedBundle {
+        <#
+            A real bundle from the host path, with a real descriptor and its
+            digest, so guest provisioning gets past descriptor authentication and
+            actually reaches the payload.
+        #>
+        $base = NewTempDir
+        $source = Join-Path $base 'src'
+        $relative = 'example-agent/1.2.3/payload.exe'
+        $full = Join-Path $source $relative
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $full) -Force
+        Set-Content -LiteralPath $full -Value 'payload bytes' -Encoding utf8 -NoNewline
+        $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
+
+        $manifestPath = Join-Path $base 'manifest.json'
+        @{ schemaVersion = 2; packages = @(@{
+            id = 'example-agent'; version = '1.2.3'; source = "file://$relative"
+            sha256 = $hash; order = 10; required = $true
+            installer = @{ kind = 'exe'; arguments = @('/quiet'); timeoutSeconds = 900
+                           restartPolicy = 'allow-deferred'
+                           exitCodes = @{ success = @(0); restartRequired = @(3010) } }
+            validation = @(@{ id = 'agent-binary'; kind = 'file-exists'
+                              root = 'programFiles'; relativePath = 'Example/Agent/agent.exe' })
+        })} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
+        New-TransferBundle -ManifestPath $manifestPath -SourceRoot $source -BundleRoot (Join-Path $base 'bundles')
+    }
+
+    function RecordingAdapter {
+        # Records whether an installer was ever launched, so a test can assert
+        # that a refusal happened before execution rather than after it.
+        $state = [pscustomobject]@{ Started = $false }
+        [PSCustomObject]@{
+            State = $state
+            StartProcess = { $state.Started = $true; [PSCustomObject]@{ ExitCode = 0; TimedOut = $false; Terminated = $true } }.GetNewClosure()
+            ResolveRoot = { (Join-Path ([System.IO.Path]::GetTempPath()) 'absent-root') }
+            TestFile = { $false }
+            GetFileVersion = { $null }
+            TestService = { $false }
+        }
+    }
 }
 
 Describe 'real child process argument handling' -Skip:(-not $IsWindows) {
@@ -140,20 +182,69 @@ Describe 'real timeout' -Skip:(-not $IsWindows) {
         $elapsed.TotalSeconds | Should -BeLessThan 90
     }
 
-    It 'keeps a timed-out package incomplete rather than merely failed' {
-        # The safety property, asserted independently of the mechanism: until
-        # something confirms the process tree is gone, nothing is known about the
-        # guest's state, and the run must say so.
-        $entry = [PSCustomObject]@{ installer = [PSCustomObject]@{ kind = 'msi'; restartPolicy = 'allow-deferred' } }
-        $slow = Join-Path (NewTempDir) 'slow.ps1'
-        'Start-Sleep -Seconds 120' | Set-Content -LiteralPath $slow -Encoding utf8
-        $adapter = Get-GuestAdapter
+    It 'stops a descendant the installer spawned, not only the installer' {
+        # The earlier fixture was a single sleeping process, so parent-only Kill
+        # passed and removing the kill passed too: the elapsed-time bound was the
+        # only thing being measured. This one has a real descendant writing a
+        # heartbeat, and asserts the writing stops.
+        $work = NewTempDir
+        $heartbeat = Join-Path $work 'heartbeat.txt'
+        $childPidFile = Join-Path $work 'child-pid.txt'
 
-        $raw = & $adapter.StartProcess (PwshPath) @('-NoProfile', '-File', $slow) 5
-        $verdict = Get-NormalizedInstallerResult -Entry $entry -RawResult $raw
+        $childScript = Join-Path $work 'child.ps1'
+        @'
+param($HeartbeatPath)
+while ($true) {
+    Add-Content -LiteralPath $HeartbeatPath -Value ([datetime]::UtcNow.Ticks)
+    Start-Sleep -Milliseconds 150
+}
+'@ | Set-Content -LiteralPath $childScript -Encoding utf8
 
-        $verdict.Outcome | Should -Be 'incomplete'
-        $verdict.ReasonCode | Should -Be 'install_timeout_termination_failed'
+        $parentScript = Join-Path $work 'parent.ps1'
+        @"
+param(`$HeartbeatPath, `$PidPath)
+`$child = Start-Process -FilePath '$(PwshPath)' ``
+    -ArgumentList '-NoProfile', '-File', '$childScript', `$HeartbeatPath ``
+    -PassThru -WindowStyle Hidden
+`$child.Id | Set-Content -LiteralPath `$PidPath
+Start-Sleep -Seconds 300
+"@ | Set-Content -LiteralPath $parentScript -Encoding utf8
+
+        try {
+            $adapter = Get-GuestAdapter
+            $raw = & $adapter.StartProcess (PwshPath) @('-NoProfile', '-File', $parentScript, $heartbeat, $childPidFile) 5
+
+            $raw.TimedOut | Should -BeTrue
+            Test-Path -LiteralPath $heartbeat | Should -BeTrue -Because 'the descendant must have been running'
+
+            # Settle, sample, wait, sample again. A surviving descendant keeps
+            # appending; a stopped one does not.
+            Start-Sleep -Seconds 2
+            $before = (Get-Content -LiteralPath $heartbeat).Count
+            Start-Sleep -Seconds 3
+            $after = (Get-Content -LiteralPath $heartbeat).Count
+
+            $after | Should -Be $before -Because 'the descendant must stop writing once the tree is terminated'
+
+            # The safety property is unchanged: nothing confirms the tree is
+            # gone, so the run stays incomplete. This case shows the
+            # representative behavior, not a general confirmation mechanism.
+            $entry = [PSCustomObject]@{ installer = [PSCustomObject]@{ kind = 'msi'; restartPolicy = 'allow-deferred' } }
+            $verdict = Get-NormalizedInstallerResult -Entry $entry -RawResult $raw
+            $raw.Terminated | Should -BeFalse
+            $verdict.Outcome | Should -Be 'incomplete'
+            $verdict.ReasonCode | Should -Be 'install_timeout_termination_failed'
+        }
+        finally {
+            # Never leave a fixture process running on the runner.
+            if (Test-Path -LiteralPath $childPidFile) {
+                $childPid = (Get-Content -LiteralPath $childPidFile -Raw).Trim()
+                if ($childPid) {
+                    Get-Process -Id ([int] $childPid) -ErrorAction SilentlyContinue |
+                        Stop-Process -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
     }
 }
 
@@ -186,14 +277,31 @@ Describe 'real reparse points' -Skip:(-not $IsWindows) {
     }
 
     It 'refuses a bundle payload reached through an NTFS junction' {
-        $base = NewTempDir
-        $bundle = Join-Path $base 'bundle'
-        $outside = Join-Path $base 'outside'
-        $null = New-Item -ItemType Directory -Path (Join-Path $bundle 'packages'), $outside -Force
-        Set-Content -LiteralPath (Join-Path $outside 'payload.exe') -Value 'outside' -NoNewline
-        $null = New-Item -ItemType Junction -Path (Join-Path $bundle 'packages' 'example-agent') -Target $outside
+        # Built as a real authenticated bundle. An earlier version of this test
+        # created no descriptor, so provisioning threw during authentication and
+        # never reached the payload: it passed with reparse protection removed.
+        $bundle = NewAuthenticatedBundle
+        $packageDir = Join-Path $bundle.BundlePath 'packages' 'example-agent'
 
-        { Invoke-GuestProvisioning -BundlePath $bundle -ExpectedDescriptorSha256 ('a' * 64) } | Should -Throw
+        $outside = NewTempDir
+        Set-Content -LiteralPath (Join-Path $outside 'payload.exe') -Value 'outside content' -Encoding utf8 -NoNewline
+        Set-Content -LiteralPath (Join-Path $outside 'witness.txt') -Value 'must survive' -Encoding utf8 -NoNewline
+
+        Remove-Item -LiteralPath $packageDir -Recurse -Force
+        $null = New-Item -ItemType Junction -Path $packageDir -Target $outside
+
+        $adapter = RecordingAdapter
+        $evidence = Invoke-GuestProvisioning -BundlePath $bundle.BundlePath `
+            -ExpectedDescriptorSha256 $bundle.DescriptorSha256 -Adapter $adapter
+
+        # Bounded evidence, not merely a thrown exception.
+        $evidence.outcome | Should -Be 'failed'
+        $evidence.payload.packages[0].reasonCode | Should -Be 'path_rejected'
+
+        # Refused before execution, not after.
+        $adapter.State.Started | Should -BeFalse
+
+        (Get-Content -LiteralPath (Join-Path $outside 'witness.txt') -Raw) | Should -Be 'must survive'
     }
 
     It 'refuses a cleanup target that is an NTFS junction' {
@@ -221,13 +329,32 @@ Describe 'real file version information' -Skip:(-not $IsWindows) {
         $version | Should -Match '^\d+\.\d+'
     }
 
-    It 'distinguishes the file version from the product version' {
+    It 'selects the field it was asked for' {
+        # Asserting both calls return text passes when both wrongly return
+        # FileVersion. This compares each against the field it should have read,
+        # on a binary where the two differ, so swapping or collapsing the mapping
+        # fails.
         $adapter = Get-GuestAdapter
-        $path = Join-Path (& $adapter.ResolveRoot 'system32') 'kernel32.dll'
-        # They routinely differ, which is why versionField is required rather
-        # than defaulted. Asserting both are readable is the durable claim.
-        (& $adapter.GetFileVersion $path 'file') | Should -Not -BeNullOrEmpty
-        (& $adapter.GetFileVersion $path 'product') | Should -Not -BeNullOrEmpty
+        $system32 = & $adapter.ResolveRoot 'system32'
+
+        $candidate = $null
+        foreach ($name in 'kernel32.dll', 'ntdll.dll', 'shell32.dll', 'user32.dll', 'notepad.exe', 'cmd.exe') {
+            $path = Join-Path $system32 $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($path)
+            if ($info.FileVersion -and $info.ProductVersion -and $info.FileVersion.Trim() -ne $info.ProductVersion.Trim()) {
+                $candidate = [PSCustomObject]@{ Path = $path; Info = $info }
+                break
+            }
+        }
+
+        if (-not $candidate) {
+            Set-ItResult -Skipped -Because 'no system binary on this runner has differing file and product versions'
+            return
+        }
+
+        (& $adapter.GetFileVersion $candidate.Path 'file') | Should -BeExactly $candidate.Info.FileVersion.Trim()
+        (& $adapter.GetFileVersion $candidate.Path 'product') | Should -BeExactly $candidate.Info.ProductVersion.Trim()
     }
 
     It 'resolves every allowlisted root to a real directory' {

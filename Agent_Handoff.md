@@ -964,6 +964,10 @@ Acceptance criteria:
 - evidence retrieval and cleanup are attempted on both the logical-failure and
   transport-failure paths, with cleanup recorded as attempted rather than
   guaranteed;
+- the guest staging root is host-controlled, delivered independently of the
+  uploaded bundle, and never read or derived from the descriptor. Cleanup has to
+  work after descriptor tampering, so what gets deleted must not depend on a
+  document an attacker may have rewritten;
 - every capability states its verification level. Without a disposable target
   the increment closes as **implementation complete; lab validation pending**,
   and landing lab-test definitions does not substitute for running them.

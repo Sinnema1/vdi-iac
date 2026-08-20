@@ -68,7 +68,7 @@ BeforeAll {
                 exercised against something the assembler actually built rather
                 than a hand-written descriptor.
             #>
-            param([switch] $CorruptPayloadAfterAssembly)
+            param([switch] $CorruptPayloadAfterAssembly, [switch] $OptionalOnly)
 
             $base = NewTempDir
             $source = Join-Path $base 'src'
@@ -81,7 +81,7 @@ BeforeAll {
             $manifestPath = Join-Path $base 'manifest.json'
             @{ schemaVersion = 2; packages = @(@{
                 id = 'example-agent'; version = '1.2.3'; source = "file://$relative"
-                sha256 = $hash; order = 10; required = $true
+                sha256 = $hash; order = 10; required = (-not $OptionalOnly)
                 installer = @{ kind = 'exe'; arguments = @('/quiet'); timeoutSeconds = 900
                                restartPolicy = 'allow-deferred'
                                exitCodes = @{ success = @(0); restartRequired = @(3010) } }
@@ -484,33 +484,76 @@ Describe 'guest path confinement' {
 
 Describe 'Remove-GuestBundle' {
 
-    It 'removes an uploaded bundle and says so' {
-        $dir = NewTempDir
-        Set-Content -LiteralPath (Join-Path $dir 'descriptor.json') -Value '{}' -NoNewline
-        Remove-GuestBundle -BundlePath $dir | Should -Be 'removed'
-        Test-Path -LiteralPath $dir | Should -BeFalse
+    BeforeAll {
+        function NewStagedRun {
+            param([switch] $WithoutBundle)
+            $staging = NewTempDir
+            $id = Get-RunIdentifier
+            if (-not $WithoutBundle) {
+                $bundle = Join-Path $staging "bundle-$id"
+                $null = New-Item -ItemType Directory -Path $bundle -Force
+                Set-Content -LiteralPath (Join-Path $bundle 'descriptor.json') -Value '{}' -NoNewline
+            }
+            [PSCustomObject]@{ StagingRoot = $staging; RunId = $id; BundlePath = (Join-Path $staging "bundle-$id") }
+        }
+    }
+
+    It 'removes the run it owns and says so' {
+        $run = NewStagedRun
+        Remove-GuestBundle -StagingRoot $run.StagingRoot -RunId $run.RunId | Should -Be 'removed'
+        Test-Path -LiteralPath $run.BundlePath | Should -BeFalse
+    }
+
+    It 'leaves the staging root itself in place' {
+        $run = NewStagedRun
+        $null = Remove-GuestBundle -StagingRoot $run.StagingRoot -RunId $run.RunId
+        Test-Path -LiteralPath $run.StagingRoot | Should -BeTrue
+    }
+
+    It 'cannot be aimed at a directory outside the staging root' {
+        # Reproduced against an unrelated temporary directory before the target
+        # was derived rather than accepted.
+        $witness = NewTempDir
+        Set-Content -LiteralPath (Join-Path $witness 'unrelated.txt') -Value 'must survive' -NoNewline
+        $run = NewStagedRun
+
+        { Remove-GuestBundle -StagingRoot $run.StagingRoot -RunId '../../escape' } | Should -Throw
+        { Remove-GuestBundle -StagingRoot $witness -RunId 'not-a-uuid' } | Should -Throw
+
+        Test-Path -LiteralPath (Join-Path $witness 'unrelated.txt') | Should -BeTrue
+    }
+
+    It 'refuses a redirected target rather than following it' -Skip:(-not $script:LinksSupported) {
+        $witness = NewTempDir
+        Set-Content -LiteralPath (Join-Path $witness 'unrelated.txt') -Value 'must survive' -NoNewline
+        $run = NewStagedRun -WithoutBundle
+        $null = New-Item -ItemType SymbolicLink -Path $run.BundlePath -Target $witness
+
+        { Remove-GuestBundle -StagingRoot $run.StagingRoot -RunId $run.RunId } | Should -Throw '*redirected*'
+        Test-Path -LiteralPath (Join-Path $witness 'unrelated.txt') | Should -BeTrue
     }
 
     It 'reports removed when there was nothing to remove' {
-        Remove-GuestBundle -BundlePath (Join-Path (NewTempDir) 'absent') | Should -Be 'removed'
+        $run = NewStagedRun -WithoutBundle
+        Remove-GuestBundle -StagingRoot $run.StagingRoot -RunId $run.RunId | Should -Be 'removed'
     }
 
     It 'reports retained when asked to keep the bundle' {
-        $dir = NewTempDir
-        Remove-GuestBundle -BundlePath $dir -KeepBundle | Should -Be 'retained'
-        Test-Path -LiteralPath $dir | Should -BeTrue
+        $run = NewStagedRun
+        Remove-GuestBundle -StagingRoot $run.StagingRoot -RunId $run.RunId -KeepBundle | Should -Be 'retained'
+        Test-Path -LiteralPath $run.BundlePath | Should -BeTrue
     }
 
     It 'reports failed rather than throwing when removal will not go' {
-        $dir = NewTempDir
+        $run = NewStagedRun
         Mock -ModuleName GuestProvisioning Remove-Item { throw 'in use' }
-        Remove-GuestBundle -BundlePath $dir | Should -Be 'failed'
+        Remove-GuestBundle -StagingRoot $run.StagingRoot -RunId $run.RunId | Should -Be 'failed'
     }
 
     It 'removes nothing under -WhatIf' {
-        $dir = NewTempDir
-        Remove-GuestBundle -BundlePath $dir -WhatIf | Should -Be 'not-attempted'
-        Test-Path -LiteralPath $dir | Should -BeTrue
+        $run = NewStagedRun
+        Remove-GuestBundle -StagingRoot $run.StagingRoot -RunId $run.RunId -WhatIf | Should -Be 'not-attempted'
+        Test-Path -LiteralPath $run.BundlePath | Should -BeTrue
     }
 
     It 'is not called by the provisioning phase, which cannot know evidence was retrieved' {
@@ -527,18 +570,24 @@ Describe 'Remove-GuestBundle' {
 
 Describe 'production guest adapter' {
 
-    It 'refuses to <member> on a platform it cannot support' -Skip:$IsWindows -ForEach @(
-        @{ member = 'start a process' }, @{ member = 'resolve a root' }, @{ member = 'check a service' }
-    ) {
-        # Describing the adapter as Windows-only is a comment. Refusing before
-        # anything is launched is the control.
-        $adapter = Get-GuestAdapter
-        $call = switch ($member) {
-            'start a process' { { & $adapter.StartProcess '/bin/echo' @('hi') 5 } }
-            'resolve a root'  { { & $adapter.ResolveRoot 'programFiles' } }
-            'check a service' { { & $adapter.TestService 'Example' } }
-        }
-        $call | Should -Throw '*Windows*'
+    It 'refuses at acquisition on a platform it cannot support' -Skip:$IsWindows {
+        # Guarding only inside each member meant the first failure happened in
+        # the package loop, where it was caught and recorded as a package
+        # outcome. An unsupported runtime is a property of the run.
+        { Get-GuestAdapter } | Should -Throw '*Windows*'
+    }
+
+    It 'refuses a run with no adapter injected, before touching anything' -Skip:$IsWindows {
+        # An optional-only bundle is the case that hid the defect: the guard
+        # fired inside the loop, the package was optional, and the run returned
+        # passed with a log directory already created.
+        $bundle = NewBundleScenario -OptionalOnly
+        $logDirectory = Join-Path $bundle.BundlePath 'logs'
+
+        { Invoke-GuestProvisioning -BundlePath $bundle.BundlePath -ExpectedDescriptorSha256 $bundle.DescriptorSha256 } |
+            Should -Throw '*Windows*'
+
+        Test-Path -LiteralPath $logDirectory | Should -BeFalse
     }
 }
 
@@ -605,9 +654,63 @@ Describe 'ConvertTo-EvidenceEnvelope' {
             Should -Throw '*envelope schema*'
     }
 
+    It 'requires the manifest version, so an envelope cannot carry only the result version' {
+        # Asserted through metadata and the schema rather than by omitting the
+        # argument: a missing mandatory parameter prompts for input rather than
+        # throwing, which would hang the suite rather than fail it.
+        $attribute = (Get-Command ConvertTo-EvidenceEnvelope).Parameters['ManifestSchemaVersion'].Attributes |
+            Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] }
+        $attribute.Mandatory | Should -Contain $true
+
+        $withoutVersion = @{
+            resultSchemaVersion = 2; resultKind = 'guest-provisioning'
+            runId = (Get-RunIdentifier)
+            startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+            outcome = 'passed'; payload = (ValidGuestPayload)
+        } | ConvertTo-Json -Depth 12
+
+        $schema = Join-Path $script:RepoRoot 'contracts' 'evidence-envelope-2.schema.json'
+        Test-Json -Json $withoutVersion -SchemaFile $schema -ErrorAction SilentlyContinue | Should -BeFalse
+    }
+
+    It 'refuses free-form text in a <kind> package version' -ForEach @(
+        @{ kind = 'guest-provisioning' }, @{ kind = 'source-qualification' }
+    ) {
+        # The payload keys are closed, but an allowed field accepting arbitrary
+        # printable text still carried error text and a guest path.
+        $package = @{ id = 'a'; version = 'error opening C:\guest\staging\secret.msi'
+                      order = 1; required = $false; outcome = 'failed' }
+        if ($kind -eq 'guest-provisioning') {
+            $package.reasonCode = 'installer_failed'
+            $package.restartRequired = $false
+            $payload = ValidGuestPayload
+            $payload.packageCount = 1
+            $payload.packages = @($package)
+        }
+        else {
+            $package.reasonCode = 'integrity_mismatch'
+            $payload = @{ packageCount = 1; passedCount = 0; failedRequiredCount = 0
+                          failedOptionalCount = 1; cleanupOutcome = 'removed'; packages = @($package) }
+        }
+
+        { ConvertTo-EvidenceEnvelope -ResultKind $kind -RunId (Get-RunIdentifier) -Outcome failed `
+            -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload $payload } |
+            Should -Throw '*envelope schema*'
+    }
+
+    It 'accepts a version the manifest contract would accept' {
+        $payload = ValidGuestPayload
+        $payload.packageCount = 1
+        $payload.packages = @(@{ id = 'a'; version = '1.0.0-rc.1'; order = 1; required = $false
+                                 outcome = 'passed'; reasonCode = $null; restartRequired = $false })
+        { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId (Get-RunIdentifier) -Outcome passed `
+            -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload $payload } | Should -Not -Throw
+    }
+
     It 'refuses a non-canonical run identifier' {
         { ConvertTo-EvidenceEnvelope -ResultKind guest-provisioning -RunId 'NOT-A-UUID' -Outcome passed `
-            -StartedUtc ([datetime]::UtcNow) -Payload (ValidGuestPayload) } | Should -Throw '*canonical lowercase UUID*'
+            -StartedUtc ([datetime]::UtcNow) -ManifestSchemaVersion 2 -Payload (ValidGuestPayload) } |
+            Should -Throw '*canonical lowercase UUID*'
     }
 
     It 'stamps the result version rather than the manifest version' {

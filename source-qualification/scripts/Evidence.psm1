@@ -65,7 +65,11 @@ function ConvertTo-EvidenceEnvelope {
         [Parameter(Mandatory)] [ValidateSet('passed','failed','incomplete','skipped')] [string] $Outcome,
         [Parameter(Mandatory)] [datetime] $StartedUtc,
         [Parameter(Mandatory)] $Payload,
-        [Parameter()] [ValidateSet(1,2)] [int] $ManifestSchemaVersion,
+        # Mandatory, not optional. ADR 5 says every envelope carries both
+        # versions, and an optional parameter made that a suggestion: an envelope
+        # with only the result version reintroduces the ambiguity version 2
+        # exists to remove.
+        [Parameter(Mandatory)] [ValidateSet(1,2)] [int] $ManifestSchemaVersion,
         [Parameter()] [datetime] $CompletedUtc = [datetime]::UtcNow
     )
 
@@ -81,9 +85,7 @@ function ConvertTo-EvidenceEnvelope {
         toolVersion         = "PowerShell $($PSVersionTable.PSVersion)"
         payload             = $Payload
     }
-    if ($PSBoundParameters.ContainsKey('ManifestSchemaVersion')) {
-        $envelope['manifestSchemaVersion'] = $ManifestSchemaVersion
-    }
+    $envelope['manifestSchemaVersion'] = $ManifestSchemaVersion
 
     $result = [PSCustomObject] $envelope
 

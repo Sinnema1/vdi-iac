@@ -32,9 +32,9 @@ function AssertGuestPlatform {
         Refuses to run the production adapter anywhere it cannot mean what it says.
 
     .DESCRIPTION
-        Module-internal. Called before anything is launched, not only before a
-        filesystem lookup: describing the adapter as Windows-only while its
-        process member happily executes on any host is a comment, not a control.
+        Module-internal. Called when the adapter is acquired and again in every
+        member, so an unsupported runtime stops the run before any descriptor is
+        read, any directory created, or any package attempted.
 
         The PowerShell floor is a version, not a major: ProcessStartInfo
         .ArgumentList needs a modern runtime, and a major-only check accepts
@@ -68,6 +68,13 @@ function Get-GuestAdapter {
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
     param()
+
+    # Guarded at acquisition, not only inside each member. A guard that first
+    # fires inside the package loop is caught there and recorded as a package
+    # outcome, so an unsupported runtime could be reported against an optional
+    # package while the run as a whole returned passed. An unsupported runtime is
+    # a property of the run.
+    AssertGuestPlatform
 
     [PSCustomObject]@{
         Name = 'windows'
@@ -134,6 +141,7 @@ function Get-GuestAdapter {
 
         TestFile = {
             param([string] $Path)
+            AssertGuestPlatform
             Test-Path -LiteralPath $Path -PathType Leaf
         }
 
@@ -142,6 +150,7 @@ function Get-GuestAdapter {
         GetFileVersion = {
             param([string] $Path, [string] $Field)
 
+            AssertGuestPlatform
             $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
             $value = if ($Field -eq 'product') { $info.ProductVersion } else { $info.FileVersion }
             if ([string]::IsNullOrWhiteSpace($value)) { $null } else { $value.Trim() }

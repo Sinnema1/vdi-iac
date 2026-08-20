@@ -9,6 +9,7 @@
     "resultSchemaVersion",
     "resultKind",
     "runId",
+    "manifestSchemaVersion",
     "startedUtc",
     "completedUtc",
     "outcome",
@@ -35,7 +36,8 @@
       "enum": [
         1,
         2
-      ]
+      ],
+      "description": "Manifest version the run consumed. Required: an envelope carrying only the result version reintroduces the ambiguity version 2 exists to remove."
     },
     "startedUtc": {
       "type": "string",
@@ -225,8 +227,10 @@
           "maxLength": 64
         },
         "version": {
+          "description": "Package version, constrained to the manifest contract's syntax so an allowed field cannot carry free-form text.",
           "type": "string",
-          "pattern": "^[ -~]{1,64}$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+          "maxLength": 64
         },
         "order": {
           "type": "integer",
@@ -297,8 +301,10 @@
           "maxLength": 64
         },
         "version": {
+          "description": "Package version, constrained to the manifest contract's syntax so an allowed field cannot carry free-form text.",
           "type": "string",
-          "pattern": "^[ -~]{1,64}$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+          "maxLength": 64
         },
         "order": {
           "type": "integer",

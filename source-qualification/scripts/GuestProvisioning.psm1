@@ -116,42 +116,84 @@ function NewGuestError {
 function Remove-GuestBundle {
     <#
     .SYNOPSIS
-        Removes an uploaded bundle from the guest, bounded and observable.
+        Removes one run's bundle from the guest staging root, and nothing else.
 
     .DESCRIPTION
-        The primitive only. Ordering belongs to the host: evidence must be
-        retrieved before the directory holding it is deleted, and Stage 3 running
-        inside the guest cannot know whether that retrieval has happened.
+        The target is derived, never accepted. An earlier version took a bundle
+        path from the caller and removed it recursively, which meant any path a
+        caller could name was a deletion target; reproduced against an unrelated
+        temporary directory.
 
-        Invoke-GuestProvisioning therefore never calls this, and its evidence
-        records a cleanup outcome of not-attempted. Stage 5 orders evidence
-        retrieval, then this, then host cleanup, then evaluation, and records the
-        outcome this returns.
+        The target is now the single child the host is known to have created:
+        'bundle-<runId>' beneath the trusted staging root, with the run
+        identifier validated as a canonical UUID before it reaches the path. The
+        staging root itself is never the target, and neither is anything outside
+        it.
+
+        Nothing here reads the descriptor. Cleanup has to work after descriptor
+        tampering, so what gets deleted cannot depend on a document an attacker
+        may have rewritten.
+
+        Ordering belongs to the host: evidence must be retrieved before the
+        directory holding it is removed, and a phase running inside the guest
+        cannot know whether that has happened. Stage 5 calls this after
+        retrieval.
 
     .OUTPUTS
-        removed, retained, or failed. Never a bare boolean: a caller has to be
-        able to tell "there was nothing to remove" from "it would not go".
+        removed, retained, failed, or not-attempted. Never a bare boolean: a
+        caller has to tell "there was nothing to remove" from "it would not go".
     #>
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $BundlePath,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $StagingRoot,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RunId,
         [Parameter()] [switch] $KeepBundle
     )
 
+    $validatedRunId = Assert-RunIdentifier -RunId $RunId
+
+    if (-not (Test-Path -LiteralPath $StagingRoot -PathType Container)) {
+        throw (NewGuestError -Code 'path_rejected' -Message "Guest staging root not found: $StagingRoot")
+    }
+
+    $rootItem = Get-Item -LiteralPath $StagingRoot -Force
+    $rootTarget = if ($rootItem.LinkTarget) { $rootItem.ResolveLinkTarget($true) } else { $null }
+    $rootFull = if ($rootTarget) { [System.IO.Path]::GetFullPath($rootTarget.FullName) }
+                else { [System.IO.Path]::GetFullPath($rootItem.FullName) }
+
+    $target = [System.IO.Path]::GetFullPath((Join-Path $rootFull "bundle-$validatedRunId"))
+
+    # Belt and braces. The name is derived from a validated UUID, so this cannot
+    # fire; if it ever does, the derivation was bypassed and nothing is deleted.
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    $prefix = $rootFull.TrimEnd($separator) + $separator
+    if (-not $target.StartsWith($prefix, [System.StringComparison]::Ordinal) -or $target -eq $rootFull) {
+        throw (NewGuestError -Code 'path_rejected' -Message 'Derived cleanup target is not a child of the staging root.')
+    }
+
     if ($KeepBundle) { return 'retained' }
-    if (-not (Test-Path -LiteralPath $BundlePath)) { return 'removed' }
-    if (-not $PSCmdlet.ShouldProcess($BundlePath, 'Remove guest bundle')) { return 'not-attempted' }
+    if (-not (Test-Path -LiteralPath $target)) { return 'removed' }
+
+    # A redirected target would delete whatever it points at rather than the
+    # bundle, so it is refused rather than followed.
+    $targetItem = Get-Item -LiteralPath $target -Force
+    $isReparse = ($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint
+    if ($targetItem.LinkTarget -or $isReparse) {
+        throw (NewGuestError -Code 'path_rejected' -Message 'Cleanup target is redirected; refusing to follow it.')
+    }
+
+    if (-not $PSCmdlet.ShouldProcess($target, 'Remove guest bundle')) { return 'not-attempted' }
 
     try {
-        Remove-Item -LiteralPath $BundlePath -Recurse -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
     }
     catch {
         Write-Verbose "Guest bundle cleanup failed: $($_.Exception.Message)"
         return 'failed'
     }
 
-    if (Test-Path -LiteralPath $BundlePath) { 'failed' } else { 'removed' }
+    if (Test-Path -LiteralPath $target) { 'failed' } else { 'removed' }
 }
 
 function Get-NormalizedInstallerResult {

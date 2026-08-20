@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.invalid/schemas/evidence-envelope-2.json",
+  "title": "Evidence Envelope, version 2",
+  "description": "Common envelope for every stage's evidence. ResultKind selects the payload shape; the envelope version covers the envelope only, so a payload changing shape is a payload change and not an envelope one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "resultSchemaVersion",
+    "resultKind",
+    "runId",
+    "startedUtc",
+    "completedUtc",
+    "outcome",
+    "payload"
+  ],
+  "properties": {
+    "resultSchemaVersion": {
+      "description": "Shape of this envelope. Version 1 was the Increment 1 result, which named this field schemaVersion and could be mistaken for the manifest version.",
+      "enum": [
+        2
+      ]
+    },
+    "resultKind": {
+      "description": "Which stage produced this. Required, so a consumer never infers the shape from whichever fields happen to be present.",
+      "enum": [
+        "source-qualification",
+        "build-orchestration",
+        "guest-provisioning"
+      ]
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "manifestSchemaVersion": {
+      "description": "Manifest version the run consumed. Absent when a stage consumed no manifest.",
+      "enum": [
+        1,
+        2
+      ]
+    },
+    "startedUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "outcome": {
+      "description": "passed: the stage did what it was asked. failed: an expected failure it is designed to report. incomplete: the stage could not finish cleanly, so its own state is not fully known.",
+      "enum": [
+        "passed",
+        "failed",
+        "incomplete",
+        "skipped"
+      ]
+    },
+    "toolVersion": {
+      "description": "Runtime that produced the evidence, so a result is attributable.",
+      "type": "string",
+      "pattern": "^[ -~]{1,64}$"
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

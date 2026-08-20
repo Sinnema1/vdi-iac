@@ -227,10 +227,13 @@
           "maxLength": 64
         },
         "version": {
-          "description": "Package version, constrained to the manifest contract's syntax so an allowed field cannot carry free-form text.",
+          "description": "Package version, constrained to the manifest contract's syntax -- including its rejection of moving references and wildcard segments -- so evidence cannot describe a version a manifest could never have declared.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
-          "maxLength": 64
+          "maxLength": 64,
+          "not": {
+            "pattern": "^([Ll][Aa][Tt][Ee][Ss][Tt]|[Nn][Ee][Ww][Ee][Ss][Tt]|[Cc][Uu][Rr][Rr][Ee][Nn][Tt]|[Ss][Tt][Aa][Bb][Ll][Ee]|[Hh][Ee][Aa][Dd]|[Aa][Nn][Yy])$|(^|[.+-])[xX]([.+-]|$)"
+          }
         },
         "order": {
           "type": "integer",
@@ -301,10 +304,13 @@
           "maxLength": 64
         },
         "version": {
-          "description": "Package version, constrained to the manifest contract's syntax so an allowed field cannot carry free-form text.",
+          "description": "Package version, constrained to the manifest contract's syntax -- including its rejection of moving references and wildcard segments -- so evidence cannot describe a version a manifest could never have declared.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
-          "maxLength": 64
+          "maxLength": 64,
+          "not": {
+            "pattern": "^([Ll][Aa][Tt][Ee][Ss][Tt]|[Nn][Ee][Ww][Ee][Ss][Tt]|[Cc][Uu][Rr][Rr][Ee][Nn][Tt]|[Ss][Tt][Aa][Bb][Ll][Ee]|[Hh][Ee][Aa][Dd]|[Aa][Nn][Yy])$|(^|[.+-])[xX]([.+-]|$)"
+          }
         },
         "order": {
           "type": "integer",

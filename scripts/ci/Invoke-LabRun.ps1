@@ -49,11 +49,16 @@ foreach ($module in 'PackageManifest', 'RunIdentity', 'Evidence', 'SourceQualifi
 Import-Module (Join-Path $PSScriptRoot 'LabEvidence.psm1') -Force
 
 $runId = Get-RunIdentifier
+$startedUtc = [datetime]::UtcNow
 $runWork = New-RunDirectory -Root $WorkRoot -RunId $runId -Prefix 'lab'
 $evidenceDirectory = Join-Path $runWork 'evidence'
 $null = New-Item -ItemType Directory -Path $evidenceDirectory -Force
 
 $bundle = $null
+$packerExit = $null
+$hostCleanup = 'not-attempted'
+$guestCleanup = 'not-attempted'
+
 try {
     Write-Information "lab run $runId"
 
@@ -81,23 +86,68 @@ try {
         exit 0
     }
 
-    & packer @arguments
+    $packerOutput = & packer @arguments 2>&1
     $packerExit = $LASTEXITCODE
+    $packerOutput | ForEach-Object { Write-Information $_ }
 
-    $verdict = Get-LabEvidenceOutcome -EvidenceDirectory $evidenceDirectory
+    # The harness reports its own cleanup step. Reading it from output rather
+    # than assuming it: a run that never reached the step has not attempted it.
+    $guestCleanup = if ($packerOutput -match 'guest cleanup: run directory removed') { 'removed' }
+                    elseif ($packerOutput -match 'error cleanup: staging removed') { 'removed' }
+                    elseif ($packerOutput -match 'guest cleanup: run directory still present') { 'failed' }
+                    elseif ($packerOutput -match 'error cleanup: staging still present') { 'failed' }
+                    elseif ($packerOutput -match 'no ownership sentinel') { 'not-attempted' }
+                    else { 'not-attempted' }
+
+    # A halted run stops before the restart deliberately, so its missing validate
+    # evidence is the designed behavior rather than a gap in the record.
+    $halted = [bool]($packerOutput -match 'Refusing to restart a guest')
+
+    $verdict = Get-LabEvidenceOutcome -EvidenceDirectory $evidenceDirectory -RunId $runId `
+        -PackerExitCode $packerExit -RequireValidatePhase (-not $halted)
+
     foreach ($phase in $verdict.Phases) {
-        Write-Information ("  {0,-9} {1}" -f $phase.Phase, $phase.Outcome)
-    }
-    Write-Information "lab run: $($verdict.Outcome) (packer exit $packerExit)"
-
-    switch ($verdict.Outcome) {
-        'passed' { if ($packerExit -eq 0) { exit 0 } else { exit 2 } }
-        'failed' { exit 1 }
-        default  { exit 2 }
+        Write-Information ("  {0,-9} {1}" -f $phase.phase, $phase.outcome)
     }
 }
 finally {
-    if ($bundle -and -not $KeepHostBundle -and $bundle.BundlePath -and (Test-Path -LiteralPath $bundle.BundlePath)) {
-        Remove-Item -LiteralPath $bundle.BundlePath -Recurse -Force -ErrorAction SilentlyContinue
+    if ($bundle -and $bundle.BundlePath -and (Test-Path -LiteralPath $bundle.BundlePath)) {
+        if ($KeepHostBundle) {
+            $hostCleanup = 'retained'
+        }
+        else {
+            try {
+                Remove-Item -LiteralPath $bundle.BundlePath -Recurse -Force -ErrorAction Stop
+                $hostCleanup = if (Test-Path -LiteralPath $bundle.BundlePath) { 'failed' } else { 'removed' }
+            }
+            catch {
+                # Recorded, not suppressed. A cleanup failure nobody records is a
+                # cleanup failure nobody can audit.
+                $hostCleanup = 'failed'
+                Write-Information "host cleanup failed: $($_.Exception.Message)"
+            }
+        }
     }
+    else {
+        $hostCleanup = 'removed'
+    }
+}
+
+if (-not $verdict) {
+    exit 2
+}
+
+$orchestration = Get-LabOrchestrationEvidence -RunId $runId -Verdict $verdict `
+    -HostCleanupOutcome $hostCleanup -GuestCleanupOutcome $guestCleanup -StartedUtc $startedUtc
+
+$orchestrationPath = Join-Path $evidenceDirectory 'orchestration-evidence.json'
+$orchestration | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $orchestrationPath -Encoding utf8
+
+Write-Information "lab run: $($orchestration.outcome) (packer exit $packerExit, host cleanup $hostCleanup, guest cleanup $guestCleanup)"
+Write-Information "evidence: $evidenceDirectory"
+
+switch ($orchestration.outcome) {
+    'passed' { exit 0 }
+    'failed' { exit 1 }
+    default  { exit 2 }
 }

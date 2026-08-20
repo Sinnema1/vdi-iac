@@ -60,7 +60,7 @@ function ConvertTo-EvidenceEnvelope {
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
     param(
-        [Parameter(Mandatory)] [ValidateSet('source-qualification','guest-provisioning')] [string] $ResultKind,
+        [Parameter(Mandatory)] [ValidateSet('source-qualification','guest-provisioning','build-orchestration')] [string] $ResultKind,
         [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RunId,
         [Parameter(Mandatory)] [ValidateSet('passed','failed','incomplete','skipped')] [string] $Outcome,
         [Parameter(Mandatory)] [datetime] $StartedUtc,

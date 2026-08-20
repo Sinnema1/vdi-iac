@@ -27,6 +27,10 @@ BeforeAll {
     # dot-sourcing it would prompt for them rather than run.
     Import-Module (Join-Path $script:RepoRoot 'scripts' 'ci' 'LabEvidence.psm1') -Force
 
+    # LabEvidence imports RunIdentity into its own scope, not the caller's, so the
+    # tests import what they use rather than relying on a transitive import.
+    Import-Module (Join-Path $script:RepoRoot 'source-qualification' 'scripts' 'RunIdentity.psm1') -Force
+
     function ToHclPath {
         <#
             HCL reads a backslash as an escape introducer, so a Windows path
@@ -46,13 +50,18 @@ BeforeAll {
     }
 
     function WriteEvidence {
-        param([string] $Directory, [string] $Phase, [string] $Outcome, [int] $FailedRequired = 0)
+        param(
+            [string] $Directory, [string] $Phase, [string] $Outcome, [int] $FailedRequired = 0,
+            [string] $RunId = '3f2504e0-4f89-41d3-9a0c-0305e82c3301',
+            [string] $Kind = 'guest-provisioning', [string] $DeclaredPhase
+        )
+        if (-not $DeclaredPhase) { $DeclaredPhase = $Phase }
         $document = @{
-            resultSchemaVersion = 2; resultKind = 'guest-provisioning'
-            runId = '3f2504e0-4f89-41d3-9a0c-0305e82c3301'; manifestSchemaVersion = 2
+            resultSchemaVersion = 2; resultKind = $Kind
+            runId = $RunId; manifestSchemaVersion = 2
             startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
             outcome = $Outcome
-            payload = @{ phase = $Phase; restartRequired = $false; packageCount = 1
+            payload = @{ phase = $DeclaredPhase; restartRequired = $false; packageCount = 1
                          passedCount = 0; failedRequiredCount = $FailedRequired
                          cleanupOutcome = 'not-attempted'; packages = @() }
         }
@@ -272,30 +281,148 @@ Describe 'the orchestrator invokes Packer correctly' {
 
 Describe 'Get-LabEvidenceOutcome' {
 
-    It 'reports incomplete when no evidence was retrieved' {
-        # A phase that left no evidence proved nothing, so this is not a pass.
-        (Get-LabEvidenceOutcome -EvidenceDirectory (NewTempDir)).Outcome | Should -Be 'incomplete'
+    BeforeAll {
+        function WriteBoth {
+            param([string] $Directory, [string] $RunId, [string] $InstallOutcome = 'passed', [string] $ValidateOutcome = 'passed')
+            WriteEvidence -Directory $Directory -Phase 'install' -Outcome $InstallOutcome -RunId $RunId
+            WriteEvidence -Directory $Directory -Phase 'validate' -Outcome $ValidateOutcome -RunId $RunId
+        }
     }
 
-    It 'reports passed when every phase passed' {
-        $dir = NewTempDir
-        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'passed'
-        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'passed'
-        (Get-LabEvidenceOutcome -EvidenceDirectory $dir).Outcome | Should -Be 'passed'
+    It 'reports passed only when both phases are present and passed' {
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteBoth -Directory $dir -RunId $runId
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0).Outcome | Should -Be 'passed'
+    }
+
+    It 'refuses to conclude anything from an install-only result' {
+        # The defect this replaced: any non-empty subset counted, so a run that
+        # never validated anything could report that everything validated.
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'passed' -RunId $runId
+
+        $verdict = Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0
+        $verdict.Outcome | Should -Be 'incomplete'
+        $verdict.Reason | Should -Be 'evidence_missing'
+    }
+
+    It 'reports incomplete when no evidence was retrieved' {
+        $runId = Get-RunIdentifier
+        (Get-LabEvidenceOutcome -EvidenceDirectory (NewTempDir) -RunId $runId -PackerExitCode 0).Reason |
+            Should -Be 'evidence_missing'
     }
 
     It 'reports failed when a phase failed' {
-        $dir = NewTempDir
-        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'passed'
-        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'failed' -FailedRequired 1
-        (Get-LabEvidenceOutcome -EvidenceDirectory $dir).Outcome | Should -Be 'failed'
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteBoth -Directory $dir -RunId $runId -ValidateOutcome 'failed'
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 200).Outcome | Should -Be 'failed'
     }
 
     It 'reports incomplete when a phase was incomplete, even beside a pass' {
-        # Incomplete outranks failed: nothing is known about the guest's state.
-        $dir = NewTempDir
-        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'incomplete'
-        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'passed'
-        (Get-LabEvidenceOutcome -EvidenceDirectory $dir).Outcome | Should -Be 'incomplete'
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteBoth -Directory $dir -RunId $runId -InstallOutcome 'incomplete'
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 200).Outcome | Should -Be 'incomplete'
+    }
+
+    It 'refuses evidence belonging to another run' {
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteBoth -Directory $dir -RunId (Get-RunIdentifier)
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0).Reason |
+            Should -Be 'evidence_run_id_mismatch'
+    }
+
+    It 'refuses malformed evidence' {
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'passed' -RunId $runId
+        '{ not json' | Set-Content -LiteralPath (Join-Path $dir 'install-guest-evidence.json') -Encoding utf8
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0).Reason |
+            Should -Be 'evidence_malformed'
+    }
+
+    It 'refuses evidence of the wrong kind' {
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'passed' -RunId $runId
+        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'passed' -RunId $runId -Kind 'source-qualification'
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0).Reason |
+            Should -BeIn @('evidence_wrong_kind', 'evidence_malformed')
+    }
+
+    It 'refuses a phase whose evidence describes a different phase' {
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'passed' -RunId $runId
+        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'passed' -RunId $runId -DeclaredPhase 'validate'
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0).Reason |
+            Should -Be 'phase_missing'
+    }
+
+    It 'treats an unexpected packer exit code as inconclusive' {
+        # Only the accepted logical-result code is conclusive. Anything else means
+        # the harness itself failed, whatever the evidence happens to say.
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteBoth -Directory $dir -RunId $runId -ValidateOutcome 'failed'
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 1).Reason |
+            Should -Be 'packer_failed'
+    }
+
+    It 'treats a non-zero exit beside a clean pass as inconclusive' {
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteBoth -Directory $dir -RunId $runId
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 200).Reason |
+            Should -Be 'packer_failed'
+    }
+
+    It 'accepts an install-only record when the run halted before the restart' {
+        # A halted run stops deliberately, so its missing validate evidence is
+        # designed behavior rather than a gap.
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'incomplete' -RunId $runId
+        $verdict = Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 200 -RequireValidatePhase $false
+        $verdict.Outcome | Should -Be 'incomplete'
+        $verdict.Reason | Should -Not -Be 'evidence_missing'
+    }
+}
+
+Describe 'Get-LabOrchestrationEvidence' {
+
+    BeforeAll {
+        function PassingVerdict {
+            [PSCustomObject]@{
+                Outcome = 'passed'; Reason = $null; PackerExitCode = 0
+                Phases = @([PSCustomObject]@{ phase = 'install'; outcome = 'passed'; failedRequiredCount = 0 },
+                           [PSCustomObject]@{ phase = 'validate'; outcome = 'passed'; failedRequiredCount = 0 })
+            }
+        }
+    }
+
+    It 'records both cleanup outcomes in schema-valid evidence' {
+        # Cleanup used to be console output only, and host cleanup errors were
+        # suppressed entirely. An outcome nobody records is one nobody can audit.
+        $evidence = Get-LabOrchestrationEvidence -RunId (Get-RunIdentifier) -Verdict (PassingVerdict) `
+            -HostCleanupOutcome 'removed' -GuestCleanupOutcome 'removed' -StartedUtc ([datetime]::UtcNow)
+
+        $evidence.resultKind | Should -Be 'build-orchestration'
+        $evidence.resultSchemaVersion | Should -Be 2
+        $evidence.payload.hostCleanupOutcome | Should -Be 'removed'
+        $evidence.payload.guestCleanupOutcome | Should -Be 'removed'
+        $evidence.payload.phases.Count | Should -Be 2
+    }
+
+    It 'reports incomplete when <side> cleanup failed, whatever the phases said' -ForEach @(
+        # Not named $host: that is an automatic variable holding the PowerShell
+        # host object, and shadowing it breaks the case rather than the code.
+        @{ side = 'host';  hostOutcome = 'failed'; guestOutcome = 'removed' }
+        @{ side = 'guest'; hostOutcome = 'removed'; guestOutcome = 'failed' }
+    ) {
+        $evidence = Get-LabOrchestrationEvidence -RunId (Get-RunIdentifier) -Verdict (PassingVerdict) `
+            -HostCleanupOutcome $hostOutcome -GuestCleanupOutcome $guestOutcome -StartedUtc ([datetime]::UtcNow)
+
+        $evidence.outcome | Should -Be 'incomplete'
+        $evidence.payload.terminalReasonCode | Should -Be 'cleanup_failed'
+    }
+
+    It 'records that cleanup was never attempted, rather than implying it succeeded' {
+        $evidence = Get-LabOrchestrationEvidence -RunId (Get-RunIdentifier) -Verdict (PassingVerdict) `
+            -HostCleanupOutcome 'not-attempted' -GuestCleanupOutcome 'not-attempted' -StartedUtc ([datetime]::UtcNow)
+        $evidence.payload.guestCleanupOutcome | Should -Be 'not-attempted'
     }
 }

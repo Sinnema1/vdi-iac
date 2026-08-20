@@ -49,66 +49,83 @@ foreach ($module in 'PackageManifest', 'RunIdentity', 'Evidence', 'SourceQualifi
 Import-Module (Join-Path $PSScriptRoot 'LabEvidence.psm1') -Force
 
 $runId = Get-RunIdentifier
+$cleanupNonce = -join ((1..32) | ForEach-Object { '{0:x}' -f (Get-Random -Minimum 0 -Maximum 16) })
 $startedUtc = [datetime]::UtcNow
 $runWork = New-RunDirectory -Root $WorkRoot -RunId $runId -Prefix 'lab'
 $evidenceDirectory = Join-Path $runWork 'evidence'
 $null = New-Item -ItemType Directory -Path $evidenceDirectory -Force
 
+# One exit, at the end, after evidence is written. Every earlier path sets these
+# and falls through: a run that returns early has skipped cleanup and left no
+# record of what it did.
 $bundle = $null
 $packerExit = $null
 $hostCleanup = 'not-attempted'
 $guestCleanup = 'not-attempted'
+$verdict = $null
+$terminalReason = $null
+
+Write-Information "lab run $runId"
 
 try {
-    Write-Information "lab run $runId"
-
     $bundle = New-TransferBundle -ManifestPath $ManifestPath -SourceRoot $SourceRoot `
         -BundleRoot (Join-Path $runWork 'bundles') -RunId $runId
+
     if ($bundle.Outcome -ne 'passed') {
-        Write-Error "lab run: bundle assembly did not pass ($($bundle.Outcome)). Nothing was uploaded." -ErrorAction Continue
-        exit 2
+        # Nothing was uploaded, so there is nothing on the guest to clean up.
+        $terminalReason = 'bundle_assembly_failed'
+        $guestCleanup = 'removed'
     }
-
-    $arguments = @(
-        'build'
-        '-on-error=run-cleanup-provisioner'
-        "-var-file=$VarFile"
-        "-var", "run_id=$runId"
-        "-var", "bundle_path=$($bundle.BundlePath)"
-        "-var", "descriptor_sha256=$($bundle.DescriptorSha256)"
-        "-var", "evidence_output_dir=$evidenceDirectory"
-        "-var", "tools_source_dir=$(Join-Path $repoRoot 'source-qualification' 'scripts')"
-        "-var", "guest_scripts_dir=$(Join-Path $repoRoot 'packer' 'scripts' 'guest')"
-        (Join-Path $repoRoot 'packer' 'harness')
-    )
-
-    if (-not $PSCmdlet.ShouldProcess($VarFile, 'Run the lab harness against the configured target')) {
-        exit 0
+    elseif (-not $PSCmdlet.ShouldProcess($VarFile, 'Run the lab harness against the configured target')) {
+        # -WhatIf still produces an envelope. A run that reports nothing is
+        # indistinguishable from one that was never asked to report.
+        $terminalReason = $null
+        $guestCleanup = 'not-attempted'
+        $verdict = [PSCustomObject]@{ Outcome = 'skipped'; Reason = $null; Phases = @(); PackerExitCode = $null }
     }
+    else {
+        $arguments = @(
+            'build'
+            '-on-error=run-cleanup-provisioner'
+            "-var-file=$VarFile"
+            "-var", "run_id=$runId"
+            "-var", "cleanup_nonce=$cleanupNonce"
+            "-var", "bundle_path=$($bundle.BundlePath)"
+            "-var", "descriptor_sha256=$($bundle.DescriptorSha256)"
+            "-var", "evidence_output_dir=$evidenceDirectory"
+            "-var", "tools_source_dir=$(Join-Path $repoRoot 'source-qualification' 'scripts')"
+            "-var", "guest_scripts_dir=$(Join-Path $repoRoot 'packer' 'scripts' 'guest')"
+            "-var", "contracts_source_dir=$(Join-Path $repoRoot 'contracts')"
+            (Join-Path $repoRoot 'packer' 'harness')
+        )
 
-    $packerOutput = & packer @arguments 2>&1
-    $packerExit = $LASTEXITCODE
-    $packerOutput | ForEach-Object { Write-Information $_ }
+        $build = Invoke-PackerBuild -Arguments $arguments
+        $packerExit = $build.ExitCode
+        $build.Output | ForEach-Object { Write-Information $_ }
 
-    # The harness reports its own cleanup step. Reading it from output rather
-    # than assuming it: a run that never reached the step has not attempted it.
-    $guestCleanup = if ($packerOutput -match 'guest cleanup: run directory removed') { 'removed' }
-                    elseif ($packerOutput -match 'error cleanup: staging removed') { 'removed' }
-                    elseif ($packerOutput -match 'guest cleanup: run directory still present') { 'failed' }
-                    elseif ($packerOutput -match 'error cleanup: staging still present') { 'failed' }
-                    elseif ($packerOutput -match 'no ownership sentinel') { 'not-attempted' }
-                    else { 'not-attempted' }
+        $guestCleanup = Get-GuestCleanupOutcome -PackerOutput $build.Output
 
-    # A halted run stops before the restart deliberately, so its missing validate
-    # evidence is the designed behavior rather than a gap in the record.
-    $halted = [bool]($packerOutput -match 'Refusing to restart a guest')
+        # Whether the run halted before the restart is decided by the install
+        # evidence, not by matching console text.
+        $verdict = Get-LabEvidenceOutcome -EvidenceDirectory $evidenceDirectory -RunId $runId `
+            -PackerExitCode $packerExit -RequireValidatePhase $true
 
-    $verdict = Get-LabEvidenceOutcome -EvidenceDirectory $evidenceDirectory -RunId $runId `
-        -PackerExitCode $packerExit -RequireValidatePhase (-not $halted)
+        if ($verdict.Reason -eq 'evidence_missing') {
+            $halted = Get-LabEvidenceOutcome -EvidenceDirectory $evidenceDirectory -RunId $runId `
+                -PackerExitCode $packerExit -RequireValidatePhase $false
+            if ($halted.Outcome -eq 'incomplete' -and $halted.Reason -ne 'evidence_missing') {
+                $verdict = $halted
+            }
+        }
 
-    foreach ($phase in $verdict.Phases) {
-        Write-Information ("  {0,-9} {1}" -f $phase.phase, $phase.outcome)
+        foreach ($phase in $verdict.Phases) {
+            Write-Information ("  {0,-9} {1}" -f $phase.phase, $phase.outcome)
+        }
     }
+}
+catch {
+    $terminalReason = 'unexpected_error'
+    Write-Information "lab run failed: $($_.Exception.Message)"
 }
 finally {
     if ($bundle -and $bundle.BundlePath -and (Test-Path -LiteralPath $bundle.BundlePath)) {
@@ -121,8 +138,6 @@ finally {
                 $hostCleanup = if (Test-Path -LiteralPath $bundle.BundlePath) { 'failed' } else { 'removed' }
             }
             catch {
-                # Recorded, not suppressed. A cleanup failure nobody records is a
-                # cleanup failure nobody can audit.
                 $hostCleanup = 'failed'
                 Write-Information "host cleanup failed: $($_.Exception.Message)"
             }
@@ -134,7 +149,12 @@ finally {
 }
 
 if (-not $verdict) {
-    exit 2
+    $verdict = [PSCustomObject]@{
+        Outcome = 'incomplete'
+        Reason = if ($terminalReason) { $terminalReason } else { 'unexpected_error' }
+        Phases = @()
+        PackerExitCode = $packerExit
+    }
 }
 
 $orchestration = Get-LabOrchestrationEvidence -RunId $runId -Verdict $verdict `
@@ -147,7 +167,8 @@ Write-Information "lab run: $($orchestration.outcome) (packer exit $packerExit, 
 Write-Information "evidence: $evidenceDirectory"
 
 switch ($orchestration.outcome) {
-    'passed' { exit 0 }
-    'failed' { exit 1 }
-    default  { exit 2 }
+    'passed'  { exit 0 }
+    'skipped' { exit 0 }
+    'failed'  { exit 1 }
+    default   { exit 2 }
 }

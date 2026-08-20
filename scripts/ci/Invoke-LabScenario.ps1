@@ -84,22 +84,19 @@ $arguments = @(
     (Join-Path $repoRoot 'packer' 'harness')
 )
 
-$packerOutput = & packer @arguments 2>&1
-$packerExit = $LASTEXITCODE
-$packerOutput | ForEach-Object { Write-Information $_ }
+$build = Invoke-PackerBuild -Arguments $arguments
+$packerExit = $build.ExitCode
+$build.Output | ForEach-Object { Write-Information $_ }
 
-# The execution witness. A negative scenario that refuses content but runs the
-# installer anyway has not demonstrated the control it claims to.
-$installerRan = [bool]($packerOutput -match 'guest phase ''install'': passed')
+$guestCleanup = Get-GuestCleanupOutcome -PackerOutput $build.Output
 
-$guestCleanup = if ($packerOutput -match 'guest cleanup: run directory removed') { 'removed' }
-                elseif ($packerOutput -match 'error cleanup: staging removed') { 'removed' }
-                elseif ($packerOutput -match 'still present') { 'failed' }
-                else { 'not-attempted' }
-
-$halted = [bool]($packerOutput -match 'Refusing to restart a guest')
 $verdict = Get-LabEvidenceOutcome -EvidenceDirectory $evidenceDirectory -RunId $runId `
-    -PackerExitCode $packerExit -RequireValidatePhase (-not $halted)
+    -PackerExitCode $packerExit -RequireValidatePhase $true
+if ($verdict.Reason -eq 'evidence_missing') {
+    $halted = Get-LabEvidenceOutcome -EvidenceDirectory $evidenceDirectory -RunId $runId `
+        -PackerExitCode $packerExit -RequireValidatePhase $false
+    if ($halted.Outcome -eq 'incomplete' -and $halted.Reason -ne 'evidence_missing') { $verdict = $halted }
+}
 
 $hostCleanup = 'not-attempted'
 if (Test-Path -LiteralPath $bundle.BundlePath) {
@@ -116,21 +113,46 @@ $orchestration = Get-LabOrchestrationEvidence -RunId $runId -Verdict $verdict `
 $orchestration | ConvertTo-Json -Depth 16 |
     Set-Content -LiteralPath (Join-Path $evidenceDirectory 'orchestration-evidence.json') -Encoding utf8
 
-Write-Information "  outcome        : $($orchestration.outcome) (expected $($definition.ExpectedOutcome))"
-Write-Information "  installer ran  : $installerRan (expected $($definition.ExpectInstalled))"
-Write-Information "  host cleanup   : $hostCleanup"
-Write-Information "  guest cleanup  : $guestCleanup"
-Write-Information "  evidence       : $evidenceDirectory"
+# The scenario's own assertions, read from schema-validated guest evidence rather
+# than from console text.
+$observation = Get-LabScenarioObservation -EvidenceDirectory $evidenceDirectory -RunId $runId
 
-$matchedOutcome = $orchestration.outcome -eq $definition.ExpectedOutcome
-$matchedWitness = $installerRan -eq $definition.ExpectInstalled
-$cleanupAttempted = $hostCleanup -ne 'not-attempted' -and $guestCleanup -ne 'not-attempted'
+Write-Information "  outcome            : $($orchestration.outcome) (expected $($definition.ExpectedOutcome))"
+Write-Information "  reason code        : $($observation.ReasonCode) (expected $($definition.ExpectedReasonCode))"
+Write-Information "  installers started : $($observation.InstallerAttemptCount) (expected installed: $($definition.ExpectInstalled))"
+Write-Information "  host cleanup       : $hostCleanup"
+Write-Information "  guest cleanup      : $guestCleanup"
+Write-Information "  evidence           : $evidenceDirectory"
 
-if (-not $cleanupAttempted) {
-    Write-Error "scenario '$Scenario': cleanup was not attempted on both sides." -ErrorAction Continue
-    exit 2
+$failures = [System.Collections.Generic.List[string]]::new()
+
+if ($orchestration.outcome -ne $definition.ExpectedOutcome) {
+    $failures.Add("outcome was '$($orchestration.outcome)', expected '$($definition.ExpectedOutcome)'")
 }
-if ($matchedOutcome -and $matchedWitness) { exit 0 }
 
-Write-Error "scenario '$Scenario' did not end as expected." -ErrorAction Continue
+# An outcome alone is not enough for the negatives: 'incomplete' is reachable for
+# reasons that have nothing to do with the control under test, including missing
+# evidence or a failed cleanup.
+if ($definition.ExpectedReasonCode -and $observation.ReasonCode -ne $definition.ExpectedReasonCode) {
+    $failures.Add("reason code was '$($observation.ReasonCode)', expected '$($definition.ExpectedReasonCode)'")
+}
+
+# The witness is a count from evidence, not an inference from output. An
+# installer that starts and then fails has still started.
+$installerRan = $observation.InstallerAttemptCount -gt 0
+if ($installerRan -ne $definition.ExpectInstalled) {
+    $failures.Add("installer attempts were $($observation.InstallerAttemptCount), expected installed: $($definition.ExpectInstalled)")
+}
+
+# These scenarios all run against a healthy communicator, so cleanup succeeding
+# is part of what they assert rather than a nice-to-have.
+if ($hostCleanup -ne 'removed') { $failures.Add("host cleanup was '$hostCleanup', expected 'removed'") }
+if ($guestCleanup -ne 'removed') { $failures.Add("guest cleanup was '$guestCleanup', expected 'removed'") }
+
+if ($failures.Count -eq 0) {
+    Write-Information "scenario '$Scenario': as expected"
+    exit 0
+}
+
+foreach ($failure in $failures) { Write-Error "scenario '$Scenario': $failure" -ErrorAction Continue }
 exit 1

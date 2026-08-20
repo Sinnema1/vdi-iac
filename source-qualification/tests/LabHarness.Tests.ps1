@@ -61,9 +61,25 @@ BeforeAll {
             runId = $RunId; manifestSchemaVersion = 2
             startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
             outcome = $Outcome
-            payload = @{ phase = $DeclaredPhase; restartRequired = $false; packageCount = 1
-                         passedCount = 0; failedRequiredCount = $FailedRequired
-                         cleanupOutcome = 'not-attempted'; packages = @() }
+            # Self-consistent by construction. The evaluator now rejects a
+            # document whose counters contradict its packages, so a fixture that
+            # claims one package and lists none is refused for that reason rather
+            # than for the one the test is about.
+            payload = @{
+                phase = $DeclaredPhase; restartRequired = $false
+                packageCount = 1
+                passedCount = $(if ($Outcome -eq 'passed') { 1 } else { 0 })
+                failedRequiredCount = $(if ($Outcome -eq 'failed') { 1 } else { $FailedRequired })
+                installerAttemptCount = 1
+                terminalReasonCode = $(if ($Outcome -eq 'incomplete') { 'install_timeout_termination_failed' } else { $null })
+                cleanupOutcome = 'not-attempted'
+                packages = @(@{
+                    id = 'example-agent'; version = '1.2.3'; order = 10; required = $true
+                    outcome = $(if ($Outcome -eq 'passed') { 'passed' } else { $Outcome })
+                    reasonCode = $(if ($Outcome -eq 'passed') { $null } else { 'installer_failed' })
+                    restartRequired = $false; installerAttempted = $true
+                })
+            }
         }
         $document | ConvertTo-Json -Depth 12 |
             Set-Content -LiteralPath (Join-Path $Directory "$Phase-guest-evidence.json") -Encoding utf8
@@ -92,6 +108,8 @@ Describe 'harness configuration is complete' {
         $null = New-Item -ItemType Directory -Path $bundle, $evidence -Force
         $varFile = Join-Path $work 'vars.pkrvars.hcl'
         @"
+cleanup_nonce                   = "0123456789abcdef0123456789abcdef"
+contracts_source_dir            = "$(ToHclPath (Join-Path $script:RepoRoot 'contracts'))"
 guest_host                      = "windows-lab-target.example"
 guest_username                  = "labuser"
 guest_password                  = "placeholder"
@@ -382,6 +400,102 @@ Describe 'Get-LabEvidenceOutcome' {
     }
 }
 
+Describe 'evidence consistency' {
+
+    It 'refuses a document that passed while reporting a required failure' {
+        # Schema-valid and self-contradictory. Accepting it turns two documents
+        # that disagree with themselves into an overall pass.
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        foreach ($phase in 'install', 'validate') {
+            $document = @{
+                resultSchemaVersion = 2; resultKind = 'guest-provisioning'
+                runId = $runId; manifestSchemaVersion = 2
+                startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+                outcome = 'passed'
+                payload = @{ phase = $phase; restartRequired = $false; packageCount = 1
+                             passedCount = 1; failedRequiredCount = 1; installerAttemptCount = 1
+                             cleanupOutcome = 'not-attempted'
+                             packages = @(@{ id = 'a'; version = '1.0'; order = 1; required = $true
+                                             outcome = 'passed'; reasonCode = $null
+                                             restartRequired = $false; installerAttempted = $true }) }
+            }
+            $document | ConvertTo-Json -Depth 12 |
+                Set-Content -LiteralPath (Join-Path $dir "$phase-guest-evidence.json") -Encoding utf8
+        }
+
+        $verdict = Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0
+        $verdict.Outcome | Should -Be 'incomplete'
+        $verdict.Reason | Should -Be 'evidence_inconsistent'
+    }
+
+    It 'refuses a document whose package list contradicts its counters' {
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        $document = @{
+            resultSchemaVersion = 2; resultKind = 'guest-provisioning'
+            runId = $runId; manifestSchemaVersion = 2
+            startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+            outcome = 'passed'
+            payload = @{ phase = 'install'; restartRequired = $false; packageCount = 3
+                         passedCount = 3; failedRequiredCount = 0; installerAttemptCount = 0
+                         cleanupOutcome = 'not-attempted'; packages = @() }
+        }
+        $document | ConvertTo-Json -Depth 12 |
+            Set-Content -LiteralPath (Join-Path $dir 'install-guest-evidence.json') -Encoding utf8
+        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'passed' -RunId $runId
+
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0).Reason |
+            Should -Be 'evidence_inconsistent'
+    }
+
+    It 'refuses an install-only record whose install did not report a halt' {
+        # The halt exception is granted on evidence, not on console text. An
+        # install that passed cannot justify a missing validation phase.
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'passed' -RunId $runId
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 1 -RequireValidatePhase $false).Reason |
+            Should -Be 'phase_missing'
+    }
+
+    It 'refuses an install-only record when packer reported success' {
+        # A pre-restart halt fails the build, so a zero exit contradicts it.
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'incomplete' -RunId $runId
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0 -RequireValidatePhase $false).Reason |
+            Should -Be 'packer_failed'
+    }
+}
+
+Describe 'Invoke-PackerBuild' {
+
+    It 'captures a non-zero exit and stderr rather than terminating' {
+        # A native command's stderr becomes a terminating error under Stop, which
+        # would end the orchestrator before cleanup or evidence -- so a failing
+        # build would leave no record of having failed.
+        $fake = Join-Path (NewTempDir) 'fake-packer.ps1'
+        @'
+[Console]::Error.WriteLine('simulated packer failure')
+Write-Output 'some build output'
+exit 7
+'@ | Set-Content -LiteralPath $fake -Encoding utf8
+
+        $pwshPath = Join-Path $PSHOME ($(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' }))
+        $previous = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Stop'
+            $build = Invoke-PackerBuild -Executable $pwshPath -Arguments @('-NoProfile', '-File', $fake)
+        }
+        finally { $ErrorActionPreference = $previous }
+
+        $build.ExitCode | Should -Be 7
+        ($build.Output -join "`n") | Should -Match 'simulated packer failure'
+    }
+
+    It 'reports a command that could not be started at all' {
+        $build = Invoke-PackerBuild -Executable 'no-such-command-here' -Arguments @('build')
+        $build.ExitCode | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Get-LabOrchestrationEvidence' {
 
     BeforeAll {
@@ -420,9 +534,27 @@ Describe 'Get-LabOrchestrationEvidence' {
         $evidence.payload.terminalReasonCode | Should -Be 'cleanup_failed'
     }
 
-    It 'records that cleanup was never attempted, rather than implying it succeeded' {
+    It 'refuses to report a pass when cleanup was never attempted' {
+        # A run that passed every phase but left content on a machine has not
+        # passed. Recording not-attempted and calling it success is the
+        # overstatement the outcome vocabulary exists to prevent.
         $evidence = Get-LabOrchestrationEvidence -RunId (Get-RunIdentifier) -Verdict (PassingVerdict) `
             -HostCleanupOutcome 'not-attempted' -GuestCleanupOutcome 'not-attempted' -StartedUtc ([datetime]::UtcNow)
+
         $evidence.payload.guestCleanupOutcome | Should -Be 'not-attempted'
+        $evidence.outcome | Should -Be 'incomplete'
+        $evidence.payload.terminalReasonCode | Should -Be 'cleanup_failed'
+    }
+
+    It 'allows a pass when cleanup was explicitly retained' {
+        $evidence = Get-LabOrchestrationEvidence -RunId (Get-RunIdentifier) -Verdict (PassingVerdict) `
+            -HostCleanupOutcome 'retained' -GuestCleanupOutcome 'removed' -StartedUtc ([datetime]::UtcNow)
+        $evidence.outcome | Should -Be 'passed'
+    }
+
+    It 'refuses to report a pass when only one side cleaned up' {
+        $evidence = Get-LabOrchestrationEvidence -RunId (Get-RunIdentifier) -Verdict (PassingVerdict) `
+            -HostCleanupOutcome 'removed' -GuestCleanupOutcome 'not-attempted' -StartedUtc ([datetime]::UtcNow)
+        $evidence.outcome | Should -Be 'incomplete'
     }
 }

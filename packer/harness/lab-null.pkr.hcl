@@ -75,6 +75,32 @@ variable "descriptor_sha256" {
   description = "Expected digest of the bundle descriptor, delivered out of band through the environment rather than inside the bundle. A descriptor that carried its own expected digest would authenticate itself."
 }
 
+variable "cleanup_nonce" {
+  type      = string
+  sensitive = true
+
+  description = <<-EOT
+    A value generated fresh for this invocation, distinct from run_id, and written
+    into the ownership sentinel only after the run directory is reserved.
+
+    run_id alone cannot serve: a colliding run refuses the existing directory and
+    never writes a sentinel, so the error path would find the *previous* run's
+    sentinel and delete a directory this invocation does not own. Reproduced
+    before this existed. Cleanup therefore requires the sentinel to contain this
+    invocation's nonce exactly.
+  EOT
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{32,64}$", var.cleanup_nonce))
+    error_message = "The cleanup nonce must be 32 to 64 lowercase hexadecimal characters."
+  }
+}
+
+variable "contracts_source_dir" {
+  type        = string
+  description = "Host directory holding the committed schemas. The guest validates its own evidence before the restart gate reads it."
+}
+
 variable "guest_staging_root" {
   type        = string
   default     = "C:/vdi-iac-lab"
@@ -107,7 +133,8 @@ locals {
   # reserved. Cleanup refuses to remove anything without it, so a run that never
   # got past preflight cannot have its error path delete a directory it does not
   # own.
-  sentinel_path = "${var.guest_staging_root}/run-${var.run_id}/.owned-by-this-run"
+  sentinel_path    = "${var.guest_staging_root}/run-${var.run_id}/.owned-by-this-run"
+  contracts_target = "${var.guest_staging_root}/run-${var.run_id}/contracts"
 
   # Written by the guest wrapper when a phase could not complete -- an installer
   # that may still be running, for instance. Its presence stops the build before
@@ -168,7 +195,8 @@ build {
       "New-Item -ItemType Directory -Path '${local.run_root}' | Out-Null",
       "New-Item -ItemType Directory -Path '${local.tools_target}' | Out-Null",
       "New-Item -ItemType Directory -Path '${local.guest_target}' | Out-Null",
-      "Set-Content -LiteralPath '${local.sentinel_path}' -Value '${var.run_id}' -NoNewline",
+      "New-Item -ItemType Directory -Path '${local.contracts_target}' | Out-Null",
+      "Set-Content -LiteralPath '${local.sentinel_path}' -Value '${var.cleanup_nonce}' -NoNewline",
       "Write-Host 'staging: run directory reserved'"
     ]
   }
@@ -182,6 +210,11 @@ build {
   provisioner "file" {
     source      = "${var.guest_scripts_dir}/"
     destination = "${local.guest_target}/"
+  }
+
+  provisioner "file" {
+    source      = "${var.contracts_source_dir}/"
+    destination = "${local.contracts_target}/"
   }
 
   provisioner "file" {
@@ -219,17 +252,25 @@ build {
 
   # 6. The restart gate.
   #
-  #    An installer that timed out and whose process tree could not be confirmed
-  #    stopped may still be writing to the guest. The timeout contract says such
-  #    a run is incomplete, and an incomplete install must never meet a reboot.
-  #    The guest wrapper writes a halt marker in that case; this step fails the
-  #    build before the restart, after the evidence above is already on the host.
+  #    Authorization is positive, from the install evidence itself. The halt
+  #    marker is a supplementary signal only: writing it can fail, and a gate
+  #    that permits a reboot whenever a file is absent is fail-open. An installer
+  #    that may still be writing must never meet a restart, so the gate requires
+  #    evidence that the install reached a definite conclusion.
   provisioner "powershell" {
     use_pwsh = true
     inline = [
       "$ErrorActionPreference = 'Stop'",
-      "if (Test-Path -LiteralPath '${local.halt_path}') { throw 'The install phase did not complete. Refusing to restart a guest that may still be being written to.' }",
-      "Write-Host 'gate: install completed, restart may proceed'"
+      "$evidencePath = '${local.run_root}/install-${local.evidence_name}'",
+      "if (Test-Path -LiteralPath '${local.halt_path}') { throw 'The install phase reported that it did not complete. Refusing to restart.' }",
+      "if (-not (Test-Path -LiteralPath $evidencePath)) { throw 'No install evidence. Refusing to restart a guest whose install cannot be accounted for.' }",
+      "$raw = Get-Content -LiteralPath $evidencePath -Raw -Encoding utf8",
+      "$schema = '${local.contracts_target}/evidence-envelope-2.schema.json'",
+      "if (-not (Test-Json -Json $raw -SchemaFile $schema -ErrorAction SilentlyContinue)) { throw 'Install evidence does not satisfy the envelope schema. Refusing to restart.' }",
+      "$evidence = $raw | ConvertFrom-Json",
+      "if ($evidence.runId -cne '${var.run_id}') { throw 'Install evidence belongs to a different run. Refusing to restart.' }",
+      "if ($evidence.outcome -notin @('passed','failed')) { throw \"Install outcome is '$($evidence.outcome)'. Only a completed install authorizes a restart.\" }",
+      "Write-Host \"gate: install completed as '$($evidence.outcome)', restart may proceed\""
     ]
   }
 
@@ -269,6 +310,7 @@ build {
     inline = [
       "$ErrorActionPreference = 'Continue'",
       "if (-not (Test-Path -LiteralPath '${local.sentinel_path}')) { throw 'Ownership sentinel missing. Refusing to remove a directory this run does not own.' }",
+      "if ((Get-Content -LiteralPath '${local.sentinel_path}' -Raw).Trim() -cne '${var.cleanup_nonce}') { throw 'Ownership sentinel belongs to another invocation. Refusing to remove it.' }",
       "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
       "$outcome = Remove-GuestBundle -StagingRoot '${local.run_root}' -RunId '${var.run_id}'",
       "Write-Host \"guest cleanup: $outcome\"",
@@ -291,6 +333,10 @@ build {
       # run after a failed preflight -- a target that never identified itself --
       # and delete a directory belonging to something else entirely.
       "if (-not (Test-Path -LiteralPath '${local.sentinel_path}')) { Write-Host 'error cleanup: no ownership sentinel, leaving the target untouched'; exit 0 }",
+      # Content, not mere presence. A colliding run never writes a sentinel, so
+      # presence alone would authorize deleting the directory the *previous* run
+      # owns -- reproduced, with its witness file destroyed.
+      "if ((Get-Content -LiteralPath '${local.sentinel_path}' -Raw).Trim() -cne '${var.cleanup_nonce}') { Write-Host 'error cleanup: sentinel belongs to another invocation, leaving the target untouched'; exit 0 }",
       "Write-Host 'error cleanup: attempting guest staging removal'",
       "Remove-Item -LiteralPath '${local.run_root}' -Recurse -Force -ErrorAction SilentlyContinue",
       "if (Test-Path -LiteralPath '${local.run_root}') { Write-Host 'error cleanup: staging still present' } else { Write-Host 'error cleanup: staging removed' }"

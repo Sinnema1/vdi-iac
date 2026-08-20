@@ -222,6 +222,12 @@
           "items": {
             "$ref": "#/definitions/guestPackage"
           }
+        },
+        "installerAttemptCount": {
+          "description": "How many installers this phase launched. A negative scenario that refuses content but still launches one has not demonstrated the control it claims.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
         }
       }
     },
@@ -384,6 +390,10 @@
               }
             }
           ]
+        },
+        "installerAttempted": {
+          "description": "Whether the installer process was launched at all. Distinct from its outcome: a package refused before execution and one whose installer failed are different events.",
+          "type": "boolean"
         }
       }
     },
@@ -499,7 +509,8 @@
                 "phase_missing",
                 "packer_failed",
                 "cleanup_failed",
-                "unexpected_error"
+                "unexpected_error",
+                "evidence_inconsistent"
               ]
             }
           ]

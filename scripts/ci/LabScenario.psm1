@@ -118,4 +118,58 @@ function Set-LabBundleTampering {
     $OriginalDigest
 }
 
-Export-ModuleMember -Function Get-LabScenario, Set-LabBundleTampering
+function Get-LabScenarioObservation {
+    <#
+    .SYNOPSIS
+        Reads what actually happened, from schema-validated guest evidence.
+
+    .DESCRIPTION
+        A scenario asserted only on its overall outcome passes for the wrong
+        reason: 'incomplete' is reachable through missing evidence or a failed
+        cleanup, neither of which is the control under test. The bounded reason
+        code and the installer attempt count come from the evidence itself.
+
+    .OUTPUTS
+        ReasonCode and InstallerAttemptCount. Both null or zero when no guest
+        evidence was retrieved, which a caller must treat as a failed scenario
+        rather than a satisfied expectation.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $EvidenceDirectory,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RunId
+    )
+
+    $schema = Join-Path $PSScriptRoot '..' '..' 'contracts' 'evidence-envelope-2.schema.json'
+    $reasonCode = $null
+    $attempts = 0
+
+    foreach ($name in 'install-guest-evidence.json', 'validate-guest-evidence.json') {
+        $path = Join-Path $EvidenceDirectory $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding utf8
+        if (-not (Test-Json -Json $raw -SchemaFile $schema -ErrorAction SilentlyContinue)) { continue }
+
+        $evidence = $raw | ConvertFrom-Json
+        if ($evidence.runId -cne $RunId) { continue }
+        if ($evidence.resultKind -ne 'guest-provisioning') { continue }
+
+        if ($evidence.payload.PSObject.Properties.Name -contains 'installerAttemptCount') {
+            $attempts += [int] $evidence.payload.installerAttemptCount
+        }
+
+        # The first bounded reason found, package-level before phase-level: a
+        # package refusal names the control that fired.
+        if (-not $reasonCode) {
+            $failed = @($evidence.payload.packages | Where-Object { $_.reasonCode }) | Select-Object -First 1
+            if ($failed) { $reasonCode = $failed.reasonCode }
+            elseif ($evidence.payload.terminalReasonCode) { $reasonCode = $evidence.payload.terminalReasonCode }
+        }
+    }
+
+    [PSCustomObject]@{ ReasonCode = $reasonCode; InstallerAttemptCount = $attempts }
+}
+
+Export-ModuleMember -Function Get-LabScenario, Set-LabBundleTampering, Get-LabScenarioObservation

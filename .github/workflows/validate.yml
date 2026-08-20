@@ -158,6 +158,8 @@ jobs:
           New-Item -ItemType Directory -Path $bundle, $evidence -Force | Out-Null
           $varFile = Join-Path $work 'vars.pkrvars.hcl'
           @"
+          cleanup_nonce                   = "0123456789abcdef0123456789abcdef"
+          contracts_source_dir            = "$((Join-Path $PWD 'contracts') -replace '\\', '/')"
           guest_host                      = "windows-lab-target.example"
           guest_username                  = "labuser"
           guest_password                  = "placeholder"

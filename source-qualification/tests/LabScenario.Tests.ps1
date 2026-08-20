@@ -83,6 +83,134 @@ Describe 'the three scenarios ADR 3 requires' {
     }
 }
 
+Describe 'Get-LabScenarioObservation' {
+
+    BeforeAll {
+        Import-Module (Join-Path $script:RepoRoot 'scripts' 'ci' 'LabEvidence.psm1') -Force
+
+        function WriteGuestEvidence {
+            param(
+                [string] $Directory, [string] $Phase, [string] $RunId,
+                [string] $Outcome = 'failed', [string] $PackageReason = 'integrity_mismatch',
+                [int] $Attempts = 0, [string] $TerminalReason = $null
+            )
+            # An unbound [string] parameter is '', not $null, and an empty string
+            # satisfies neither the enum nor the null branch -- so the document
+            # would fail validation and the reader would skip it silently.
+            $terminal = if ([string]::IsNullOrEmpty($TerminalReason)) { $null } else { $TerminalReason }
+            $document = @{
+                resultSchemaVersion = 2; resultKind = 'guest-provisioning'
+                runId = $RunId; manifestSchemaVersion = 2
+                startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+                outcome = $Outcome
+                payload = @{
+                    phase = $Phase; restartRequired = $false; packageCount = 1
+                    passedCount = 0; failedRequiredCount = 1
+                    installerAttemptCount = $Attempts
+                    terminalReasonCode = $terminal
+                    cleanupOutcome = 'not-attempted'
+                    packages = @(@{ id = 'a'; version = '1.0'; order = 1; required = $true
+                                    outcome = 'failed'; reasonCode = $PackageReason
+                                    restartRequired = $false; installerAttempted = ($Attempts -gt 0) })
+                }
+            }
+            $document | ConvertTo-Json -Depth 12 |
+                Set-Content -LiteralPath (Join-Path $Directory "$Phase-guest-evidence.json") -Encoding utf8
+        }
+
+        function NewTempDirLocal {
+            $d = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+            $null = New-Item -ItemType Directory -Path $d -Force
+            $d
+        }
+    }
+
+    It 'reads the bounded reason and the attempt count from evidence' {
+        $dir = NewTempDirLocal; $runId = Get-RunIdentifier
+        WriteGuestEvidence -Directory $dir -Phase 'install' -RunId $runId -PackageReason 'integrity_mismatch' -Attempts 0
+
+        $observation = Get-LabScenarioObservation -EvidenceDirectory $dir -RunId $runId
+        $observation.ReasonCode | Should -Be 'integrity_mismatch'
+        $observation.InstallerAttemptCount | Should -Be 0
+    }
+
+    It 'counts an installer that started and then failed as an attempt' {
+        # The defect this replaced: inferring "did not run" from the phase not
+        # printing 'passed', which reports a failed installer as never launched.
+        $dir = NewTempDirLocal; $runId = Get-RunIdentifier
+        WriteGuestEvidence -Directory $dir -Phase 'install' -RunId $runId -PackageReason 'installer_failed' -Attempts 1
+
+        (Get-LabScenarioObservation -EvidenceDirectory $dir -RunId $runId).InstallerAttemptCount | Should -Be 1
+    }
+
+    It 'ignores evidence belonging to another run' {
+        $dir = NewTempDirLocal
+        WriteGuestEvidence -Directory $dir -Phase 'install' -RunId (Get-RunIdentifier) -Attempts 1
+        $observation = Get-LabScenarioObservation -EvidenceDirectory $dir -RunId (Get-RunIdentifier)
+        $observation.ReasonCode | Should -BeNullOrEmpty
+        $observation.InstallerAttemptCount | Should -Be 0
+    }
+
+    It 'reports nothing when no evidence was retrieved, rather than a satisfied expectation' {
+        $observation = Get-LabScenarioObservation -EvidenceDirectory (NewTempDirLocal) -RunId (Get-RunIdentifier)
+        $observation.ReasonCode | Should -BeNullOrEmpty
+        $observation.InstallerAttemptCount | Should -Be 0
+    }
+}
+
+Describe 'a scenario fails when its expectations are not met' {
+
+    BeforeAll {
+        function EvaluateScenario {
+            <#
+                The runner's decision, isolated from packer so the three
+                weakenings can be exercised without a target. Mirrors
+                Invoke-LabScenario.ps1's assertions.
+            #>
+            param(
+                $Definition, [string] $ObservedReason, [int] $Attempts,
+                [string] $Outcome, [string] $HostCleanup = 'removed', [string] $GuestCleanup = 'removed'
+            )
+            $failures = @()
+            if ($Outcome -ne $Definition.ExpectedOutcome) { $failures += 'outcome' }
+            if ($Definition.ExpectedReasonCode -and $ObservedReason -ne $Definition.ExpectedReasonCode) { $failures += 'reason' }
+            if (($Attempts -gt 0) -ne $Definition.ExpectInstalled) { $failures += 'witness' }
+            if ($HostCleanup -ne 'removed') { $failures += 'host-cleanup' }
+            if ($GuestCleanup -ne 'removed') { $failures += 'guest-cleanup' }
+            $failures
+        }
+    }
+
+    It 'passes when everything matches' {
+        $definition = Get-LabScenario -Name 'payload-tamper'
+        EvaluateScenario -Definition $definition -ObservedReason 'integrity_mismatch' -Attempts 0 -Outcome 'failed' |
+            Should -BeNullOrEmpty
+    }
+
+    It 'fails on the wrong reason code, even with the expected outcome' {
+        # 'incomplete' and 'failed' are reachable for reasons unrelated to the
+        # control under test, so the outcome alone cannot carry the assertion.
+        $definition = Get-LabScenario -Name 'descriptor-tamper'
+        EvaluateScenario -Definition $definition -ObservedReason 'integrity_mismatch' -Attempts 0 -Outcome 'incomplete' |
+            Should -Contain 'reason'
+    }
+
+    It 'fails when the installer started and then failed' {
+        $definition = Get-LabScenario -Name 'payload-tamper'
+        EvaluateScenario -Definition $definition -ObservedReason 'integrity_mismatch' -Attempts 1 -Outcome 'failed' |
+            Should -Contain 'witness'
+    }
+
+    It 'fails when <side> cleanup did not complete' -ForEach @(
+        @{ side = 'host';  hostOutcome = 'failed';        guestOutcome = 'removed' }
+        @{ side = 'guest'; hostOutcome = 'removed';       guestOutcome = 'not-attempted' }
+    ) {
+        $definition = Get-LabScenario -Name 'payload-tamper'
+        EvaluateScenario -Definition $definition -ObservedReason 'integrity_mismatch' -Attempts 0 -Outcome 'failed' `
+            -HostCleanup $hostOutcome -GuestCleanup $guestOutcome | Should -Not -BeNullOrEmpty
+    }
+}
+
 Describe 'Set-LabBundleTampering' {
 
     It 'leaves a bundle untouched for the positive scenario' {

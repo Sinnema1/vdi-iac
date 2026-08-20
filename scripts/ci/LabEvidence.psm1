@@ -70,7 +70,11 @@ function Get-LabEvidenceOutcome {
     $expectedRunId = Assert-RunIdentifier -RunId $RunId
     $phases = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    $expectedNames = if ($RequireValidatePhase) { $script:ExpectedPhases.Keys } else { @('install-guest-evidence.json') }
+    # An install-only record is permitted only when the install evidence itself
+    # says the run stopped deliberately. Deriving that from a console message
+    # would let any output containing the right words suppress a missing phase.
+    $installOnly = -not $RequireValidatePhase
+    $expectedNames = if ($installOnly) { @('install-guest-evidence.json') } else { $script:ExpectedPhases.Keys }
 
     foreach ($name in $expectedNames) {
         $found = @(Get-ChildItem -Path $EvidenceDirectory -Filter $name -File -ErrorAction SilentlyContinue)
@@ -104,11 +108,34 @@ function Get-LabEvidenceOutcome {
             return NewVerdict -Outcome 'incomplete' -Reason 'phase_missing' -Phases $phases -PackerExitCode $PackerExitCode
         }
 
+        # Schema validity is not consistency. A document can satisfy every field
+        # constraint and still contradict itself -- outcome 'passed' beside a
+        # non-zero failure count, or a terminal reason on a run that passed --
+        # and accepting it means reporting a pass the evidence does not support.
+        $inconsistency = TestEvidenceConsistency -Evidence $parsed
+        if ($inconsistency) {
+            return NewVerdict -Outcome 'incomplete' -Reason $inconsistency -Phases $phases -PackerExitCode $PackerExitCode
+        }
+
         $phases.Add([PSCustomObject]@{
             phase               = $parsed.payload.phase
             outcome             = $parsed.outcome
             failedRequiredCount = $parsed.payload.failedRequiredCount
         })
+    }
+
+    if ($installOnly) {
+        $install = $phases | Where-Object phase -EQ 'install' | Select-Object -First 1
+        if (-not $install -or $install.outcome -ne 'incomplete') {
+            # The run claimed to have halted, but its install evidence does not
+            # describe a halt. One of the two is wrong, so nothing is concluded.
+            return NewVerdict -Outcome 'incomplete' -Reason 'phase_missing' -Phases $phases -PackerExitCode $PackerExitCode
+        }
+        if ($null -eq $PackerExitCode -or $PackerExitCode -eq 0) {
+            # A pre-restart halt fails the build. A zero exit contradicts it.
+            return NewVerdict -Outcome 'incomplete' -Reason 'packer_failed' -Phases $phases -PackerExitCode $PackerExitCode
+        }
+        return NewVerdict -Outcome 'incomplete' -Reason 'phase_missing' -Phases $phases -PackerExitCode $PackerExitCode
     }
 
     $outcome = if (@($phases | Where-Object outcome -EQ 'incomplete').Count -gt 0) { 'incomplete' }
@@ -126,6 +153,46 @@ function Get-LabEvidenceOutcome {
 
     $reason = if ($outcome -eq 'passed') { $null } else { $null }
     NewVerdict -Outcome $outcome -Reason $reason -Phases $phases -PackerExitCode $PackerExitCode
+}
+
+function TestEvidenceConsistency {
+    <#
+    .SYNOPSIS
+        Returns a reason code when a document contradicts itself, or null.
+
+    .DESCRIPTION
+        Module-internal. Every rule here relates two fields the schema constrains
+        separately, so none of them can be expressed as a per-field constraint.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)] $Evidence)
+
+    $payload = $Evidence.payload
+    $packages = @($payload.packages)
+
+    # terminalReasonCode is optional in the schema, and under StrictMode reading
+    # an absent property throws rather than yielding null.
+    $terminal = if ($payload.PSObject.Properties.Name -contains 'terminalReasonCode') { $payload.terminalReasonCode } else { $null }
+
+    if ($Evidence.outcome -eq 'passed') {
+        if ($payload.failedRequiredCount -ne 0) { return 'evidence_inconsistent' }
+        if ($terminal) { return 'evidence_inconsistent' }
+        if (@($packages | Where-Object { $_.outcome -ne 'passed' }).Count -gt 0) { return 'evidence_inconsistent' }
+        if ($payload.passedCount -ne $payload.packageCount) { return 'evidence_inconsistent' }
+    }
+
+    if ($Evidence.outcome -eq 'failed') {
+        $failedRequired = @($packages | Where-Object { $_.outcome -ne 'passed' -and $_.required }).Count
+        if ($payload.failedRequiredCount -ne $failedRequired) { return 'evidence_inconsistent' }
+        if ($failedRequired -eq 0 -and -not $terminal) { return 'evidence_inconsistent' }
+    }
+
+    if ($packages.Count -ne $payload.packageCount) { return 'evidence_inconsistent' }
+    if ($payload.passedCount -gt $payload.packageCount) { return 'evidence_inconsistent' }
+    if (@($packages | Where-Object { $_.outcome -eq 'passed' }).Count -ne $payload.passedCount) { return 'evidence_inconsistent' }
+
+    $null
 }
 
 function NewVerdict {
@@ -170,10 +237,20 @@ function Get-LabOrchestrationEvidence {
         [Parameter(Mandatory)] [datetime] $StartedUtc
     )
 
+    # 'not-attempted' is not success. A run that passed every phase but never
+    # cleaned up has left content behind on a machine, and reporting that as a
+    # clean pass is exactly the overstatement the outcome vocabulary exists to
+    # prevent. Only 'removed', or 'retained' when the caller asked for it,
+    # allows a pass to stand.
+    $cleanupSettled = ($HostCleanupOutcome -in @('removed', 'retained')) -and
+                      ($GuestCleanupOutcome -in @('removed', 'retained'))
+
     $outcome = if ($HostCleanupOutcome -eq 'failed' -or $GuestCleanupOutcome -eq 'failed') { 'incomplete' }
+               elseif ($Verdict.Outcome -eq 'passed' -and -not $cleanupSettled) { 'incomplete' }
                else { $Verdict.Outcome }
 
     $terminal = if ($HostCleanupOutcome -eq 'failed' -or $GuestCleanupOutcome -eq 'failed') { 'cleanup_failed' }
+                elseif ($Verdict.Outcome -eq 'passed' -and -not $cleanupSettled) { 'cleanup_failed' }
                 else { $Verdict.Reason }
 
     ConvertTo-EvidenceEnvelope -ResultKind 'build-orchestration' -RunId $RunId `
@@ -186,4 +263,64 @@ function Get-LabOrchestrationEvidence {
         })
 }
 
-Export-ModuleMember -Function Get-LabEvidenceOutcome, Get-LabOrchestrationEvidence
+function Get-GuestCleanupOutcome {
+    <#
+    .SYNOPSIS
+        Reads the harness's own cleanup report out of the build output.
+
+    .DESCRIPTION
+        The guest step reports what it did; a run that never reached it has not
+        attempted cleanup, and saying otherwise would claim a machine was tidied
+        when it was not.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $PackerOutput)
+
+    $text = $PackerOutput -join "`n"
+    if ($text -match 'guest cleanup: run directory removed') { return 'removed' }
+    if ($text -match 'error cleanup: staging removed') { return 'removed' }
+    if ($text -match 'still present') { return 'failed' }
+    'not-attempted'
+}
+
+function Invoke-PackerBuild {
+    <#
+    .SYNOPSIS
+        Runs packer, returning its output and exit code without throwing.
+
+    .DESCRIPTION
+        A native command's stderr becomes a terminating error under
+        ErrorActionPreference 'Stop', which ends the caller before the exit code
+        is read -- so a failing build could skip cleanup and evidence entirely.
+        The preference is lowered for the call alone and restored afterwards.
+
+    .OUTPUTS
+        ExitCode and Output. Never throws for a non-zero build.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)] [string[]] $Arguments,
+        [Parameter()] [string] $Executable = 'packer'
+    )
+
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & $Executable @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        # The command could not be started at all, which is distinct from a
+        # build that ran and failed.
+        return [PSCustomObject]@{ ExitCode = $null; Output = @("$($_.Exception.Message)") }
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+
+    [PSCustomObject]@{ ExitCode = $exitCode; Output = @($output | ForEach-Object { "$_" }) }
+}
+
+Export-ModuleMember -Function Get-LabEvidenceOutcome, Get-LabOrchestrationEvidence, Get-GuestCleanupOutcome, Invoke-PackerBuild

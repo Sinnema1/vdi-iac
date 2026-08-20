@@ -544,7 +544,7 @@ function Invoke-GuestProvisioning {
         $record = [ordered]@{
             id = $entry.id; version = $entry.version; order = $entry.order
             required = $entry.required; outcome = 'failed'; reasonCode = $null
-            restartRequired = $false; validation = $null
+            restartRequired = $false; installerAttempted = $false; validation = $null
         }
 
         try {
@@ -565,6 +565,12 @@ function Invoke-GuestProvisioning {
 
                 $invocation = Get-InstallerInvocation -Entry $entry -PayloadPath $payloadPath -LogDirectory $LogDirectory
                 $raw = & $Adapter.StartProcess $invocation.FilePath $invocation.ArgumentList $entry.installer.timeoutSeconds
+                # Recorded before the outcome is known: an installer that
+                # started and then failed still started, and a control that
+                # claims to refuse before execution has to be measured against
+                # that rather than against the result.
+                $record.installerAttempted = $true
+
                 $verdict = Get-NormalizedInstallerResult -Entry $entry -RawResult $raw
 
                 $record.outcome = $verdict.Outcome
@@ -608,6 +614,7 @@ function Invoke-GuestProvisioning {
             restartRequired = $restartRequired
             packageCount = $results.Count
             passedCount = @($results | Where-Object outcome -EQ 'passed').Count
+            installerAttemptCount = @($results | Where-Object installerAttempted).Count
             failedRequiredCount = $failedRequired.Count
             terminalReasonCode = $terminal
             # Ordering belongs to the host: evidence must be retrieved before the

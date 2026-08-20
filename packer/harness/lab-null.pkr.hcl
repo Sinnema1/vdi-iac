@@ -55,6 +55,14 @@ variable "lab_marker_nonce" {
 variable "run_id" {
   type        = string
   description = "Canonical lowercase UUID from the orchestrator, correlating host and guest evidence."
+
+  validation {
+    # Validated here, before it reaches a path. This value names the run
+    # directory the harness later removes recursively, so an arbitrary string
+    # would be a deletion target rather than an identifier.
+    condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.run_id))
+    error_message = "The run identifier must be a canonical lowercase UUID."
+  }
 }
 
 variable "bundle_path" {
@@ -95,6 +103,17 @@ locals {
   guest_target  = "${var.guest_staging_root}/run-${var.run_id}/guest"
   evidence_name = "guest-evidence.json"
 
+  # Written only after the target identified itself and the run directory was
+  # reserved. Cleanup refuses to remove anything without it, so a run that never
+  # got past preflight cannot have its error path delete a directory it does not
+  # own.
+  sentinel_path = "${var.guest_staging_root}/run-${var.run_id}/.owned-by-this-run"
+
+  # Written by the guest wrapper when a phase could not complete -- an installer
+  # that may still be running, for instance. Its presence stops the build before
+  # the restart.
+  halt_path = "${var.guest_staging_root}/run-${var.run_id}/.halt"
+
   # The guest wrapper returns this when packages failed for reasons the run is
   # designed to report. Packer accepts it so retrieval and cleanup still run, and
   # the host evaluator fails the build afterwards from the retrieved evidence.
@@ -131,18 +150,26 @@ build {
       "if (-not (Test-Path -LiteralPath $env:VDIIAC_MARKER_PATH -PathType Leaf)) { throw \"Lab marker not found at $env:VDIIAC_MARKER_PATH. Refusing to touch a machine that has not identified itself.\" }",
       "$observed = (Get-Content -LiteralPath $env:VDIIAC_MARKER_PATH -Raw).Trim()",
       "if ($observed -cne $env:VDIIAC_MARKER_NONCE) { throw 'Lab marker nonce does not match. This is not the intended target.' }",
+      "if ($PSVersionTable.PSVersion -lt [version]'7.4.0') { throw \"The guest phase needs PowerShell 7.4.0 or later; this target has $($PSVersionTable.PSVersion).\" }",
       "Write-Host 'preflight: target identified'"
     ]
   }
 
   # 2. Guest staging, created only after the target identified itself.
+  #
+  #    Reserved rather than adopted: -Force would take over a directory another
+  #    run owns, and this one deletes its run directory recursively at the end.
   provisioner "powershell" {
     use_pwsh = true
     inline = [
       "$ErrorActionPreference = 'Stop'",
-      "New-Item -ItemType Directory -Path '${local.run_root}' -Force | Out-Null",
-      "New-Item -ItemType Directory -Path '${local.tools_target}' -Force | Out-Null",
-      "New-Item -ItemType Directory -Path '${local.guest_target}' -Force | Out-Null"
+      "New-Item -ItemType Directory -Path '${var.guest_staging_root}' -Force | Out-Null",
+      "if (Test-Path -LiteralPath '${local.run_root}') { throw 'Run directory already exists on the target. Refusing to reuse a run identifier.' }",
+      "New-Item -ItemType Directory -Path '${local.run_root}' | Out-Null",
+      "New-Item -ItemType Directory -Path '${local.tools_target}' | Out-Null",
+      "New-Item -ItemType Directory -Path '${local.guest_target}' | Out-Null",
+      "Set-Content -LiteralPath '${local.sentinel_path}' -Value '${var.run_id}' -NoNewline",
+      "Write-Host 'staging: run directory reserved'"
     ]
   }
 
@@ -171,7 +198,8 @@ build {
     valid_exit_codes = [0, 200]
     environment_vars = [
       "VDIIAC_DESCRIPTOR_SHA256=${var.descriptor_sha256}",
-      "VDIIAC_RUN_ID=${var.run_id}"
+      "VDIIAC_RUN_ID=${var.run_id}",
+      "VDIIAC_HALT_PATH=${local.halt_path}"
     ]
     inline = [
       "$ErrorActionPreference = 'Stop'",
@@ -179,33 +207,52 @@ build {
     ]
   }
 
-  # 5. The restart boundary. Packer owns it; installation logic reports that a
+  # 5. Install evidence is retrieved before the restart, not after the whole
+  #    run. A phase that cannot complete stops the build at the next step, and a
+  #    failing provisioner prevents the ones after it from running -- so evidence
+  #    collected later would never be collected at all.
+  provisioner "file" {
+    direction   = "download"
+    source      = "${local.run_root}/install-${local.evidence_name}"
+    destination = "${var.evidence_output_dir}/install-${local.evidence_name}"
+  }
+
+  # 6. The restart gate.
+  #
+  #    An installer that timed out and whose process tree could not be confirmed
+  #    stopped may still be writing to the guest. The timeout contract says such
+  #    a run is incomplete, and an incomplete install must never meet a reboot.
+  #    The guest wrapper writes a halt marker in that case; this step fails the
+  #    build before the restart, after the evidence above is already on the host.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "if (Test-Path -LiteralPath '${local.halt_path}') { throw 'The install phase did not complete. Refusing to restart a guest that may still be being written to.' }",
+      "Write-Host 'gate: install completed, restart may proceed'"
+    ]
+  }
+
+  # 7. The restart boundary. Packer owns it; installation logic reports that a
   #    restart is required and never triggers one. Unconditional, so validation
   #    always runs in the same machine state regardless of manifest content.
   provisioner "windows-restart" {
     restart_timeout = "20m"
   }
 
-  # 6. Validation, on the far side of the restart.
+  # 8. Validation, on the far side of the restart.
   provisioner "powershell" {
     use_pwsh         = true
     valid_exit_codes = [0, 200]
     environment_vars = [
       "VDIIAC_DESCRIPTOR_SHA256=${var.descriptor_sha256}",
-      "VDIIAC_RUN_ID=${var.run_id}"
+      "VDIIAC_RUN_ID=${var.run_id}",
+      "VDIIAC_HALT_PATH=${local.halt_path}"
     ]
     inline = [
       "$ErrorActionPreference = 'Stop'",
       "& '${local.guest_target}/Invoke-GuestPhase.ps1' -BundlePath '${local.bundle_target}' -ToolsPath '${local.tools_target}' -Phase validate -EvidencePath '${local.run_root}/validate-${local.evidence_name}'"
     ]
-  }
-
-  # 7. Evidence retrieval, before cleanup. Cleanup can fail, and evidence
-  #    collected afterwards may be gone.
-  provisioner "file" {
-    direction   = "download"
-    source      = "${local.run_root}/install-${local.evidence_name}"
-    destination = "${var.evidence_output_dir}/install-${local.evidence_name}"
   }
 
   provisioner "file" {
@@ -214,16 +261,19 @@ build {
     destination = "${var.evidence_output_dir}/validate-${local.evidence_name}"
   }
 
-  # 8. Guest cleanup. The target is derived from the host-controlled staging root
-  #    and the run identifier, never from the uploaded descriptor.
+  # 9. Guest cleanup. The target is derived from the host-controlled staging root
+  #    and the run identifier, never from the uploaded descriptor, and it is
+  #    refused outright unless this run's ownership sentinel is present.
   provisioner "powershell" {
     use_pwsh = true
     inline = [
       "$ErrorActionPreference = 'Continue'",
+      "if (-not (Test-Path -LiteralPath '${local.sentinel_path}')) { throw 'Ownership sentinel missing. Refusing to remove a directory this run does not own.' }",
       "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
       "$outcome = Remove-GuestBundle -StagingRoot '${local.run_root}' -RunId '${var.run_id}'",
       "Write-Host \"guest cleanup: $outcome\"",
-      "Remove-Item -LiteralPath '${local.run_root}' -Recurse -Force -ErrorAction SilentlyContinue"
+      "Remove-Item -LiteralPath '${local.run_root}' -Recurse -Force -ErrorAction SilentlyContinue",
+      "if (Test-Path -LiteralPath '${local.run_root}') { Write-Host 'guest cleanup: run directory still present' } else { Write-Host 'guest cleanup: run directory removed' }"
     ]
   }
 
@@ -237,6 +287,10 @@ build {
     use_pwsh = true
     inline = [
       "$ErrorActionPreference = 'Continue'",
+      # Gated on the same sentinel as normal cleanup. Without it this path could
+      # run after a failed preflight -- a target that never identified itself --
+      # and delete a directory belonging to something else entirely.
+      "if (-not (Test-Path -LiteralPath '${local.sentinel_path}')) { Write-Host 'error cleanup: no ownership sentinel, leaving the target untouched'; exit 0 }",
       "Write-Host 'error cleanup: attempting guest staging removal'",
       "Remove-Item -LiteralPath '${local.run_root}' -Recurse -Force -ErrorAction SilentlyContinue",
       "if (Test-Path -LiteralPath '${local.run_root}') { Write-Host 'error cleanup: staging still present' } else { Write-Host 'error cleanup: staging removed' }"

@@ -107,7 +107,9 @@ Describe 'the guest entry script runs' {
         $run.Output | Should -Not -Match 'parameter set cannot be resolved'
 
         if (-not $IsWindows) {
-            $run.Output | Should -Match 'Windows only' -Because 'the only expected failure here is the adapter refusing this platform'
+            # A bounded reason code, not the exception text: the script reports
+            # what went wrong without echoing a message into an artifact.
+            $run.Output | Should -Match 'adapter_unsupported' -Because 'the only expected failure here is the adapter refusing this platform'
         }
         else {
             $run.ExitCode | Should -Not -Be 1 -Because "the script must run, not fail to start: $($run.Output)"
@@ -141,6 +143,39 @@ Describe 'the guest entry script runs' {
 
         $run.ExitCode | Should -Be 1
         $run.Output | Should -Match 'different run'
+    }
+
+    It 'leaves bounded evidence when a phase cannot run' {
+        # A phase that failed before producing evidence used to leave nothing to
+        # retrieve, so the host could not tell a refused bundle from a lost
+        # communicator. Exercised here through the adapter refusal, which is the
+        # failure available on every platform.
+        $runId = Get-RunIdentifier
+        $bundle = NewBundle -RunId $runId
+        $evidence = Join-Path (NewTempDir) 'install-evidence.json'
+        $halt = Join-Path (NewTempDir) 'halt.txt'
+
+        $previousHalt = $env:VDIIAC_HALT_PATH
+        try {
+            $env:VDIIAC_HALT_PATH = $halt
+            $null = RunEntryPoint -BundlePath $bundle.BundlePath -Phase install -EvidencePath $evidence `
+                -Digest $bundle.DescriptorSha256 -RunId $runId
+        }
+        finally { $env:VDIIAC_HALT_PATH = $previousHalt }
+
+        if ($IsWindows) {
+            Set-ItResult -Skipped -Because 'the adapter does not refuse on Windows, so this path needs a different trigger there'
+            return
+        }
+
+        Test-Path -LiteralPath $evidence | Should -BeTrue
+        $parsed = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
+        $parsed.outcome | Should -Be 'incomplete'
+        $parsed.payload.terminalReasonCode | Should -Be 'adapter_unsupported'
+        $parsed.runId | Should -Be $runId
+
+        # The halt marker is what stops the harness before the restart.
+        Test-Path -LiteralPath $halt | Should -BeTrue
     }
 
     It 'refuses to start when <missing> is absent from the environment' -ForEach @(

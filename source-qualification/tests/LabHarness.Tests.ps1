@@ -150,6 +150,67 @@ Describe 'harness ordering' {
         $script:Harness.IndexOf('Invoke-GuestPhase.ps1') | Should -BeGreaterThan $script:Harness.IndexOf('destination')
     }
 
+    It 'validates the run identifier in HCL, before it reaches a path' {
+        $block = [regex]::Match($script:Harness, 'variable\s+"run_id"\s*\{(?<body>[\s\S]*?)\n\}').Groups['body'].Value
+        $block | Should -Match 'validation\s*\{'
+        $block | Should -Match '\[0-9a-f\]\{8\}'
+    }
+
+    It 'refuses a non-canonical run identifier' -Skip:(-not $script:PackerAvailable) {
+        $work = NewTempDir
+        $varFile = Join-Path $work 'vars.pkrvars.hcl'
+        'run_id = "NOT-A-UUID"' | Set-Content -LiteralPath $varFile -Encoding utf8
+        $output = (& packer validate "-var-file=$varFile" $script:HarnessDir 2>&1) -join "`n"
+        $output | Should -Match 'canonical lowercase UUID'
+    }
+
+    It 'asserts the guest runtime during the read-only preflight' {
+        # Before anything is uploaded or executed, not when the first phase
+        # discovers it.
+        $preflight = $script:Harness.IndexOf('VDIIAC_MARKER_NONCE')
+        $versionCheck = $script:Harness.IndexOf("[version]'7.4.0'")
+        $versionCheck | Should -BeGreaterThan 0
+        $versionCheck | Should -BeGreaterThan $preflight
+        $versionCheck | Should -BeLessThan $script:Harness.IndexOf('New-Item -ItemType Directory')
+    }
+
+    It 'reserves the run directory rather than adopting one' {
+        # -Force would take over a directory another run owns, and this one
+        # removes its run directory recursively at the end.
+        $script:Harness | Should -Match 'Refusing to reuse a run identifier'
+        $script:Harness | Should -Match "New-Item -ItemType Directory -Path '\`$\{local\.run_root\}' \| Out-Null"
+    }
+
+    It 'writes the ownership sentinel only after the directory is reserved' {
+        $reserve = $script:Harness.IndexOf('Refusing to reuse a run identifier')
+        $sentinel = $script:Harness.IndexOf("Set-Content -LiteralPath '`${local.sentinel_path}'")
+        $sentinel | Should -BeGreaterThan $reserve
+    }
+
+    It 'gates both cleanup paths on the ownership sentinel' {
+        # Without this the error path can run after a failed preflight -- a target
+        # that never identified itself -- and delete something it does not own.
+        ([regex]::Matches($script:Harness, "Test-Path -LiteralPath '\`$\{local\.sentinel_path\}'")).Count |
+            Should -BeGreaterOrEqual 2
+    }
+
+    It 'retrieves install evidence before the restart gate' {
+        # A failing provisioner stops the ones after it, so evidence collected
+        # later than the gate would never be collected at all.
+        $installDownload = $script:Harness.IndexOf("install-`${local.evidence_name}`"`n    destination")
+        if ($installDownload -lt 0) { $installDownload = $script:Harness.IndexOf('direction   = "download"') }
+        $gate = $script:Harness.IndexOf('Refusing to restart a guest')
+        $installDownload | Should -BeGreaterThan 0
+        $installDownload | Should -BeLessThan $gate
+    }
+
+    It 'stops before the restart when the install did not complete' {
+        $gate = $script:Harness.IndexOf('Refusing to restart a guest')
+        $restart = $script:Harness.IndexOf('windows-restart')
+        $gate | Should -BeGreaterThan 0
+        $gate | Should -BeLessThan $restart
+    }
+
     It 'restarts between installing and validating' {
         $order = ProvisionerOrder
         $restart = [array]::IndexOf($order, 'windows-restart')

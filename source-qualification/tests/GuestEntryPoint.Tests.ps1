@@ -141,8 +141,10 @@ Describe 'the guest entry script runs' {
         $run = RunEntryPoint -BundlePath $bundle.BundlePath -Phase install -EvidencePath $evidence `
             -Digest $bundle.DescriptorSha256 -RunId (Get-RunIdentifier)
 
-        $run.ExitCode | Should -Be 1
-        $run.Output | Should -Match 'different run'
+        # 200, not 1: the phase now writes bounded evidence and halts, so the
+        # harness can retrieve the record of the refusal before failing the build.
+        $run.ExitCode | Should -Be 200
+        $run.Output | Should -Match 'run_id_mismatch'
     }
 
     It 'leaves bounded evidence when a phase cannot run' {
@@ -203,6 +205,13 @@ Describe 'the guest entry script runs' {
             -Digest ('f' * 64) -RunId $runId
 
         $run.ExitCode | Should -Not -Be 0
-        $run.Output | Should -Match 'digest mismatch'
+        $run.Output | Should -Match 'descriptor_digest_mismatch'
+
+        # The refusal is recorded rather than merely reported, so the host can
+        # tell a refused bundle from a lost communicator.
+        Test-Path -LiteralPath $evidence | Should -BeTrue
+        $parsed = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
+        $parsed.outcome | Should -Be 'incomplete'
+        $parsed.payload.terminalReasonCode | Should -Be 'descriptor_digest_mismatch'
     }
 }

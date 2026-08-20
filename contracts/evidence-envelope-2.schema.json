@@ -200,7 +200,9 @@
                 "path_rejected",
                 "adapter_unsupported",
                 "unexpected_error",
-                "run_id_mismatch"
+                "run_id_mismatch",
+                "descriptor_digest_mismatch",
+                "descriptor_invalid"
               ]
             }
           ]
@@ -359,7 +361,9 @@
                 "path_rejected",
                 "adapter_unsupported",
                 "unexpected_error",
-                "run_id_mismatch"
+                "run_id_mismatch",
+                "descriptor_digest_mismatch",
+                "descriptor_invalid"
               ]
             }
           ]

@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted; planned for Increment 2. The levels describe how work will be proven;
-no Increment 2 capability exists yet.
+Accepted and implemented. Levels 1 and 2 are proven in CI; Level 3 validation is
+pending a disposable target.
 
 ## Context
 

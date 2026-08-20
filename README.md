@@ -39,14 +39,17 @@ What exists today:
 | Source qualification and integrity verification | host-side path implemented |
 | Guest provisioning and transfer bundle | implemented; lab validation pending |
 | Packer lab harness (null builder) | implemented; lab validation pending |
+| Lab scenarios (positive, payload tamper, descriptor tamper) | defined and runnable; never executed |
+| Packer image build and sealing | not started |
 | Packer image construction and sealing | not started |
 | Terraform and Citrix MCS provisioning | not started |
 | Promotion, reconciliation, and retirement | not started |
 
 The delivery sequence is defined in
-[Agent_Handoff.md](Agent_Handoff.md) section 32. The next increment is guest
-package provisioning: transfer, guest-side re-verification against the same
-expected hash, bounded installer execution, and post-install validation.
+[Agent_Handoff.md](Agent_Handoff.md) section 32. The next increment is 3, image
+build and sealing: selecting a Windows source, building, generalizing, shutting
+down, sealing, versioning, and establishing provenance for a candidate image.
+**No candidate image has been built or sealed yet.**
 
 ## Intended architecture
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted; planned for Increment 2. Nothing in this record is implemented yet.
+Accepted and implemented by Increment 2.
 
 ## Context
 

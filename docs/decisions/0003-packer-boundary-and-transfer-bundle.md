@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted; planned for Increment 2. Nothing in this record is implemented yet.
+Accepted and implemented. The harness and the transfer bundle exist and are CI-proven; Level 3 lab validation is pending a disposable target.
 
 ## Context
 

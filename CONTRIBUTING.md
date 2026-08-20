@@ -96,6 +96,12 @@ pwsh -NoProfile -Command "'./source-qualification','./scripts/ci','./packer/scri
 packer fmt -check -recursive packer/harness
 ```
 
+A lab scenario needs a disposable Windows target and is never run by CI:
+
+```bash
+pwsh ./scripts/ci/Invoke-LabScenario.ps1 -Scenario positive -ManifestPath <manifest> -SourceRoot <dir> -VarFile packer/harness/lab.auto.pkrvars.hcl
+```
+
 `shellcheck` and `pwsh` each need a local install:
 
 ```bash

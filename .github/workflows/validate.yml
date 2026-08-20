@@ -2,10 +2,13 @@
 # Repository validation.
 #
 # Stages are added only when the repository contains the responsibility they
-# validate. PowerShell and manifest jobs exist because Increment 1 added source
-# qualification and a manifest contract. There is still no Packer or Terraform
-# job, because there are no such files yet. Add each stage with the increment
-# that introduces it.
+# validate. PowerShell and manifest jobs came with Increment 1; the Packer job
+# came with Increment 2's lab harness. There is still no Terraform job, because
+# there are no Terraform files yet. Add each stage with the increment that
+# introduces it.
+#
+# The Packer job checks the harness configuration. It does not run a lab: that
+# needs a disposable Windows target, which CI does not have.
 #
 # Actions are pinned to full commit SHAs rather than tags, because a tag can be
 # moved to point at different code after review. The trailing comment records

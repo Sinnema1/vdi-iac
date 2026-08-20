@@ -27,6 +27,18 @@ BeforeAll {
     # dot-sourcing it would prompt for them rather than run.
     Import-Module (Join-Path $script:RepoRoot 'scripts' 'ci' 'LabEvidence.psm1') -Force
 
+    function ToHclPath {
+        <#
+            HCL reads a backslash as an escape introducer, so a Windows path
+            written into a var file produces "Invalid escape sequence" -- the
+            temp path on a Windows runner contains \Users and \AppData.
+            Windows accepts forward slashes, which the harness itself uses
+            throughout for the same reason.
+        #>
+        param([string] $Path)
+        $Path -replace '\\', '/'
+    }
+
     function NewTempDir {
         $d = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
         $null = New-Item -ItemType Directory -Path $d -Force
@@ -78,11 +90,11 @@ acknowledge_destructive_lab_run = true
 lab_marker_path                 = "C:/vdi-iac-lab/lab-marker.txt"
 lab_marker_nonce                = "placeholder-nonce"
 run_id                          = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
-bundle_path                     = "$bundle"
+bundle_path                     = "$(ToHclPath $bundle)"
 descriptor_sha256               = "$('a' * 64)"
-evidence_output_dir             = "$evidence"
-tools_source_dir                = "$(Join-Path $script:RepoRoot 'source-qualification' 'scripts')"
-guest_scripts_dir               = "$(Join-Path $script:RepoRoot 'packer' 'scripts' 'guest')"
+evidence_output_dir             = "$(ToHclPath $evidence)"
+tools_source_dir                = "$(ToHclPath (Join-Path $script:RepoRoot 'source-qualification' 'scripts'))"
+guest_scripts_dir               = "$(ToHclPath (Join-Path $script:RepoRoot 'packer' 'scripts' 'guest'))"
 "@ | Set-Content -LiteralPath $varFile -Encoding utf8
 
         # Quoted: an unquoted -var-file=$varFile is passed through literally,

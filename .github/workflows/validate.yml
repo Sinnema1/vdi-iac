@@ -162,11 +162,11 @@ jobs:
           lab_marker_path                 = "C:/vdi-iac-lab/lab-marker.txt"
           lab_marker_nonce                = "placeholder-nonce"
           run_id                          = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
-          bundle_path                     = "$bundle"
+          bundle_path                     = "$($bundle -replace '\\', '/')"
           descriptor_sha256               = "$('a' * 64)"
-          evidence_output_dir             = "$evidence"
-          tools_source_dir                = "$(Join-Path $PWD 'source-qualification' 'scripts')"
-          guest_scripts_dir               = "$(Join-Path $PWD 'packer' 'scripts' 'guest')"
+          evidence_output_dir             = "$($evidence -replace '\\', '/')"
+          tools_source_dir                = "$((Join-Path $PWD 'source-qualification' 'scripts') -replace '\\', '/')"
+          guest_scripts_dir               = "$((Join-Path $PWD 'packer' 'scripts' 'guest') -replace '\\', '/')"
           "@.Split("`n").TrimStart() -join "`n" | Set-Content -LiteralPath $varFile -Encoding utf8
 
           packer validate "-var-file=$varFile" packer/harness
@@ -184,6 +184,10 @@ jobs:
           $output = (packer validate packer/harness 2>&1) -join "`n"
           if ($LASTEXITCODE -eq 0) { throw 'The harness validated with no target configured.' }
           Write-Host "harness refuses an unconfigured target (packer exit $LASTEXITCODE)"
+
+          # The step inherits the last exit code, and packer's expected non-zero
+          # would fail a step whose assertion just passed.
+          exit 0
 
   shell-lint:
     name: Shell lint

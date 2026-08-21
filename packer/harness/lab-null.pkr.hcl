@@ -304,10 +304,8 @@ build {
     inline = [
       "$ErrorActionPreference = 'Continue'",
       "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
-      "if (-not (Test-CleanupAuthorization -SentinelPath '${local.sentinel_path}' -ExpectedNonce '${var.cleanup_nonce}')) { throw 'Ownership sentinel is missing or belongs to another invocation. Refusing to remove anything.' }",
-      "$outcome = Remove-GuestBundle -StagingRoot '${local.run_root}' -RunId '${var.run_id}'",
-      "Write-Host \"guest cleanup: $outcome\"",
-      "Remove-Item -LiteralPath '${local.run_root}' -Recurse -Force -ErrorAction SilentlyContinue",
+      "$result = Invoke-GuestCleanup -StagingRoot '${local.run_root}' -RunId '${var.run_id}' -SentinelPath '${local.sentinel_path}' -ExpectedNonce '${var.cleanup_nonce}'",
+      "Write-Host \"guest cleanup: $($result.BundleOutcome)\"",
       "if (Test-Path -LiteralPath '${local.run_root}') { Write-Host 'guest cleanup: run directory still present' } else { Write-Host 'guest cleanup: run directory removed' }"
     ]
   }
@@ -326,14 +324,13 @@ build {
       # run after a failed preflight -- a target that never identified itself --
       # and delete a directory belonging to something else entirely.
       "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force -ErrorAction SilentlyContinue",
-      "if (-not (Get-Command Test-CleanupAuthorization -ErrorAction SilentlyContinue)) { Write-Host 'error cleanup: tools unavailable, leaving the target untouched'; exit 0 }",
+      "if (-not (Get-Command Invoke-GuestCleanup -ErrorAction SilentlyContinue)) { Write-Host 'error cleanup: tools unavailable, leaving the target untouched'; exit 0 }",
       # Content, not mere presence. A colliding run never writes a sentinel, so
       # presence alone would authorize deleting the directory the *previous* run
       # owns -- reproduced, with its witness file destroyed.
-      "if (-not (Test-CleanupAuthorization -SentinelPath '${local.sentinel_path}' -ExpectedNonce '${var.cleanup_nonce}')) { Write-Host 'error cleanup: sentinel missing or from another invocation, leaving the target untouched'; exit 0 }",
-      "Write-Host 'error cleanup: attempting guest staging removal'",
-      "Remove-Item -LiteralPath '${local.run_root}' -Recurse -Force -ErrorAction SilentlyContinue",
-      "if (Test-Path -LiteralPath '${local.run_root}') { Write-Host 'error cleanup: staging still present' } else { Write-Host 'error cleanup: staging removed' }"
+      "$result = Invoke-GuestCleanup -StagingRoot '${local.run_root}' -RunId '${var.run_id}' -SentinelPath '${local.sentinel_path}' -ExpectedNonce '${var.cleanup_nonce}' -ErrorPath",
+      "if (-not $result.Authorized) { Write-Host 'error cleanup: sentinel missing or from another invocation, leaving the target untouched'; exit 0 }",
+      "if ($result.RootRemoved) { Write-Host 'error cleanup: staging removed' } else { Write-Host 'error cleanup: staging still present' }"
     ]
   }
 }

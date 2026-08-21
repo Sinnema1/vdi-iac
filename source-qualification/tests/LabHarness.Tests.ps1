@@ -53,12 +53,14 @@ BeforeAll {
         param(
             [string] $Directory, [string] $Phase, [string] $Outcome, [int] $FailedRequired = 0,
             [string] $RunId = '3f2504e0-4f89-41d3-9a0c-0305e82c3301',
-            [string] $Kind = 'guest-provisioning', [string] $DeclaredPhase
+            [string] $Kind = 'guest-provisioning', [string] $DeclaredPhase,
+            [string] $PackageId = 'example-agent', [string] $PackageVersion = '1.2.3',
+            [int] $ManifestSchemaVersion = 2
         )
         if (-not $DeclaredPhase) { $DeclaredPhase = $Phase }
         $document = @{
             resultSchemaVersion = 2; resultKind = $Kind
-            runId = $RunId; manifestSchemaVersion = 2
+            runId = $RunId; manifestSchemaVersion = $ManifestSchemaVersion
             startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
             outcome = $Outcome
             # Self-consistent by construction. The evaluator now rejects a
@@ -74,7 +76,7 @@ BeforeAll {
                 terminalReasonCode = $(if ($Outcome -eq 'incomplete') { 'install_timeout_termination_failed' } else { $null })
                 cleanupOutcome = 'not-attempted'
                 packages = @(@{
-                    id = 'example-agent'; version = '1.2.3'; order = 10; required = $true
+                    id = $PackageId; version = $PackageVersion; order = 10; required = $true
                     outcome = $(if ($Outcome -eq 'passed') { 'passed' } else { $Outcome })
                     reasonCode = $(if ($Outcome -eq 'passed') { $null } else { 'installer_failed' })
                     restartRequired = $false; installerAttempted = $true
@@ -214,11 +216,16 @@ Describe 'harness ordering' {
         $sentinel | Should -BeGreaterThan $reserve
     }
 
-    It 'gates both cleanup paths on the ownership sentinel' {
-        # Both paths call the tested function rather than repeating the rule
-        # inline, so the decision has behavioral coverage instead of textual.
-        ([regex]::Matches($script:Harness, 'Test-CleanupAuthorization')).Count | Should -BeGreaterOrEqual 2
+    It 'routes both cleanup paths through the tested function' {
+        # The point of this assertion is that the harness cannot delete by any
+        # other route. Invoke-GuestCleanup is executed end to end by the cleanup
+        # tests, so a path that bypassed it would be the one path with no
+        # behavioral coverage at all.
+        ([regex]::Matches($script:Harness, 'Invoke-GuestCleanup')).Count | Should -BeGreaterOrEqual 2
         $script:Harness | Should -Match 'ExpectedNonce'
+
+        # No direct removal of the run root outside that function.
+        $script:Harness | Should -Not -Match "Remove-Item -LiteralPath '\$\{local\.run_root\}'"
     }
 
     It 'retrieves install evidence before the restart gate' {
@@ -253,7 +260,7 @@ Describe 'harness ordering' {
     It 'retrieves evidence before removing guest staging' {
         # Cleanup can fail, and evidence collected afterwards may be gone.
         $download = $script:Harness.IndexOf('direction   = "download"')
-        $cleanup = $script:Harness.IndexOf('Remove-GuestBundle')
+        $cleanup = $script:Harness.IndexOf('Invoke-GuestCleanup')
         $download | Should -BeGreaterThan 0
         $download | Should -BeLessThan $cleanup
     }
@@ -282,7 +289,10 @@ Describe 'harness ordering' {
     It 'derives guest cleanup from the host-controlled staging root' {
         # The Stage 5 invariant: never read or derived from the uploaded
         # descriptor, because cleanup has to work after descriptor tampering.
-        $script:Harness | Should -Match "Remove-GuestBundle -StagingRoot '\`$\{local\.run_root\}' -RunId '\`$\{var\.run_id\}'"
+        # Both cleanup paths, so neither can be given a target from elsewhere.
+        ([regex]::Matches($script:Harness,
+            "Invoke-GuestCleanup -StagingRoot '\`$\{local\.run_root\}' -RunId '\`$\{var\.run_id\}'")).Count |
+            Should -Be 2
     }
 }
 
@@ -437,6 +447,62 @@ Describe 'evidence consistency' {
             payload = @{ phase = 'install'; restartRequired = $false; packageCount = 3
                          passedCount = 3; failedRequiredCount = 0; installerAttemptCount = 0
                          cleanupOutcome = 'not-attempted'; packages = @() }
+        }
+        $document | ConvertTo-Json -Depth 12 |
+            Set-Content -LiteralPath (Join-Path $dir 'install-guest-evidence.json') -Encoding utf8
+        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'passed' -RunId $runId
+
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0).Reason |
+            Should -Be 'evidence_inconsistent'
+    }
+
+    It 'refuses two phases that installed and validated different versions' {
+        # The substitution a per-package hash cannot catch. Both documents are
+        # internally consistent and share a package identifier; only the version
+        # differs, so comparing identifiers alone would report a clean pass on an
+        # image that installed one build and validated another.
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'passed' -RunId $runId -PackageVersion '1.2.3'
+        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'passed' -RunId $runId -PackageVersion '9.9.9'
+
+        $verdict = Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0
+        $verdict.Outcome | Should -Be 'incomplete'
+        $verdict.Reason | Should -Be 'evidence_inconsistent'
+    }
+
+    It 'refuses two phases that describe different packages' {
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'passed' -RunId $runId -PackageId 'example-agent'
+        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'passed' -RunId $runId -PackageId 'example-tool'
+
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0).Reason |
+            Should -Be 'evidence_inconsistent'
+    }
+
+    It 'refuses two phases reporting different manifest schema versions' {
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        WriteEvidence -Directory $dir -Phase 'install' -Outcome 'passed' -RunId $runId -ManifestSchemaVersion 2
+        WriteEvidence -Directory $dir -Phase 'validate' -Outcome 'passed' -RunId $runId -ManifestSchemaVersion 1
+
+        (Get-LabEvidenceOutcome -EvidenceDirectory $dir -RunId $runId -PackerExitCode 0).Reason |
+            Should -Be 'evidence_inconsistent'
+    }
+
+    It 'refuses a document whose attempt count disagrees with its package flags' {
+        # The same execution-witness rule the restart gate applies, reached
+        # through the orchestration path, because one validator serves both.
+        $dir = NewTempDir; $runId = Get-RunIdentifier
+        $document = @{
+            resultSchemaVersion = 2; resultKind = 'guest-provisioning'
+            runId = $runId; manifestSchemaVersion = 2
+            startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+            outcome = 'passed'
+            payload = @{ phase = 'install'; restartRequired = $false; packageCount = 1
+                         passedCount = 1; failedRequiredCount = 0; installerAttemptCount = 7
+                         cleanupOutcome = 'not-attempted'
+                         packages = @(@{ id = 'example-agent'; version = '1.2.3'; order = 10; required = $true
+                                         outcome = 'passed'; reasonCode = $null
+                                         restartRequired = $false; installerAttempted = $true }) }
         }
         $document | ConvertTo-Json -Depth 12 |
             Set-Content -LiteralPath (Join-Path $dir 'install-guest-evidence.json') -Encoding utf8

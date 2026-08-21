@@ -19,6 +19,9 @@
 Set-StrictMode -Version 3.0
 
 Import-Module (Join-Path $PSScriptRoot '..' '..' 'source-qualification' 'scripts' 'RunIdentity.psm1')
+# The semantic rules live in one module used by both the restart gate and this
+# verdict. A second copy here is how the two would come to disagree.
+Import-Module (Join-Path $PSScriptRoot '..' '..' 'source-qualification' 'scripts' 'EvidenceConsistency.psm1')
 Import-Module (Join-Path $PSScriptRoot '..' '..' 'source-qualification' 'scripts' 'Evidence.psm1')
 
 # A completed normal run produces exactly these, one each.
@@ -124,7 +127,7 @@ function Get-LabEvidenceOutcome {
         # constraint and still contradict itself -- outcome 'passed' beside a
         # non-zero failure count, or a terminal reason on a run that passed --
         # and accepting it means reporting a pass the evidence does not support.
-        $inconsistency = TestEvidenceConsistency -Evidence $parsed
+        $inconsistency = Test-GuestEvidenceConsistency -Evidence $parsed
         if ($inconsistency) {
             return NewVerdict -Outcome 'incomplete' -Reason $inconsistency -Phases $phases -PackerExitCode $PackerExitCode
         }
@@ -168,13 +171,9 @@ function Get-LabEvidenceOutcome {
     # The two phases must describe the same run. Different package identities or a
     # different manifest version means one of them belongs somewhere else, and a
     # pass assembled from two unrelated records is not a pass.
-    $installPackages = @($documents['install'].payload.packages | ForEach-Object { $_.id }) | Sort-Object
-    $validatePackages = @($documents['validate'].payload.packages | ForEach-Object { $_.id }) | Sort-Object
-    if (($installPackages -join '|') -ne ($validatePackages -join '|')) {
-        return NewVerdict -Outcome 'incomplete' -Reason 'evidence_inconsistent' -Phases $phases -PackerExitCode $PackerExitCode
-    }
-    if ($documents['install'].manifestSchemaVersion -ne $documents['validate'].manifestSchemaVersion) {
-        return NewVerdict -Outcome 'incomplete' -Reason 'evidence_inconsistent' -Phases $phases -PackerExitCode $PackerExitCode
+    $pairReason = Test-GuestEvidencePairConsistency -InstallEvidence $documents['install'] -ValidateEvidence $documents['validate']
+    if ($pairReason) {
+        return NewVerdict -Outcome 'incomplete' -Reason $pairReason -Phases $phases -PackerExitCode $PackerExitCode
     }
 
     $outcome = if (@($phases | Where-Object outcome -EQ 'incomplete').Count -gt 0) { 'incomplete' }
@@ -192,46 +191,6 @@ function Get-LabEvidenceOutcome {
 
     $reason = if ($outcome -eq 'passed') { $null } else { $null }
     NewVerdict -Outcome $outcome -Reason $reason -Phases $phases -PackerExitCode $PackerExitCode
-}
-
-function TestEvidenceConsistency {
-    <#
-    .SYNOPSIS
-        Returns a reason code when a document contradicts itself, or null.
-
-    .DESCRIPTION
-        Module-internal. Every rule here relates two fields the schema constrains
-        separately, so none of them can be expressed as a per-field constraint.
-    #>
-    [CmdletBinding()]
-    [OutputType([string])]
-    param([Parameter(Mandatory)] $Evidence)
-
-    $payload = $Evidence.payload
-    $packages = @($payload.packages)
-
-    # terminalReasonCode is optional in the schema, and under StrictMode reading
-    # an absent property throws rather than yielding null.
-    $terminal = if ($payload.PSObject.Properties.Name -contains 'terminalReasonCode') { $payload.terminalReasonCode } else { $null }
-
-    if ($Evidence.outcome -eq 'passed') {
-        if ($payload.failedRequiredCount -ne 0) { return 'evidence_inconsistent' }
-        if ($terminal) { return 'evidence_inconsistent' }
-        if (@($packages | Where-Object { $_.outcome -ne 'passed' }).Count -gt 0) { return 'evidence_inconsistent' }
-        if ($payload.passedCount -ne $payload.packageCount) { return 'evidence_inconsistent' }
-    }
-
-    if ($Evidence.outcome -eq 'failed') {
-        $failedRequired = @($packages | Where-Object { $_.outcome -ne 'passed' -and $_.required }).Count
-        if ($payload.failedRequiredCount -ne $failedRequired) { return 'evidence_inconsistent' }
-        if ($failedRequired -eq 0 -and -not $terminal) { return 'evidence_inconsistent' }
-    }
-
-    if ($packages.Count -ne $payload.packageCount) { return 'evidence_inconsistent' }
-    if ($payload.passedCount -gt $payload.packageCount) { return 'evidence_inconsistent' }
-    if (@($packages | Where-Object { $_.outcome -eq 'passed' }).Count -ne $payload.passedCount) { return 'evidence_inconsistent' }
-
-    $null
 }
 
 function NewVerdict {

@@ -514,6 +514,27 @@ Describe 'Test-RestartAuthorization' {
                 }
             } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $Path -Encoding utf8
         }
+
+        function WriteQualificationEvidence {
+            # A complete, schema-valid envelope of another result kind. The
+            # earlier fixture kept a guest payload under a qualification kind,
+            # which the schema rejects outright -- so the test could not tell the
+            # wrong-kind rule from a malformed document, and accepted either.
+            param([string] $Path, [string] $RunId)
+            @{
+                resultSchemaVersion = 2; resultKind = 'source-qualification'
+                runId = $RunId; manifestSchemaVersion = 2
+                startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+                outcome = 'passed'
+                payload = @{
+                    packageCount = 1; passedCount = 1
+                    failedRequiredCount = 0; failedOptionalCount = 0
+                    cleanupOutcome = 'not-attempted'
+                    packages = @(@{ id = 'example-agent'; version = '1.2.3'; order = 10
+                                    required = $true; outcome = 'passed'; reasonCode = $null })
+                }
+            } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $Path -Encoding utf8
+        }
     }
 
     It 'authorizes a complete, self-consistent install' {
@@ -534,12 +555,75 @@ Describe 'Test-RestartAuthorization' {
         $decision.ReasonCode | Should -Be 'evidence_wrong_phase'
     }
 
-    It 'refuses evidence from another stage' {
+    It 'refuses a schema-valid envelope from another stage' {
+        # Valid against the contract, carrying this run, reporting a pass. Only
+        # the result kind disqualifies it, so the expectation is exact.
         $runId = Get-RunIdentifier
         $path = Join-Path (NewTempDir) 'install.json'
-        WriteInstallEvidence -Path $path -RunId $runId -Kind 'source-qualification'
-        (Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema).ReasonCode |
-            Should -BeIn @('evidence_wrong_kind', 'evidence_malformed')
+        WriteQualificationEvidence -Path $path -RunId $runId
+
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding utf8
+        Test-Json -Json $raw -SchemaFile $script:Schema -ErrorAction SilentlyContinue |
+            Should -BeTrue -Because 'the fixture must reach the kind check rather than fail validation'
+
+        $decision = Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema
+        $decision.Authorized | Should -BeFalse
+        $decision.ReasonCode | Should -Be 'evidence_wrong_kind'
+    }
+
+    It 'refuses a package whose installer outlived termination, with no terminal reason' {
+        # The dangerous case: the payload reports a clean failure and says
+        # nothing about termination, while a package records that its process
+        # could not be killed. A reboot must never meet a process still running.
+        $runId = Get-RunIdentifier
+        $path = Join-Path (NewTempDir) 'install.json'
+        $evidence = @{
+            resultSchemaVersion = 2; resultKind = 'guest-provisioning'
+            runId = $runId; manifestSchemaVersion = 2
+            startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+            outcome = 'failed'
+            payload = @{
+                phase = 'install'; restartRequired = $false
+                packageCount = 1; passedCount = 0; failedRequiredCount = 1
+                installerAttemptCount = 1; cleanupOutcome = 'not-attempted'
+                packages = @(@{ id = 'example-agent'; version = '1.2.3'; order = 10; required = $true
+                                outcome = 'failed'; reasonCode = 'install_timeout_termination_failed'
+                                restartRequired = $false; installerAttempted = $true })
+            }
+        }
+        $evidence | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding utf8
+
+        $decision = Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema
+        $decision.Authorized | Should -BeFalse
+        $decision.ReasonCode | Should -Be 'install_termination_unconfirmed'
+    }
+
+    It 'refuses a passed result carrying a failed required package' {
+        # Every counter agrees with the package list, so the arithmetic rules
+        # pass. What contradicts the result is the required package that did not.
+        $runId = Get-RunIdentifier
+        $path = Join-Path (NewTempDir) 'install.json'
+        $evidence = @{
+            resultSchemaVersion = 2; resultKind = 'guest-provisioning'
+            runId = $runId; manifestSchemaVersion = 2
+            startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+            outcome = 'passed'
+            payload = @{
+                phase = 'install'; restartRequired = $false
+                packageCount = 2; passedCount = 1; failedRequiredCount = 0
+                installerAttemptCount = 2; cleanupOutcome = 'not-attempted'
+                packages = @(
+                    @{ id = 'example-agent'; version = '1.2.3'; order = 10; required = $true
+                       outcome = 'passed'; reasonCode = $null; restartRequired = $false; installerAttempted = $true }
+                    @{ id = 'example-tool'; version = '2.0.0'; order = 20; required = $true
+                       outcome = 'failed'; reasonCode = 'installer_failed'; restartRequired = $false; installerAttempted = $true })
+            }
+        }
+        $evidence | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding utf8
+
+        $decision = Test-RestartAuthorization -EvidencePath $path -RunId $runId -SchemaPath $script:Schema
+        $decision.Authorized | Should -BeFalse
+        $decision.ReasonCode | Should -Be 'evidence_inconsistent'
     }
 
     It 'refuses internally inconsistent install evidence' {
@@ -867,5 +951,98 @@ Describe 'ConvertTo-EvidenceEnvelope' {
         $e.resultSchemaVersion | Should -Be 2
         $e.manifestSchemaVersion | Should -Be 1
         $e.PSObject.Properties.Name | Should -Not -Contain 'schemaVersion'
+    }
+}
+
+Describe 'Invoke-GuestCleanup' {
+
+    BeforeAll {
+        function NewOwnedRun {
+            <#
+                A run directory as a previous invocation would have left it:
+                its own nonce in the sentinel, its bundle beneath the root, and
+                an evidence file standing in for the witness a wrong deletion
+                destroys.
+            #>
+            param([string] $Nonce)
+            $root = Join-Path (NewTempDir) 'vdi-iac-lab'
+            $runId = Get-RunIdentifier
+            $null = New-Item -ItemType Directory -Path (Join-Path $root "bundle-$runId") -Force
+            $sentinel = Join-Path $root 'owner.nonce'
+            Set-Content -LiteralPath $sentinel -Value $Nonce -NoNewline
+            $witness = Join-Path $root 'install-guest-evidence.json'
+            Set-Content -LiteralPath $witness -Value '{"witness":true}' -NoNewline
+            [PSCustomObject]@{ Root = $root; RunId = $runId; Sentinel = $sentinel; Witness = $witness }
+        }
+    }
+
+    It 'removes the run root when the sentinel is this invocation' {
+        $run = NewOwnedRun -Nonce 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        $result = Invoke-GuestCleanup -StagingRoot $run.Root -RunId $run.RunId `
+            -SentinelPath $run.Sentinel -ExpectedNonce 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
+        $result.Authorized | Should -BeTrue
+        $result.BundleOutcome | Should -Be 'removed'
+        $result.RootRemoved | Should -BeTrue
+        Test-Path -LiteralPath $run.Witness | Should -BeFalse
+    }
+
+    It 'leaves another invocation''s run root and witness intact on the normal path' {
+        # The collision this exists to survive. A run that collides on its
+        # identifier refuses the existing directory and never writes a sentinel,
+        # so the nonce it holds belongs to the run that owns it. Deleting on
+        # presence alone would destroy that run's evidence.
+        $run = NewOwnedRun -Nonce 'old-nonce-from-the-previous-run00'
+
+        { Invoke-GuestCleanup -StagingRoot $run.Root -RunId $run.RunId `
+            -SentinelPath $run.Sentinel -ExpectedNonce 'new-nonce-for-this-invocation000' } |
+            Should -Throw -ExpectedMessage '*Refusing to remove anything*'
+
+        Test-Path -LiteralPath $run.Witness | Should -BeTrue
+        Test-Path -LiteralPath $run.Root | Should -BeTrue
+        (Get-Content -LiteralPath $run.Witness -Raw) | Should -Be '{"witness":true}'
+        Test-Path -LiteralPath (Join-Path $run.Root "bundle-$($run.RunId)") | Should -BeTrue
+    }
+
+    It 'leaves another invocation''s run root and witness intact on the error path' {
+        # The path that runs after a failure, including a preflight that never
+        # identified the target. It reports rather than throwing, and must still
+        # delete nothing.
+        $run = NewOwnedRun -Nonce 'old-nonce-from-the-previous-run00'
+
+        $result = Invoke-GuestCleanup -StagingRoot $run.Root -RunId $run.RunId `
+            -SentinelPath $run.Sentinel -ExpectedNonce 'new-nonce-for-this-invocation000' -ErrorPath
+
+        $result.Authorized | Should -BeFalse
+        $result.RootRemoved | Should -BeFalse
+        Test-Path -LiteralPath $run.Witness | Should -BeTrue
+        (Get-Content -LiteralPath $run.Witness -Raw) | Should -Be '{"witness":true}'
+        Test-Path -LiteralPath (Join-Path $run.Root "bundle-$($run.RunId)") | Should -BeTrue
+    }
+
+    It 'refuses on both paths when the sentinel is absent entirely' {
+        # A target that never identified itself. Presence-based authorization
+        # would have treated a missing sentinel as nothing to protect.
+        $run = NewOwnedRun -Nonce 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        Remove-Item -LiteralPath $run.Sentinel -Force
+
+        (Invoke-GuestCleanup -StagingRoot $run.Root -RunId $run.RunId -SentinelPath $run.Sentinel `
+            -ExpectedNonce 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' -ErrorPath).Authorized | Should -BeFalse
+        { Invoke-GuestCleanup -StagingRoot $run.Root -RunId $run.RunId -SentinelPath $run.Sentinel `
+            -ExpectedNonce 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } | Should -Throw
+
+        Test-Path -LiteralPath $run.Witness | Should -BeTrue
+    }
+
+    It 'removes the run root on the error path when this invocation owns it' {
+        $run = NewOwnedRun -Nonce 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+        $result = Invoke-GuestCleanup -StagingRoot $run.Root -RunId $run.RunId `
+            -SentinelPath $run.Sentinel -ExpectedNonce 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' -ErrorPath
+
+        $result.Authorized | Should -BeTrue
+        # The error path does not run the derived-target removal: it exists to
+        # clear staging after a failure, not to report a bundle outcome.
+        $result.BundleOutcome | Should -Be 'not-attempted'
+        $result.RootRemoved | Should -BeTrue
     }
 }

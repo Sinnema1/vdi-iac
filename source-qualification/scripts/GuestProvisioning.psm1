@@ -16,7 +16,7 @@
 
 Set-StrictMode -Version 3.0
 
-foreach ($dependency in 'RunIdentity', 'SourceQualification', 'Evidence', 'GuestAdapter', 'TransferBundle') {
+foreach ($dependency in 'RunIdentity', 'SourceQualification', 'Evidence', 'GuestAdapter', 'TransferBundle', 'EvidenceConsistency') {
     Import-Module (Join-Path $PSScriptRoot "$dependency.psm1")
 }
 
@@ -166,18 +166,11 @@ function Test-RestartAuthorization {
     $terminal = if ($payload.PSObject.Properties.Name -contains 'terminalReasonCode') { $payload.terminalReasonCode } else { $null }
     if ($terminal) { return Refuse 'install_not_complete' }
 
-    # Self-consistency. A document can satisfy every field constraint and still
-    # describe two different runs.
-    if ($packages.Count -ne $payload.packageCount) { return Refuse 'evidence_inconsistent' }
-    if (@($packages | Where-Object { $_.outcome -eq 'passed' }).Count -ne $payload.passedCount) { return Refuse 'evidence_inconsistent' }
-    $failedRequired = @($packages | Where-Object { $_.outcome -ne 'passed' -and $_.required }).Count
-    if ($payload.failedRequiredCount -ne $failedRequired) { return Refuse 'evidence_inconsistent' }
-    # Unguarded: the field is required by the envelope schema the evidence has
-    # already been validated against, so a presence check here could only skip
-    # the comparison, never reach a document that legitimately omits it.
-    if ($payload.installerAttemptCount -ne @($packages | Where-Object { $_.installerAttempted }).Count) {
-        return Refuse 'evidence_inconsistent'
-    }
+    # The shared semantic rules, in restart mode. Not a second copy: the host
+    # verdict applies the same function to the same document, so a rule cannot
+    # hold in one place and not the other.
+    $inconsistency = Test-GuestEvidenceConsistency -Evidence $evidence -RestartDecision
+    if ($inconsistency) { return Refuse $inconsistency }
 
     [PSCustomObject]@{ Authorized = $true; ReasonCode = $null }
 }
@@ -207,6 +200,60 @@ function Test-CleanupAuthorization {
     if (-not (Test-Path -LiteralPath $SentinelPath -PathType Leaf)) { return $false }
     $observed = (Get-Content -LiteralPath $SentinelPath -Raw -Encoding utf8).Trim()
     [string]::Equals($observed, $ExpectedNonce, [System.StringComparison]::Ordinal)
+}
+
+function Invoke-GuestCleanup {
+    <#
+    .SYNOPSIS
+        The complete cleanup path, authorization and removal together.
+
+    .DESCRIPTION
+        A function rather than steps assembled inline in the harness, so a test
+        can run the whole path and watch what survives. Testing the
+        authorization helper alone proves the answer is computed, not that a
+        refusal actually stops the deletion that follows it -- and the deletion
+        is the part that destroys evidence when it is wrong.
+
+        Refusal is not an error condition on the error path. That path runs
+        after something else has already failed, including a failed preflight
+        against a target that never identified itself, so it reports and leaves
+        the directory alone rather than throwing into a failure handler.
+
+    .OUTPUTS
+        Authorized, the bundle removal outcome, and whether the run root is gone.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $StagingRoot,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RunId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SentinelPath,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ExpectedNonce,
+        [Parameter()] [switch] $ErrorPath
+    )
+
+    $refused = [PSCustomObject]@{ Authorized = $false; BundleOutcome = 'not-attempted'; RootRemoved = $false }
+
+    if (-not (Test-CleanupAuthorization -SentinelPath $SentinelPath -ExpectedNonce $ExpectedNonce)) {
+        if ($ErrorPath) { return $refused }
+        throw (NewGuestError -Code 'path_rejected' `
+                -Message 'Ownership sentinel is missing or belongs to another invocation. Refusing to remove anything.')
+    }
+
+    # The bundle is removed by the derived-target rule first, so the deletion
+    # that can be reasoned about happens before the blunt one.
+    $bundleOutcome = if ($ErrorPath) { 'not-attempted' }
+                     else { Remove-GuestBundle -StagingRoot $StagingRoot -RunId $RunId }
+
+    if ($PSCmdlet.ShouldProcess($StagingRoot, 'Remove the guest run root')) {
+        Remove-Item -LiteralPath $StagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    [PSCustomObject]@{
+        Authorized    = $true
+        BundleOutcome = $bundleOutcome
+        RootRemoved   = -not (Test-Path -LiteralPath $StagingRoot)
+    }
 }
 
 function Remove-GuestBundle {
@@ -721,4 +768,4 @@ function Invoke-GuestProvisioning {
         })
 }
 
-Export-ModuleMember -Function Test-RestartAuthorization, Test-CleanupAuthorization, Get-NormalizedInstallerResult, Get-InstallerInvocation, Invoke-PackageValidation, Invoke-GuestProvisioning, Remove-GuestBundle
+Export-ModuleMember -Function Test-RestartAuthorization, Test-CleanupAuthorization, Invoke-GuestCleanup, Get-NormalizedInstallerResult, Get-InstallerInvocation, Invoke-PackageValidation, Invoke-GuestProvisioning, Remove-GuestBundle

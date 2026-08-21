@@ -36,6 +36,7 @@ What exists today:
 | Agent operating rules and glossary | documented |
 | Public-boundary, secret, Markdown, and shell checks | enforced in CI |
 | Package manifest contract | version 1 supported and frozen; version 2 an implementation draft |
+| Base-image strategy | decided: construction from installation media ([ADR 6](docs/decisions/0006-base-image-from-installation-media.md)) |
 | Source qualification and integrity verification | host-side path implemented |
 | Guest provisioning and transfer bundle | implemented; lab validation pending |
 | Packer lab harness (null builder) | implemented; lab validation pending |
@@ -45,9 +46,12 @@ What exists today:
 | Promotion, reconciliation, and retirement | not started |
 
 The delivery sequence is defined in
-[Agent_Handoff.md](Agent_Handoff.md) section 32. The next increment is 3, image
-build and sealing: selecting a Windows source, building, generalizing, shutting
-down, sealing, versioning, and establishing provenance for a candidate image.
+[Agent_Handoff.md](Agent_Handoff.md) section 32. Increment 3 is in progress:
+qualifying installation media, building unattended, generalizing, shutting down,
+sealing, and establishing identity and provenance for a candidate image. The
+base-image question is settled in
+[ADR 6](docs/decisions/0006-base-image-from-installation-media.md); artifact
+publication stays deliberately open.
 **No candidate image has been built or sealed yet.**
 
 ## Intended architecture

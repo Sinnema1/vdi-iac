@@ -277,12 +277,10 @@ Owns:
 - superseded artifact retention or retirement;
 - desired-versus-observed reconciliation.
 
-### 8.8 Installation-media qualification (PROPOSED)
+### 8.8 Installation-media qualification
 
-**PROPOSED.** This domain applies only where a build constructs an image from
-installation media. Whether it does is unresolved -- see section 36.
-
-Where it applies, it owns:
+Settled by [ADR 6](docs/decisions/0006-base-image-from-installation-media.md):
+builds construct from installation media, so this domain applies. It owns:
 
 - resolution of an exact media reference;
 - verification against a separately published checksum;
@@ -292,6 +290,11 @@ Where it applies, it owns:
 It does not own guest package installation. Media does not travel the guest
 package-staging path described in section 13, though it may be mounted or
 otherwise presented to the build VM by other means.
+
+It also owns the unattended answer file that drives setup. The file requires an
+administrator password, so the repository holds a template with placeholders and
+values are injected at runtime. Rendering fails closed on an unsubstituted
+placeholder, and a rendered file is never written into the repository tree.
 
 ## 9. Primary System Flow
 
@@ -803,9 +806,9 @@ The following structure is a destination map, not a request to create empty dire
 │   ├── variables/
 │   ├── manifests/
 │   ├── schemas/            PROPOSED
-│   ├── sources/            PROPOSED
-│   │   └── windows/        PROPOSED
-│   ├── unattended/         PROPOSED
+│   ├── sources/            Increment 3
+│   │   └── windows/        Increment 3
+│   ├── unattended/         Increment 3
 │   ├── validation/         PROPOSED
 │   ├── scripts/
 │   │   ├── packages/
@@ -826,10 +829,11 @@ The following structure is a destination map, not a request to create empty dire
     └── integration/
 ```
 
-Paths marked PROPOSED are candidates, not commitments. Several depend on the
-base-image decision in section 36 and may never be created: `sources/windows/`
-and `unattended/` presuppose media-based construction, and `schemas/` and
-`validation/` presuppose the shape the manifest contract takes.
+Paths marked PROPOSED are candidates, not commitments: `schemas/` and
+`validation/` presuppose the shape the manifest contract takes. Paths marked
+Increment 3 are committed by
+[ADR 6](docs/decisions/0006-base-image-from-installation-media.md), which
+selects media-based construction, but do not exist yet.
 
 Create paths only when implementing their responsibility. Prefer one clear implementation over parallel examples that can drift.
 
@@ -988,18 +992,72 @@ Several depend on the base-image decision in section 36.
 
 ### Increment 3: Image build and sealing
 
-- complete Packer template;
-- base-image and tool version pinning;
+The deliverable is **one sealed candidate image with stated provenance**. Not a
+published one, not a validated one -- those are Increments 4 and beyond. An
+image that cannot be identified or whose inputs cannot be stated does not count,
+because identity and provenance are what make the artifact usable later.
+
+Governed by [ADR 6](docs/decisions/0006-base-image-from-installation-media.md),
+which selects construction from installation media.
+
+- installation-media qualification;
+- unattended answer-file contract;
+- complete Packer template, with base-image and tool version pinning;
 - pre-generalization checks;
 - generalization, shutdown, and vSphere sealing;
-- immutable identity and provenance;
-- **PROPOSED** artifact publication and reference resolution, by Content Library or another mechanism;
-- **PROPOSED** installation-media qualification, if the base-image decision in
-  section 36 selects a media-based path.
+- immutable identity and provenance.
 
-If Content Library is selected as the publication mechanism, it belongs here
-rather than earlier: it would have no role until there is a sealed artifact to
-publish. The mechanism itself is unresolved -- see section 36.
+**Deferred: artifact publication and reference resolution.** Increment 3 needs
+only enough to identify and preserve the candidate. Content Library, or whatever
+replaces it, would have no role until there is a sealed artifact to publish, and
+selecting one now would settle an open decision as a side effect of building
+something else. Section 36 keeps it open.
+
+Implementation order, each stage landing before the next begins, and **every
+stage includes its own positive, negative, and regression tests**. The order is
+deliberate: everything provable without a lab comes first, so the untestable
+surface is as small as possible when a target finally exists.
+
+1. media qualification -- an exact media reference resolved and verified against
+   a separately published checksum, with evidence. Host-side and CI-provable;
+2. the answer-file contract -- a committed template, runtime substitution, and a
+   fail-closed check for unsubstituted placeholders. CI-provable, and no
+   rendered file ever enters the repository tree;
+3. image identity and the provenance record -- identity derived from
+   construction inputs, and a contract for the document linking an image to its
+   media, manifest, package hashes, answer-file revision, and tool versions.
+   CI-provable;
+4. the vSphere builder configuration -- source definition, pinned plugin
+   versions, hardware and boot configuration, and the media reference. Proven by
+   `packer validate` in CI, which resolves what a syntax check would not;
+5. pre-generalization checks, generalization, shutdown, and sealing, with
+   evidence at each boundary. **Lab-only**; nothing here is CI-provable;
+6. provenance emission at seal time, binding the identity to the record.
+   Lab-only, and the point at which a candidate becomes nameable.
+
+Acceptance criteria:
+
+- media is verified against a checksum published separately from the artifact.
+  A value read from beside the artifact it claims to verify is not a check, and
+  a runtime-computed hash treated as expected is the failure the glossary names;
+- a media mismatch fails the build, proven by a test that supplies a mismatch;
+- the answer-file template carries no credential, and rendering fails closed on
+  an unsubstituted placeholder. The boundary check sees the template, never a
+  rendered copy;
+- image identity is derived from construction inputs. A timestamp, a display
+  name, or a sequence number is not an identity, and a test asserting only that
+  some identifier exists would accept all three;
+- the provenance record names the media reference and checksum, the manifest and
+  its schema version, package identities and hashes, the answer-file revision,
+  and the tool versions, and is emitted as evidence under the existing envelope;
+- generalization runs before shutdown, and sealing after it. A sealed image that
+  was never generalized cannot be cloned safely, and ordering asserted only by
+  reading configuration text is the gap Increment 2 closed twice;
+- a candidate image is never modified in place. A content change produces a new
+  build and a new identity;
+- **no image is described as sealed until a real vSphere build has completed and
+  produced the provenance record.** Stages 1 to 4 close as CI-proven; stages 5
+  and 6 close as implementation complete, lab validation pending.
 
 ### Increment 4: Sealed-image validation
 
@@ -1111,8 +1169,9 @@ Until repository evidence establishes otherwise, prioritize the foundation, mani
 
 Keep these as explicit decisions until implementation evidence or requirements resolve them:
 
-- base-image strategy: constructing from installation media versus consuming an
-  existing image source, and the qualification each path requires;
+- ~~base-image strategy: constructing from installation media versus consuming an
+  existing image source~~ resolved by [ADR 6](docs/decisions/0006-base-image-from-installation-media.md):
+  builds construct from installation media;
 - artifact publication and reference-resolution mechanism, including whether
   Content Library is used;
 - package-source adapter and retention expectations;
@@ -1128,11 +1187,17 @@ Keep these as explicit decisions until implementation evidence or requirements r
 - artifact retention, rollback window, and retirement policy;
 - reconciliation frequency and automated-remediation limits.
 
-The base-image decision is load-bearing: it determines whether media
+The base-image decision was load-bearing, and settling it in
+[ADR 6](docs/decisions/0006-base-image-from-installation-media.md) makes media
 qualification (section 8.8), the media artifact class (section 10), and the
-`sources/windows/` and `unattended/` paths (section 29) are needed at all.
-Treat all of them as PROPOSED until it is settled. Do not let an early
-implementation choice settle it silently.
+`sources/windows/` and `unattended/` paths (section 29) real rather than
+proposed. The answer-file path carries a credential requirement, so it arrives
+with a secret-handling constraint rather than as an ordinary build input.
+
+Publication and reference resolution stay open. Increment 3 needs enough
+identity and provenance to name and preserve a candidate; it does not need a
+publication mechanism, and choosing one early would settle that decision the way
+an early builder choice would have settled this one.
 
 Do not hide unresolved decisions inside code defaults. Document assumptions, choose reversible options for early increments, and create a decision record when a choice becomes durable.
 

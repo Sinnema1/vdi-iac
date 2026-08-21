@@ -58,6 +58,7 @@ built -> validated -> canary -> approved -> promoted -> superseded -> retired
 | **Transfer bundle** | The verified-only artifact uploaded to a guest; contains packages that passed host verification, relative paths, and the hashes the guest re-verifies against |
 | **Restart boundary** | The point at which Packer owns a reboot; installation logic reports that one is required and never triggers it |
 | **Content Library** | A vSphere construct for publishing and referencing sealed artifacts and installation media; one candidate publication mechanism, not a settled choice |
+| **Answer file** | The unattended-setup definition driving a Windows installation; held as a template with placeholders, rendered at runtime, never committed with a credential |
 
 Never calculate a hash at runtime and then treat that value as the expected
 hash. That verifies only that a file equals itself.

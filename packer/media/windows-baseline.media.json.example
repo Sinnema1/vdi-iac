@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "mediaId": "windows-baseline",
+  "description": "Example installation media reference. Copy to windows-baseline.media.json and replace every value below with the media you are actually building from.",
+  "reference": {
+    "kind": "file",
+    "locator": "windows/enterprise/placeholder-installation-media.iso",
+    "fileName": "placeholder-installation-media.iso",
+    "sizeBytes": 1
+  },
+  "integrity": {
+    "algorithm": "SHA256",
+    "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "authority": {
+      "kind": "vendor-published",
+      "citation": "https://vendor.example/security/installation-media-checksums",
+      "retrievedUtc": "2026-01-01T00:00:00Z"
+    }
+  },
+  "image": {
+    "edition": "Placeholder Edition",
+    "index": 1
+  },
+  "platform": {
+    "architecture": "x64",
+    "language": "en-US"
+  }
+}

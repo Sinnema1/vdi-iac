@@ -61,6 +61,11 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Live media references name a real artifact and carry its digest. Only the
+# example is committed.
+packer/media/*.media.json
+!packer/media/*.media.json.example
+
 # Lab harness variable files name a machine and carry a credential.
 packer/harness/*.pkrvars.hcl
 !packer/harness/*.pkrvars.hcl.example

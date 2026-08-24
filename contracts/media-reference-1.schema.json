@@ -1,0 +1,174 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Sinnema1/vdi-iac/contracts/media-reference-1.schema.json",
+  "title": "Installation media reference, version 1",
+  "description": "The declared identity of the installation media a build constructs from. Version-controlled and reviewed before a build runs. This is the input to media qualification, not its result: it states what the media must be, and qualification decides whether the artifact presented is that media.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "mediaId",
+    "reference",
+    "integrity",
+    "image",
+    "platform"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "description": "The version of this contract. Dispatch is a hard-coded map, never a path built from this value.",
+      "type": "integer",
+      "const": 1
+    },
+    "mediaId": {
+      "description": "A stable identifier for this media reference, used in provenance and evidence.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^[ -~]*$"
+    },
+    "reference": {
+      "description": "Where the media is obtained from, stated exactly. No discovery, no 'latest'.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "locator",
+        "fileName"
+      ],
+      "properties": {
+        "kind": {
+          "description": "How the locator is resolved. Only 'file' exists: media is gigabytes and is staged where the build execution context can already read it. Adding a retrieval kind is a schema change, not a value someone may start using.",
+          "type": "string",
+          "enum": [
+            "file"
+          ]
+        },
+        "locator": {
+          "description": "The exact path, URL, or library item the media is obtained from.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[ -~]+$"
+        },
+        "fileName": {
+          "description": "The expected file name of the artifact itself, so a locator resolving to a directory cannot silently select a different file.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$"
+        },
+        "sizeBytes": {
+          "description": "Optional. A cheap mismatch check before hashing gigabytes, never a substitute for the digest.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "integrity": {
+      "description": "The expected digest and, separately, where that digest came from. A digest published beside the artifact it claims to verify is not an independent authority.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "digest",
+        "authority"
+      ],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": [
+            "SHA256",
+            "SHA384",
+            "SHA512"
+          ]
+        },
+        "digest": {
+          "description": "Lowercase hexadecimal. Length is checked against the algorithm during qualification.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$|^[0-9a-f]{96}$|^[0-9a-f]{128}$"
+        },
+        "authority": {
+          "description": "The independently obtained source of the expected digest, recorded so a reviewer can check that it is not the artifact's own neighbour.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "citation",
+            "retrievedUtc"
+          ],
+          "properties": {
+            "kind": {
+              "description": "vendor-published is a checksum the media publisher states through a channel separate from the artifact. operator-attested is a human recording a value they verified out of band, and is weaker.",
+              "type": "string",
+              "enum": [
+                "vendor-published",
+                "operator-attested"
+              ]
+            },
+            "citation": {
+              "description": "Where the digest was read from, exactly enough for someone else to look it up.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^[ -~]+$"
+            },
+            "retrievedUtc": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z$"
+            }
+          }
+        }
+      }
+    },
+    "image": {
+      "description": "Which image inside the media is installed. Media commonly carries several editions, and a build that does not state one is not deterministic.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "edition",
+        "index"
+      ],
+      "properties": {
+        "edition": {
+          "description": "The edition name as the media itself reports it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[ -~]+$"
+        },
+        "index": {
+          "description": "The image index within the media. Stated alongside the edition so qualification can confirm the two agree rather than trusting either alone.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      }
+    },
+    "platform": {
+      "description": "Architecture and language. Both change what is installed, and neither is inferable from the file name.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "architecture",
+        "language"
+      ],
+      "properties": {
+        "architecture": {
+          "type": "string",
+          "enum": [
+            "x64",
+            "arm64"
+          ]
+        },
+        "language": {
+          "description": "A BCP 47 language tag, for example en-US.",
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
+        }
+      }
+    }
+  }
+}

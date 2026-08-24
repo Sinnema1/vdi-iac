@@ -156,6 +156,18 @@ If a tracked literal ever proves genuinely unavoidable, the order is:
 4. have the pre-commit hook evaluate the **staged** sidecar rather than the
    working-tree copy, or the exception file becomes its own bypass.
 
+### `Test-Json` does not enforce `if`/`then`
+
+Verified against the pinned runtime: a draft-07 conditional written into a
+schema validates every document, including the ones it appears to forbid. A rule
+placed there reads like a constraint and enforces nothing, which is worse than
+having no rule, because a reviewer stops looking for it elsewhere.
+
+Rules coupling two fields -- "this may be present only when that has a
+particular value" -- therefore live in a semantic validator beside the schema,
+with tests that supply the forbidden combination. Do not move them into a schema
+without first proving the runtime enforces the construct.
+
 If you change `scripts/ci/check-public-boundary.sh`, add a case to
 `tests/test-public-boundary.sh` that fails before your change and passes after
 it. A scanner without tests reports "passed" just as confidently when it is

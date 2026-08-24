@@ -1,0 +1,155 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Sinnema1/vdi-iac/contracts/media-qualification-1.schema.json",
+  "title": "Installation media qualification record, version 1",
+  "description": "The machine-consumed result of qualifying installation media. Produced host-side before a build and consumed by the Packer builder, which reverifies the media against it at its own input boundary. This record is a statement about a specific artifact at a specific time; it does not relieve a later consumer of checking.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runId",
+    "qualifiedUtc",
+    "outcome",
+    "mediaId",
+    "reference",
+    "integrity",
+    "image",
+    "platform"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "runId": {
+      "description": "The run that produced this record, correlating it with the rest of the build's evidence.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "qualifiedUtc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z$"
+    },
+    "outcome": {
+      "description": "Only a passed record may be consumed by a build. A failed record exists so a refusal is recorded rather than inferred from an absent file.",
+      "type": "string",
+      "enum": ["passed", "failed"]
+    },
+    "reasonCode": {
+      "description": "Present when and only when the outcome is failed.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "enum": [
+            "media_not_found",
+            "media_outside_root",
+            "media_link_rejected",
+            "media_name_mismatch",
+            "media_size_mismatch",
+            "integrity_mismatch",
+            "digest_length_mismatch",
+            "authority_not_independent",
+            "unexpected_error"
+          ]
+        }
+      ]
+    },
+    "mediaId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
+    },
+    "reference": {
+      "description": "The exact media reference this record qualified, carried forward so the builder does not have to re-read the declaration to know what it is verifying.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "locator", "fileName"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["file"] },
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[ -~]+$"
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$"
+        },
+        "sizeBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "integrity": {
+      "description": "The algorithm and expected digest, and the independently obtained authority the digest came from. The observed digest is recorded separately so a reader can see the comparison rather than take its result on trust.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "expectedDigest", "observedDigest", "authority"],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["SHA256", "SHA384", "SHA512"]
+        },
+        "expectedDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$|^[0-9a-f]{96}$|^[0-9a-f]{128}$"
+        },
+        "observedDigest": {
+          "description": "Null when the artifact could not be read at all. Never absent, so a record cannot imply a comparison that did not happen.",
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^[0-9a-f]{64}$|^[0-9a-f]{96}$|^[0-9a-f]{128}$" }
+          ]
+        },
+        "authority": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "citation", "retrievedUtc"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["vendor-published", "operator-attested"]
+            },
+            "citation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^[ -~]+$"
+            },
+            "retrievedUtc": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z$"
+            }
+          }
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edition", "index"],
+      "properties": {
+        "edition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[ -~]+$"
+        },
+        "index": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["architecture", "language"],
+      "properties": {
+        "architecture": { "type": "string", "enum": ["x64", "arm64"] },
+        "language": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
+        }
+      }
+    }
+  }
+}

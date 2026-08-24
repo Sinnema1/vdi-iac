@@ -356,10 +356,10 @@ manifest that tries to describe both badly.
 | Guest package-staging path | Yes, staged host-side then transferred | No; media may instead be mounted or otherwise presented to the build VM |
 | Verified | Host-side, then re-verified in the guest | At acquisition, and again at each transfer or publication boundary it crosses |
 
-This section describes the package model. It does not assert that a build begins
-from installation media: consuming an existing image source is an equally valid
-starting point, and the choice is an open decision recorded in section 36.
-Nothing here should be read as committing to a media-based path.
+This section describes the package model.
+[ADR 6](docs/decisions/0006-base-image-from-installation-media.md) settles where
+a build begins: from installation media, qualified by section 8.8. The two
+classes stay separate regardless -- a manifest describes packages, never media.
 
 ## 11. Package Manifest Contract
 
@@ -985,6 +985,12 @@ Acceptance criteria:
   the increment closes as **implementation complete; lab validation pending**,
   and landing lab-test definitions does not substitute for running them.
 
+Known follow-up, not blocking: a top-level `failed` result containing an
+`incomplete` package should normalize to `incomplete`. Neither value permits
+success or authorizes a restart, so the current behavior is safe and the
+correction is about reporting accuracy rather than a control gap. Fix it when
+the lab run gives a reason to touch this path.
+
 Explicitly deferred to Increment 3: any vSphere builder or plugin, base-image
 selection, installation-media handling, unattended setup, VM hardware, storage
 or network configuration, and generalization, shutdown, sealing, or publication.
@@ -1022,16 +1028,51 @@ surface is as small as possible when a target finally exists.
    a separately published checksum, with evidence. Host-side and CI-provable;
 2. the answer-file contract -- a committed template, runtime substitution, and a
    fail-closed check for unsubstituted placeholders. CI-provable, and no
-   rendered file ever enters the repository tree;
-3. image identity and the provenance record -- identity derived from
-   construction inputs, and a contract for the document linking an image to its
-   media, manifest, package hashes, answer-file revision, and tool versions.
-   CI-provable;
+   rendered file ever enters the repository tree. The stage owns the whole
+   credential lifecycle, not only the substitution: the value arrives as a
+   sensitive runtime input, never on a command line, in a log, or in evidence;
+   the rendered file is written to a restricted temporary location and removed
+   on every exit path including failure; setup residue that retains the value is
+   removed inside the guest; and the build credential is disabled or rotated
+   before sealing, so a sealed image never carries a working one;
+3. image identity and the provenance record -- CI-provable. Three identities
+   stay distinct and all three are bound together in provenance, because
+   collapsing any two makes a question unanswerable:
+
+   | Concept | Answers |
+   | --- | --- |
+   | `recipeDigest` | what was built -- the identity of the construction inputs |
+   | `runId` | which execution built it |
+   | vSphere artifact identity | which immutable artifact resulted |
+
+   Two builds from identical inputs share a `recipeDigest` and differ in `runId`
+   and artifact identity. A rebuild after any input changes differs in all three.
+   The record links an image to its media reference, manifest and schema version,
+   package identities and hashes, answer-file revision, and tool versions.
+
+   This stage also decides, explicitly, how an image-build result enters the
+   evidence contract. `contracts/evidence-envelope-2.schema.json` has closed
+   payloads and a bounded `resultKind`, so a new kind is a contract change and
+   not an enum edit made in passing: either version 3 of the envelope, or a
+   separate contract for build results. Record the choice in an ADR before
+   writing the schema;
 4. the vSphere builder configuration -- source definition, pinned plugin
-   versions, hardware and boot configuration, and the media reference. Proven by
-   `packer validate` in CI, which resolves what a syntax check would not;
+   versions, hardware and boot configuration, and the media reference. It
+   consumes the Stage 1 qualification record and reverifies the media at its own
+   input boundary, because a check performed by an earlier stage is a claim
+   about the past. Closes as **configuration validated in CI; execution lab
+   pending**: `packer validate` resolves references a syntax check would not,
+   and proves nothing about vSphere connectivity, media reachability, boot
+   behavior, or whether the build converts to a template;
 5. pre-generalization checks, generalization, shutdown, and sealing, with
-   evidence at each boundary. **Lab-only**; nothing here is CI-provable;
+   evidence at each boundary. **Lab-only**; nothing here is CI-provable.
+
+   Sealing is a positive gate, not the absence of a failure. An artifact may be
+   called a sealed candidate only when every one of these is affirmatively
+   true: pre-generalization checks succeeded; generalization succeeded;
+   shutdown was observed rather than assumed; credential and answer-file residue
+   is absent; and the provenance record is complete. Anything less produces an
+   artifact that is not a candidate, and it must not be named as one;
 6. provenance emission at seal time, binding the identity to the record.
    Lab-only, and the point at which a candidate becomes nameable.
 
@@ -1041,6 +1082,13 @@ Acceptance criteria:
   A value read from beside the artifact it claims to verify is not a check, and
   a runtime-computed hash treated as expected is the failure the glossary names;
 - a media mismatch fails the build, proven by a test that supplies a mismatch;
+- the qualification record is machine-consumed, not prose: an exact media
+  reference, the hash algorithm and expected digest, the independently obtained
+  checksum authority the digest came from, the selected edition or image index,
+  and the architecture and language. A build that guesses any of these is not
+  deterministic;
+- the builder reverifies the media against that record at its own input
+  boundary. Stage 1 verifying it once is a statement about the past;
 - the answer-file template carries no credential, and rendering fails closed on
   an unsubstituted placeholder. The boundary check sees the template, never a
   rendered copy;

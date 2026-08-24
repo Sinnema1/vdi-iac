@@ -17,7 +17,7 @@
 BeforeAll {
     $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
     $scripts = Join-Path $script:RepoRoot 'source-qualification' 'scripts'
-    foreach ($m in 'PackageManifest','RunIdentity','Evidence','SourceQualification','GuestAdapter','TransferBundle','GuestProvisioning') {
+    foreach ($m in 'PackageManifest','RunIdentity','Evidence','SourceQualification','GuestAdapter','TransferBundle','GuestProvisioning','MediaQualification') {
         Import-Module (Join-Path $scripts "$m.psm1") -Force
     }
 
@@ -364,5 +364,50 @@ Describe 'real file version information' -Skip:(-not $IsWindows) {
             $resolved | Should -Not -BeNullOrEmpty
             Test-Path -LiteralPath $resolved -PathType Container | Should -BeTrue -Because "$root must resolve"
         }
+    }
+}
+
+Describe 'installation media on real NTFS' -Skip:(-not $IsWindows) {
+
+    It 'refuses media reached through an NTFS junction' {
+        # The symbolic-link case runs off Windows; a junction needs no elevation
+        # to create, which makes it the form this is actually met in. Without
+        # this the media confinement rule has no Windows coverage at all, and
+        # the build execution context is the machine that resolves it.
+        $root = NewTempDir
+        $outside = NewTempDir
+        Set-Content -LiteralPath (Join-Path $outside 'windows.iso') -Value 'outside media' -Encoding utf8 -NoNewline
+        Set-Content -LiteralPath (Join-Path $outside 'witness.txt') -Value 'must survive' -Encoding utf8 -NoNewline
+
+        $inside = Join-Path $root 'media'
+        $null = New-Item -ItemType Junction -Path $inside -Target $outside
+
+        $digest = (Get-FileHash -LiteralPath (Join-Path $outside 'windows.iso') -Algorithm SHA256).Hash.ToLowerInvariant()
+        $referencePath = Join-Path $root 'media.json'
+        [ordered]@{
+            schemaVersion = 1
+            mediaId       = 'windows-baseline'
+            reference     = [ordered]@{ kind = 'file'; locator = 'media/windows.iso'; fileName = 'windows.iso' }
+            integrity     = [ordered]@{
+                algorithm = 'SHA256'; digest = $digest
+                authority = [ordered]@{
+                    kind = 'vendor-published'
+                    citation = 'https://vendor.example/security/checksums'
+                    retrievedUtc = '2026-01-01T00:00:00Z'
+                }
+            }
+            image         = [ordered]@{ edition = 'Windows Enterprise'; index = 1 }
+            platform      = [ordered]@{ architecture = 'x64'; language = 'en-US' }
+        } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $referencePath -Encoding utf8
+
+        $record = Invoke-MediaQualification -ReferencePath $referencePath -MediaRoot $root
+
+        # The digest would have matched had the junction been followed, so a
+        # passing outcome here would mean the redirection was taken.
+        $record.outcome | Should -Be 'failed'
+        $record.reasonCode | Should -Be 'media_link_rejected'
+        $record.integrity.observedDigest | Should -BeNullOrEmpty
+
+        (Get-Content -LiteralPath (Join-Path $outside 'witness.txt') -Raw) | Should -Be 'must survive'
     }
 }

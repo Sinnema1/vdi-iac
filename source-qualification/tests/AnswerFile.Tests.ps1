@@ -242,6 +242,27 @@ Describe 'the rendered file is short-lived' {
         }
     }
 
+    It 'restricts the rendered file to its owner on Windows' -Skip:(-not $IsWindows) {
+        # The Windows branch of the restriction runs on every rendering test,
+        # but nothing asserted what it produced: the code executing is not the
+        # same as the ACL being restrictive. Windows is the platform this
+        # actually ships on, so the claim needs proving there most of all.
+        $root = NewTempDir
+        $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
+
+        $acl = Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
+            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock { param($p) Get-Acl -LiteralPath $p }
+
+        # Inheritance off, or a permissive parent directory silently grants
+        # access the explicit rules never mention.
+        $acl.AreAccessRulesProtected | Should -BeTrue -Because 'inherited rules would bypass the explicit ones'
+
+        $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $identities = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) })
+        $identities.Count | Should -Be 1 -Because 'only the build identity may read a rendered credential'
+        $identities[0].Value | Should -Be $current.Value
+    }
+
     It 'restricts the file before any content is written' {
         # Writing first and restricting afterwards leaves a window in which the
         # rendered credential is readable by anything else on the machine.

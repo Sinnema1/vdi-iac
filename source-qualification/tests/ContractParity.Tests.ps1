@@ -100,3 +100,59 @@ Describe 'evidence refuses a version a manifest could not declare' {
         TryEnvelope 'guest-provisioning' $version | Should -Be 'accepted'
     }
 }
+
+Describe 'committed schema identifiers' {
+
+    BeforeAll {
+        $script:ContractsDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'contracts'
+        $script:SchemaFiles = @(Get-ChildItem -Path $script:ContractsDir -Filter '*.schema.json' -File -Recurse)
+    }
+
+    It 'finds schemas to check' {
+        # Without this the rules below pass vacuously if the directory moves.
+        $script:SchemaFiles.Count | Should -BeGreaterThan 3
+    }
+
+    It 'uses the example namespace for every schema identifier' {
+        # A schema $id is published content. An identifier naming a real host or
+        # account carries an affiliation into a document that is copied,
+        # embedded, and quoted far from this repository.
+        #
+        # The boundary scanner does not catch this: the value is a
+        # well-formed URL and matches no structural rule. It is a contract rule,
+        # so it is enforced by the contract tests instead.
+        $offenders = foreach ($file in $script:SchemaFiles) {
+            $id = (Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json).'$id'
+            if ($id -notmatch '^https://example\.invalid/schemas/[a-z0-9][a-z0-9-]*\.json$') {
+                "$($file.Name): $id"
+            }
+        }
+        $offenders | Should -BeNullOrEmpty
+    }
+
+    It 'gives every schema a distinct identifier' {
+        $ids = foreach ($file in $script:SchemaFiles) {
+            (Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json).'$id'
+        }
+        ($ids | Sort-Object -Unique).Count | Should -Be $script:SchemaFiles.Count
+    }
+
+    It 'names each schema identifier after its file' {
+        # A copied schema whose $id still names the file it came from is the way
+        # two contracts end up claiming one identity.
+        #
+        # One documented exception. package-manifest.schema.json was published
+        # before the versioned file-naming convention existed, so its file
+        # carries no version and its identifier does. The file is frozen
+        # byte-for-byte by ADR 1 and cannot be renamed or edited to agree, so
+        # the exception is recorded here rather than the rule being dropped.
+        $frozen = @{ 'package-manifest.schema.json' = 'https://example.invalid/schemas/package-manifest-1.json' }
+
+        foreach ($file in $script:SchemaFiles) {
+            $id = (Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json).'$id'
+            $expected = if ($frozen.ContainsKey($file.Name)) { $frozen[$file.Name] }
+                        else { 'https://example.invalid/schemas/' + ($file.Name -replace '\.schema\.json$', '.json') }
+            $id | Should -Be $expected -Because "$($file.Name) should identify itself"
+        }
+    }
+}

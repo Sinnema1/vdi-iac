@@ -142,7 +142,7 @@ jobs:
           # The example is the shape people copy. One that does not validate
           # fails only when someone tries to build from it.
           Import-Module ./source-qualification/scripts/MediaQualification.psm1 -Force
-          $examples = Get-ChildItem -Path 'packer/media' -Filter '*.media.json.example' -File -ErrorAction SilentlyContinue
+          $examples = Get-ChildItem -Path 'packer/media' -Filter '*.media.json.example' -File -Recurse -ErrorAction SilentlyContinue
           if (-not $examples) { throw 'No media reference examples found to validate.' }
           foreach ($e in $examples) {
             # Copied to a real name first: Import-MediaReference validates the
@@ -153,8 +153,12 @@ jobs:
             Write-Host "  valid   $($e.Name)"
           }
 
-          $live = Get-ChildItem -Path 'packer/media' -Filter '*.media.json' -File -ErrorAction SilentlyContinue
-          if ($live) { throw "A live media reference is committed: $($live.Name -join ', ')" }
+          # Recursive: a top-level search would miss packer/media/windows/live.media.json,
+          # and nothing requires this directory to stay flat. This repository is a
+          # reference implementation and carries the synthetic example only; a live
+          # reference belongs to the repository that operates a build.
+          $live = Get-ChildItem -Path 'packer/media' -Filter '*.media.json' -File -Recurse -ErrorAction SilentlyContinue
+          if ($live) { throw "A live media reference is committed: $($live.FullName -join ', ')" }
 
   packer-harness:
     name: Packer harness

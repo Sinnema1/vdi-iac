@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/Sinnema1/vdi-iac/contracts/media-qualification-1.schema.json",
+  "$id": "https://example.invalid/schemas/media-qualification-1.json",
   "title": "Installation media qualification record, version 1",
-  "description": "The machine-consumed result of qualifying installation media. Produced host-side before a build and consumed by the Packer builder, which reverifies the media against it at its own input boundary. This record is a statement about a specific artifact at a specific time; it does not relieve a later consumer of checking.",
+  "description": "The machine-consumed result of qualifying installation media. Produced host-side before a build and consumed by the Packer builder, which reverifies the media against it at its own input boundary. Scope: this record fingerprints the artifact and carries forward the declared installation selection. It does not establish that the media actually contains the edition, index, architecture, or language declared -- nothing here opens the ISO. The pre-seal checks compare the installed operating system against this declared intent.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -33,12 +33,17 @@
     "outcome": {
       "description": "Only a passed record may be consumed by a build. A failed record exists so a refusal is recorded rather than inferred from an absent file.",
       "type": "string",
-      "enum": ["passed", "failed"]
+      "enum": [
+        "passed",
+        "failed"
+      ]
     },
     "reasonCode": {
       "description": "Present when and only when the outcome is failed.",
       "oneOf": [
-        { "type": "null" },
+        {
+          "type": "null"
+        },
         {
           "type": "string",
           "enum": [
@@ -49,7 +54,6 @@
             "media_size_mismatch",
             "integrity_mismatch",
             "digest_length_mismatch",
-            "authority_not_independent",
             "unexpected_error"
           ]
         }
@@ -63,9 +67,18 @@
       "description": "The exact media reference this record qualified, carried forward so the builder does not have to re-read the declaration to know what it is verifying.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "locator", "fileName"],
+      "required": [
+        "kind",
+        "locator",
+        "fileName"
+      ],
       "properties": {
-        "kind": { "type": "string", "enum": ["file"] },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file"
+          ]
+        },
         "locator": {
           "type": "string",
           "minLength": 1,
@@ -78,18 +91,30 @@
           "maxLength": 255,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$"
         },
-        "sizeBytes": { "type": "integer", "minimum": 1 }
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "integrity": {
-      "description": "The algorithm and expected digest, and the independently obtained authority the digest came from. The observed digest is recorded separately so a reader can see the comparison rather than take its result on trust.",
+      "description": "The algorithm, the expected digest, and the digest actually observed, recorded separately so a reader can see the comparison rather than take its result on trust. Digest lengths are checked against the algorithm before this record may be written.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["algorithm", "expectedDigest", "observedDigest", "authority"],
+      "required": [
+        "algorithm",
+        "expectedDigest",
+        "observedDigest",
+        "authority"
+      ],
       "properties": {
         "algorithm": {
           "type": "string",
-          "enum": ["SHA256", "SHA384", "SHA512"]
+          "enum": [
+            "SHA256",
+            "SHA384",
+            "SHA512"
+          ]
         },
         "expectedDigest": {
           "type": "string",
@@ -98,37 +123,50 @@
         "observedDigest": {
           "description": "Null when the artifact could not be read at all. Never absent, so a record cannot imply a comparison that did not happen.",
           "oneOf": [
-            { "type": "null" },
-            { "type": "string", "pattern": "^[0-9a-f]{64}$|^[0-9a-f]{96}$|^[0-9a-f]{128}$" }
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$|^[0-9a-f]{96}$|^[0-9a-f]{128}$"
+            }
           ]
         },
         "authority": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "citation", "retrievedUtc"],
+          "required": [
+            "kind",
+            "citation",
+            "retrievedUtc"
+          ],
           "properties": {
             "kind": {
               "type": "string",
-              "enum": ["vendor-published", "operator-attested"]
+              "const": "vendor-published"
             },
             "citation": {
               "type": "string",
-              "minLength": 1,
+              "minLength": 12,
               "maxLength": 1024,
-              "pattern": "^[ -~]+$"
+              "pattern": "^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(/[!-~]*)?$"
             },
             "retrievedUtc": {
               "type": "string",
               "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z$"
             }
-          }
+          },
+          "description": "Where the expected digest was obtained. Independence from the artifact is NOT proven by this contract: it is constrained structurally -- the citation must be an HTTPS reference, which a path beside the media cannot be -- and otherwise attested by the reviewer who approved the reference. Do not read a valid citation as a verified one."
         }
       }
     },
     "image": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["edition", "index"],
+      "required": [
+        "edition",
+        "index"
+      ],
       "properties": {
         "edition": {
           "type": "string",
@@ -136,20 +174,35 @@
           "maxLength": 128,
           "pattern": "^[ -~]+$"
         },
-        "index": { "type": "integer", "minimum": 1, "maximum": 64 }
-      }
+        "index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      },
+      "description": "The declared installation selection, carried forward. Intent, not an observation of the media's contents."
     },
     "platform": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["architecture", "language"],
+      "required": [
+        "architecture",
+        "language"
+      ],
       "properties": {
-        "architecture": { "type": "string", "enum": ["x64", "arm64"] },
+        "architecture": {
+          "type": "string",
+          "enum": [
+            "x64",
+            "arm64"
+          ]
+        },
         "language": {
           "type": "string",
           "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
         }
-      }
+      },
+      "description": "The declared architecture and language, carried forward. Intent, not an observation of the media's contents."
     }
   }
 }

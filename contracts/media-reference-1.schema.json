@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/Sinnema1/vdi-iac/contracts/media-reference-1.schema.json",
+  "$id": "https://example.invalid/schemas/media-reference-1.json",
   "title": "Installation media reference, version 1",
   "description": "The declared identity of the installation media a build constructs from. Version-controlled and reviewed before a build runs. This is the input to media qualification, not its result: it states what the media must be, and qualification decides whether the artifact presented is that media.",
   "type": "object",
@@ -68,7 +68,7 @@
       }
     },
     "integrity": {
-      "description": "The expected digest and, separately, where that digest came from. A digest published beside the artifact it claims to verify is not an independent authority.",
+      "description": "The expected digest and where it came from. The digest length is checked against the algorithm during qualification, which no per-field constraint can express.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -91,7 +91,7 @@
           "pattern": "^[0-9a-f]{64}$|^[0-9a-f]{96}$|^[0-9a-f]{128}$"
         },
         "authority": {
-          "description": "The independently obtained source of the expected digest, recorded so a reviewer can check that it is not the artifact's own neighbour.",
+          "description": "Where the expected digest was obtained. Independence from the artifact is NOT proven by this contract: it is constrained structurally -- the citation must be an HTTPS reference, which a path beside the media cannot be -- and otherwise attested by the reviewer who approved the reference. Do not read a valid citation as a verified one.",
           "type": "object",
           "additionalProperties": false,
           "required": [
@@ -101,19 +101,16 @@
           ],
           "properties": {
             "kind": {
-              "description": "vendor-published is a checksum the media publisher states through a channel separate from the artifact. operator-attested is a human recording a value they verified out of band, and is weaker.",
+              "description": "Only vendor-published exists. A checksum the media publisher states through a channel separate from the artifact is the single authority this contract accepts; an operator recording a value they read elsewhere is that same vendor-published checksum, and is cited as such rather than given a weaker kind of its own.",
               "type": "string",
-              "enum": [
-                "vendor-published",
-                "operator-attested"
-              ]
+              "const": "vendor-published"
             },
             "citation": {
-              "description": "Where the digest was read from, exactly enough for someone else to look it up.",
+              "description": "The HTTPS reference the digest was read from. Structurally validated so it cannot be a path beside the artifact, and specific enough for someone else to look it up.",
               "type": "string",
-              "minLength": 1,
+              "minLength": 12,
               "maxLength": 1024,
-              "pattern": "^[ -~]+$"
+              "pattern": "^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(/[!-~]*)?$"
             },
             "retrievedUtc": {
               "type": "string",
@@ -124,7 +121,7 @@
       }
     },
     "image": {
-      "description": "Which image inside the media is installed. Media commonly carries several editions, and a build that does not state one is not deterministic.",
+      "description": "The declared installation selection: which image inside the media is intended to be installed. Stage 1 records this intent and does not open the media to confirm it. The pre-seal checks compare the operating system actually installed against what is declared here.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -148,7 +145,7 @@
       }
     },
     "platform": {
-      "description": "Architecture and language. Both change what is installed, and neither is inferable from the file name.",
+      "description": "The declared architecture and language. Recorded intent, not an observation: Stage 1 does not inspect the media to confirm either. Both change what is installed and neither is inferable from a file name, which is why they are declared rather than guessed.",
       "type": "object",
       "additionalProperties": false,
       "required": [

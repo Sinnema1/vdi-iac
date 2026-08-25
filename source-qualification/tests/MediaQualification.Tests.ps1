@@ -143,52 +143,57 @@ Describe 'the media reference contract' {
     }
 }
 
-Describe 'checksum authority independence' {
+Describe 'the checksum authority' {
 
-    It 'refuses a checksum published beside the artifact it verifies' {
-        # The rule ADR 6 turns on. An attacker who can replace the media can
-        # replace a digest sitting next to it, so that digest proves only that
-        # the file was not corrupted in transit.
-        $root = NewTempDir
-        $media = NewMediaFile -Root $root
-        $path = NewReference -Path (Join-Path $root 'media.json') -Digest $media.Digest `
-            -Locator 'vendor/windows.iso' -Citation 'vendor/SHA256SUMS'
-
-        { Import-MediaReference -Path $path } |
-            Should -Throw -ExpectedMessage '*not an independent authority*'
-    }
-
-    It 'refuses it regardless of separator spelling or case' {
-        $root = NewTempDir
-        $media = NewMediaFile -Root $root
-        $path = NewReference -Path (Join-Path $root 'media.json') -Digest $media.Digest `
-            -Locator 'Vendor/Media/windows.iso' -Citation 'VENDOR\MEDIA\checksums.txt'
-
-        { Import-MediaReference -Path $path } |
-            Should -Throw -ExpectedMessage '*not an independent authority*'
-    }
-
-    It 'accepts an authority published somewhere else entirely' {
+    It 'accepts an HTTPS citation' {
         $root = NewTempDir
         $media = NewMediaFile -Root $root
         $path = NewReference -Path (Join-Path $root 'media.json') -Digest $media.Digest `
             -Locator 'vendor/windows.iso' -Citation 'https://vendor.example/security/checksums'
-
         { Import-MediaReference -Path $path } | Should -Not -Throw
     }
 
-    It 'records an operator attestation as the weaker authority it is' {
+    It 'rejects a citation that is a path rather than a reference: <value>' -ForEach @(
+        @{ value = 'vendor/SHA256SUMS' }
+        @{ value = './vendor/SHA256SUMS' }
+        @{ value = 'SHA256SUMS' }
+        @{ value = 'C:/media/SHA256SUMS' }
+        @{ value = '../SHA256SUMS' }
+    ) {
+        # The structural rule replaces a path comparison that could be spelled
+        # around -- './vendor/...' defeated it, and root-level media never
+        # entered it at all. A filesystem path cannot be an HTTPS reference, so
+        # the whole family is refused by shape rather than case by case.
         $root = NewTempDir
         $media = NewMediaFile -Root $root
         $path = NewReference -Path (Join-Path $root 'media.json') -Digest $media.Digest `
-            -AuthorityKind 'operator-attested' -Citation 'read from the vendor portal on 2026-01-01'
-        (Import-MediaReference -Path $path).integrity.authority.kind | Should -Be 'operator-attested'
+            -Locator 'vendor/windows.iso' -Citation $value
+        { Import-MediaReference -Path $path } | Should -Throw
     }
 
-    It 'rejects an authority kind outside the enum' {
+    It 'rejects an insecure or malformed citation: <value>' -ForEach @(
+        @{ value = 'http://vendor.example/checksums' }
+        @{ value = 'https://vendor' }
+        @{ value = 'https://' }
+        @{ value = 'ftp://vendor.example/checksums' }
+        @{ value = 'https://vendor.example/check sums' }
+    ) {
         $root = NewTempDir
         $media = NewMediaFile -Root $root
-        $path = NewReference -Path (Join-Path $root 'media.json') -Digest $media.Digest -AuthorityKind 'trusted'
+        $path = NewReference -Path (Join-Path $root 'media.json') -Digest $media.Digest -Citation $value
+        { Import-MediaReference -Path $path } | Should -Throw
+    }
+
+    It 'rejects any authority kind other than vendor-published: <value>' -ForEach @(
+        @{ value = 'operator-attested' }, @{ value = 'trusted' }, @{ value = '' }
+    ) {
+        # operator-attested was removed. An operator recording a checksum they
+        # read from a vendor page is citing that vendor page, and the citation
+        # already says so; a second kind only offered a weaker option with no
+        # distinguishable meaning.
+        $root = NewTempDir
+        $media = NewMediaFile -Root $root
+        $path = NewReference -Path (Join-Path $root 'media.json') -Digest $media.Digest -AuthorityKind $value
         { Import-MediaReference -Path $path } | Should -Throw
     }
 }
@@ -386,6 +391,26 @@ Describe 'the qualification record contract' {
             Should -Throw -ExpectedMessage '*digests that do not match*'
     }
 
+    It 'refuses a record whose algorithm and expected digest disagree' {
+        # The record is as capable of carrying a contradictory pair as the
+        # reference is, and it is the document the builder consumes.
+        $root = NewTempDir
+        $record = NewRecord -Root $root
+        $record.integrity.algorithm = 'SHA512'
+
+        { Save-MediaQualificationRecord -Record $record -Path (Join-Path $root 'q.json') } |
+            Should -Throw -ExpectedMessage '*SHA512 expected digest is 128 characters*'
+    }
+
+    It 'refuses a record whose observed digest is the wrong length for its algorithm' {
+        $root = NewTempDir
+        $record = NewRecord -Root $root
+        $record.integrity.observedDigest = 'd' * 96
+
+        { Save-MediaQualificationRecord -Record $record -Path (Join-Path $root 'q.json') } |
+            Should -Throw -ExpectedMessage '*observed digest*'
+    }
+
     It 'refuses to write a failed record with no reason code' {
         $root = NewTempDir
         $record = NewRecord -Root $root
@@ -425,10 +450,15 @@ Describe 'the committed media reference example' {
             Should -Be ('0' * 64)
     }
 
-    It 'is an example only, never a live reference' {
-        # A committed live reference would pin this repository to one artifact
-        # and invite a real digest into public content.
-        Get-ChildItem -Path (Join-Path $script:RepoRoot 'packer' 'media') -Filter '*.media.json' -File |
+    It 'is an example only, never a live reference, at any depth' {
+        # This repository is a reference implementation and carries the
+        # synthetic example only. A live reference names a real artifact and its
+        # digest, and belongs in the repository that operates a build.
+        #
+        # Searched recursively: a top-level search would miss
+        # packer/media/windows/live.media.json, and the directory is not
+        # required to stay flat.
+        Get-ChildItem -Path (Join-Path $script:RepoRoot 'packer' 'media') -Filter '*.media.json' -File -Recurse |
             Should -BeNullOrEmpty
     }
 }

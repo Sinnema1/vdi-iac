@@ -1025,7 +1025,15 @@ deliberate: everything provable without a lab comes first, so the untestable
 surface is as small as possible when a target finally exists.
 
 1. media qualification -- an exact media reference resolved and verified against
-   a separately published checksum, with evidence. Host-side and CI-provable;
+   a separately published checksum, with evidence. Host-side and CI-provable.
+
+   Scope, stated so it is not overread: this stage **fingerprints the artifact
+   and records the declared installation selection**. It does not open the media,
+   so it does not establish that the edition, index, architecture, and language
+   are what the reference claims. Those are intent. The pre-seal checks in
+   stage 5 compare the operating system actually installed against that intent,
+   which is where the claim is settled. Do not add ISO-inspection tooling to
+   make this stage's wording stronger;
 2. the answer-file contract -- a committed template, runtime substitution, and a
    fail-closed check for unsubstituted placeholders. CI-provable, and no
    rendered file ever enters the repository tree. The stage owns the whole
@@ -1082,6 +1090,11 @@ Acceptance criteria:
   A value read from beside the artifact it claims to verify is not a check, and
   a runtime-computed hash treated as expected is the failure the glossary names;
 - a media mismatch fails the build, proven by a test that supplies a mismatch;
+- this repository holds the synthetic `.example` reference only. A live media
+  reference names a real artifact, its digest, and where it came from, and is
+  version-controlled by the repository that consumes this one to operate a
+  build. CI fails if a live reference is committed here, searching recursively
+  so a nested one is not missed;
 - the qualification record is machine-consumed, not prose: an exact media
   reference, the hash algorithm and expected digest, the independently obtained
   checksum authority the digest came from, the selected edition or image index,
@@ -1089,23 +1102,35 @@ Acceptance criteria:
   deterministic;
 - the builder reverifies the media against that record at its own input
   boundary. Stage 1 verifying it once is a statement about the past;
-- the answer-file template carries no credential, and rendering fails closed on
-  an unsubstituted placeholder. The boundary check sees the template, never a
-  rendered copy;
+- the **committed template** carries no credential, and rendering fails closed
+  on an unsubstituted placeholder. The **rendered runtime file is an ephemeral
+  secret**: it holds a working credential for as long as it exists, so it is
+  written to a restricted location, removed on every exit path, and never
+  described as safe merely because the template was. The boundary check sees the
+  template, never a rendered copy;
 - image identity is derived from construction inputs. A timestamp, a display
   name, or a sequence number is not an identity, and a test asserting only that
   some identifier exists would accept all three;
 - the provenance record names the media reference and checksum, the manifest and
   its schema version, package identities and hashes, the answer-file revision,
-  and the tool versions, and is emitted as evidence under the existing envelope;
+  and the tool versions. It is emitted under **the evidence contract the Stage 3
+  ADR selects** -- `evidence-envelope-2` has closed payloads and a bounded
+  `resultKind`, so an image-build result does not belong to it by default and
+  adding one is a contract change, not an enum edit;
+- the pre-seal checks compare the installed operating system -- its edition,
+  architecture, and language -- against the intent declared in the media
+  reference. Media qualification proved the artifact's identity, not its
+  contents, and this is where the two are reconciled;
 - generalization runs before shutdown, and sealing after it. A sealed image that
   was never generalized cannot be cloned safely, and ordering asserted only by
   reading configuration text is the gap Increment 2 closed twice;
 - a candidate image is never modified in place. A content change produces a new
   build and a new identity;
 - **no image is described as sealed until a real vSphere build has completed and
-  produced the provenance record.** Stages 1 to 4 close as CI-proven; stages 5
-  and 6 close as implementation complete, lab validation pending.
+  produced the provenance record.** Stages 1 to 3 close as CI-proven. Stage 4
+  closes as **configuration validated in CI; execution lab pending** -- it is not
+  CI-proven, because nothing in CI runs it. Stages 5 and 6 close as
+  implementation complete, lab validation pending.
 
 ### Increment 4: Sealed-image validation
 

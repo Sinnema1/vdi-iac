@@ -15,8 +15,22 @@
     The independence of the checksum authority is the point of this stage. A
     digest published beside the artifact it claims to verify proves only that the
     file was not corrupted in transit; an attacker who can replace the artifact
-    can replace its neighbour. The reference records where the digest came from,
-    and qualification refuses an authority that names the media's own location.
+    can replace its neighbour.
+
+    That independence is NOT proven here, and this module should not be read as
+    proving it. What it does is narrow the space structurally: the authority kind
+    is fixed, and the citation must be an HTTPS reference, which a path beside
+    the media cannot be. Whether the cited location is genuinely controlled by
+    the media's publisher is attested by the reviewer who approves the reference.
+    An earlier version compared the citation against the media's own directory,
+    which read as a proof while missing equivalent spellings and root-level
+    media entirely; a structural rule that holds is worth more than a
+    path comparison that looks thorough and does not.
+
+    Scope: this stage fingerprints the artifact and records the declared
+    installation selection. It does not open the media, so it cannot confirm the
+    edition, index, architecture, or language are what the reference claims. The
+    pre-seal checks compare the installed operating system against that intent.
 #>
 
 Set-StrictMode -Version 3.0
@@ -29,6 +43,34 @@ $script:RecordSchema = Join-Path $PSScriptRoot '..' '..' 'contracts' 'media-qual
 # Hard-coded, never derived from a declared value. Length is checked against the
 # algorithm so a SHA256 digest cannot be presented as a SHA512 expectation.
 $script:DigestLength = @{ SHA256 = 64; SHA384 = 96; SHA512 = 128 }
+
+function Get-DigestLengthMismatch {
+    <#
+    .SYNOPSIS
+        Returns a description when a digest length disagrees with its algorithm, or null.
+
+    .DESCRIPTION
+        Shared by the authored reference and the generated record. Both patterns
+        in the schema admit 64, 96, and 128 characters, so a SHA512 declaration
+        beside a 64-character digest satisfies every per-field constraint. Only
+        the pairing is wrong, and a record is as capable of carrying that pairing
+        as a reference is.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Algorithm,
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Digest,
+        [Parameter()] [string] $Label = 'digest'
+    )
+
+    if (-not $script:DigestLength.Contains($Algorithm)) { return "unknown digest algorithm '$Algorithm'" }
+    $expected = $script:DigestLength[$Algorithm]
+    if ($Digest.Length -ne $expected) {
+        return "a $Algorithm $Label is $expected characters; this one is $($Digest.Length)"
+    }
+    $null
+}
 
 function NewMediaError {
     param([string] $Code, [string] $Message)
@@ -67,44 +109,10 @@ function Import-MediaReference {
 
     $reference = $raw | ConvertFrom-Json
 
-    $expectedLength = $script:DigestLength[$reference.integrity.algorithm]
-    if ($reference.integrity.digest.Length -ne $expectedLength) {
-        throw (NewMediaError -Code 'digest_length_mismatch' `
-                -Message "A $($reference.integrity.algorithm) digest is $expectedLength characters; this reference declares $($reference.integrity.digest.Length).")
-    }
-
-    Assert-ChecksumAuthorityIndependent -Reference $reference
+    $mismatch = Get-DigestLengthMismatch -Algorithm $reference.integrity.algorithm -Digest $reference.integrity.digest
+    if ($mismatch) { throw (NewMediaError -Code 'digest_length_mismatch' -Message "Media reference declares $mismatch.") }
 
     $reference
-}
-
-function Assert-ChecksumAuthorityIndependent {
-    <#
-    .SYNOPSIS
-        Refuses a checksum authority that is the artifact's own neighbour.
-
-    .DESCRIPTION
-        The rule ADR 6 turns on. A digest is only evidence if it was obtained
-        somewhere the artifact's publisher-of-record controls and the artifact's
-        host does not. This cannot catch every dependent authority -- a citation
-        is free text and a determined author can write anything -- so it refuses
-        the specific, checkable case: a citation naming the same directory the
-        media is read from, which is how the mistake is actually made.
-    #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory)] $Reference)
-
-    $mediaDirectory = Split-Path -Path $Reference.reference.locator -Parent
-    if (-not $mediaDirectory) { return }
-
-    $normalize = { param([string] $Value) ($Value -replace '\\', '/').TrimEnd('/').ToLowerInvariant() }
-    $citation = & $normalize $Reference.integrity.authority.citation
-    $directory = & $normalize $mediaDirectory
-
-    if ($citation.StartsWith($directory, [System.StringComparison]::Ordinal)) {
-        throw (NewMediaError -Code 'authority_not_independent' `
-                -Message 'The checksum authority names the location the media is read from. A digest stored beside the artifact it verifies is not an independent authority.')
-    }
 }
 
 function Invoke-MediaQualification {
@@ -273,6 +281,19 @@ function Test-MediaQualificationRecord {
     [OutputType([string])]
     param([Parameter(Mandatory)] $Record)
 
+    # Applied to every record, passed or failed. A failed record still states an
+    # algorithm and an expected digest, and a contradictory pair there would be
+    # carried into provenance unchallenged.
+    $mismatch = Get-DigestLengthMismatch -Algorithm $Record.integrity.algorithm `
+        -Digest $Record.integrity.expectedDigest -Label 'expected digest'
+    if ($mismatch) { return $mismatch }
+
+    if ($Record.integrity.observedDigest) {
+        $mismatch = Get-DigestLengthMismatch -Algorithm $Record.integrity.algorithm `
+            -Digest $Record.integrity.observedDigest -Label 'observed digest'
+        if ($mismatch) { return $mismatch }
+    }
+
     if ($Record.outcome -eq 'passed') {
         if ($Record.reasonCode) { return 'a passed record carries a reason code' }
         if (-not $Record.integrity.observedDigest) { return 'a passed record has no observed digest' }
@@ -321,4 +342,4 @@ function Save-MediaQualificationRecord {
     $Path
 }
 
-Export-ModuleMember -Function Import-MediaReference, Invoke-MediaQualification, Resolve-MediaPath, Test-MediaQualificationRecord, Save-MediaQualificationRecord
+Export-ModuleMember -Function Import-MediaReference, Invoke-MediaQualification, Resolve-MediaPath, Get-DigestLengthMismatch, Test-MediaQualificationRecord, Save-MediaQualificationRecord

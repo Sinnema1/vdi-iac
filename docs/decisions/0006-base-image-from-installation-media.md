@@ -50,15 +50,25 @@ Consequences that follow directly:
 - **Installation is unattended and declarative.** An answer file drives Windows
   setup. It is a build input like any other: version-controlled, reviewed, and
   pinned.
-- **The answer file never carries a real credential.** It requires an
-  administrator password, and a committed answer file containing one would
-  publish it. The repository holds a template with placeholders; values are
-  injected at runtime from the same secret path the harness already uses, and a
-  check fails the build if an unsubstituted placeholder survives into the file
-  handed to setup.
+- **The committed template never carries a credential; the rendered file is an
+  ephemeral secret.** Unattended setup requires an administrator password, and a
+  committed answer file containing one would publish it. The repository holds a
+  template with placeholders. The file actually handed to setup holds a working
+  credential for as long as it exists, so it is rendered to a restricted
+  location, removed on every exit path including failure, and never treated as
+  safe on the grounds that the template was.
 - **Provenance records the media.** The media reference, its expected checksum,
   and the answer-file revision belong in the provenance record beside the
-  manifest and package hashes.
+  manifest and package hashes. Which evidence contract carries that record is
+  decided in Increment 3 stage 3, not assumed: `evidence-envelope-2` has closed
+  payloads and a bounded `resultKind`, and an image-build result does not join
+  it by default.
+
+- **Qualification fingerprints media; it does not inspect it.** Verifying a
+  digest establishes which artifact is present. It does not establish that the
+  artifact contains the edition, architecture, or language the reference
+  declares -- those are recorded intent, reconciled against the installed
+  operating system by the pre-seal checks.
 
 ## Alternatives considered
 
@@ -108,3 +118,9 @@ Revisit only if a concrete requirement appears; nothing here forecloses it.
 - Sealing must produce an identity derived from the construction inputs. A test
   asserting only that some identifier exists would pass against a timestamp or a
   display name, which section 9's glossary explicitly excludes.
+- Checksum-authority independence is **not** proven by code and must not be
+  described as though it were. The contract narrows it structurally -- one
+  authority kind, and a citation that must be an HTTPS reference rather than a
+  path -- and a reviewer attests that the cited location belongs to the media's
+  publisher. A test suite cannot establish that last part, and a rule that
+  appeared to would invite the review to be skipped.

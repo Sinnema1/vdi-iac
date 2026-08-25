@@ -43,6 +43,7 @@ What exists today:
 | Guest provisioning and transfer bundle | implemented; lab validation pending |
 | Packer lab harness (null builder) | implemented; lab validation pending |
 | Lab scenarios (positive, payload tamper, descriptor tamper) | runnable against a target; never executed |
+| Image identity and provenance contract | decided ([ADR 7](docs/decisions/0007-image-identity-and-provenance.md)); implementation in progress |
 | Packer image construction and sealing | not started |
 | Terraform and Citrix MCS provisioning | not started |
 | Promotion, reconciliation, and retirement | not started |

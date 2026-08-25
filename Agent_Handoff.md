@@ -1070,12 +1070,13 @@ surface is as small as possible when a target finally exists.
    The record links an image to its media reference, manifest and schema version,
    package identities and hashes, answer-file revision, and tool versions.
 
-   This stage also decides, explicitly, how an image-build result enters the
-   evidence contract. `contracts/evidence-envelope-2.schema.json` has closed
-   payloads and a bounded `resultKind`, so a new kind is a contract change and
-   not an enum edit made in passing: either version 3 of the envelope, or a
-   separate contract for build results. Record the choice in an ADR before
-   writing the schema;
+   Settled by [ADR 7](docs/decisions/0007-image-identity-and-provenance.md):
+   the build result enters the evidence contract as `evidence-envelope-3`, a new
+   file adding the `image-build` kind, with version 2 left exactly as it is. A
+   separate build-result contract was rejected because it would restate run
+   identity and redaction rules in a second place. ADR 7 also fixes what
+   `recipeDigest` is computed over and what is excluded from it, and defers
+   binding to a vSphere artifact until a real build produces one;
 4. the vSphere builder configuration -- source definition, pinned plugin
    versions, hardware and boot configuration, and the media reference. It
    consumes the Stage 1 qualification record and reverifies the media at its own
@@ -1272,9 +1273,15 @@ Keep these as explicit decisions until implementation evidence or requirements r
   builds construct from installation media;
 - artifact publication and reference-resolution mechanism, including whether
   Content Library is used;
+- ~~how an image-build result enters the evidence contract~~ resolved by
+  [ADR 7](docs/decisions/0007-image-identity-and-provenance.md): a new
+  `evidence-envelope-3`, not an edit to version 2;
 - package-source adapter and retention expectations;
 - ~~canonical package-manifest serialization and minimum fields~~ resolved by [ADR 1](docs/decisions/0001-package-manifest-serialization.md);
-- image identity and versioning convention;
+- ~~image identity and versioning convention~~ resolved by
+  [ADR 7](docs/decisions/0007-image-identity-and-provenance.md): `recipeDigest`
+  for the inputs, `runId` for the execution, and the vSphere managed object
+  reference for the artifact, all three bound in provenance;
 - evidence schema and durable evidence store;
 - CI implementation and approval mechanism;
 - Packer runner model and secret-injection mechanism;

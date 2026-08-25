@@ -1058,7 +1058,7 @@ surface is as small as possible when a target finally exists.
    rotating the build credential is defined here and **implemented in stage 5**,
    before sealing, so that a sealed image never carries a working one. The table
    above is authoritative on what exists today;
-3. image identity and the provenance record -- CI-provable. Three identities
+3. image identity and the provenance record -- **complete, CI-proven**. Three identities
    stay distinct and all three are bound together in provenance, because
    collapsing any two makes a question unanswerable:
 

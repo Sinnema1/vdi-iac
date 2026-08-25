@@ -1,0 +1,730 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.invalid/schemas/evidence-envelope-3.json",
+  "title": "Evidence envelope, version 3",
+  "description": "Version 2 plus the image-build result kind. Every other rule is carried over unchanged so one envelope shape describes every stage; version 2 is left byte-stable and keeps validating what it always validated, because a published contract version is never edited in place. Conditional rules -- which fields a build state requires or forbids -- are NOT expressed here: Test-Json does not enforce draft-07 if/then, so a conditional written into this file would validate every document while reading as a constraint. Those rules live in the semantic validator beside it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "resultSchemaVersion",
+    "resultKind",
+    "runId",
+    "manifestSchemaVersion",
+    "startedUtc",
+    "completedUtc",
+    "outcome",
+    "payload"
+  ],
+  "properties": {
+    "resultSchemaVersion": {
+      "enum": [
+        3
+      ]
+    },
+    "resultKind": {
+      "description": "Which stage produced this. Each kind selects a closed payload definition.",
+      "enum": [
+        "source-qualification",
+        "guest-provisioning",
+        "build-orchestration",
+        "image-build"
+      ]
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "manifestSchemaVersion": {
+      "enum": [
+        1,
+        2
+      ],
+      "description": "Manifest version the run consumed. Required: an envelope carrying only the result version reintroduces the ambiguity version 2 exists to remove."
+    },
+    "startedUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "outcome": {
+      "enum": [
+        "passed",
+        "failed",
+        "incomplete",
+        "skipped"
+      ]
+    },
+    "toolVersion": {
+      "type": "string",
+      "pattern": "^[ -~]{1,64}$"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "resultKind": {
+          "enum": [
+            "source-qualification"
+          ]
+        },
+        "payload": {
+          "$ref": "#/definitions/sourceQualificationPayload"
+        }
+      }
+    },
+    {
+      "properties": {
+        "resultKind": {
+          "enum": [
+            "guest-provisioning"
+          ]
+        },
+        "payload": {
+          "$ref": "#/definitions/guestProvisioningPayload"
+        }
+      }
+    },
+    {
+      "properties": {
+        "resultKind": {
+          "enum": [
+            "build-orchestration"
+          ]
+        },
+        "payload": {
+          "$ref": "#/definitions/buildOrchestrationPayload"
+        }
+      }
+    },
+    {
+      "properties": {
+        "resultKind": {
+          "enum": [
+            "image-build"
+          ]
+        },
+        "payload": {
+          "$ref": "#/definitions/imageBuildPayload"
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "sourceQualificationPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packageCount",
+        "passedCount",
+        "failedRequiredCount",
+        "failedOptionalCount",
+        "cleanupOutcome",
+        "packages"
+      ],
+      "properties": {
+        "packageCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedRequiredCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedOptionalCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cleanupOutcome": {
+          "enum": [
+            "removed",
+            "retained",
+            "failed",
+            "not-attempted"
+          ]
+        },
+        "packages": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/definitions/qualificationPackage"
+          }
+        }
+      }
+    },
+    "guestProvisioningPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "restartRequired",
+        "packageCount",
+        "passedCount",
+        "failedRequiredCount",
+        "cleanupOutcome",
+        "packages",
+        "installerAttemptCount"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "install",
+            "validate"
+          ]
+        },
+        "restartRequired": {
+          "type": "boolean"
+        },
+        "packageCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedRequiredCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "terminalReasonCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "integrity_mismatch",
+                "installer_failed",
+                "installer_initiated_reboot",
+                "restart_forbidden",
+                "install_timeout",
+                "install_timeout_termination_failed",
+                "validation_failed",
+                "validation_inconclusive",
+                "path_rejected",
+                "adapter_unsupported",
+                "unexpected_error",
+                "run_id_mismatch",
+                "descriptor_digest_mismatch",
+                "descriptor_invalid"
+              ]
+            }
+          ]
+        },
+        "cleanupOutcome": {
+          "description": "Guest bundle removal is ordered by the host in Stage 5, after evidence retrieval, so a phase that did not perform it records not-attempted.",
+          "enum": [
+            "removed",
+            "retained",
+            "failed",
+            "not-attempted"
+          ]
+        },
+        "packages": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/definitions/guestPackage"
+          }
+        },
+        "installerAttemptCount": {
+          "description": "How many installers this phase launched. A negative scenario that refuses content but still launches one has not demonstrated the control it claims.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        }
+      }
+    },
+    "qualificationPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "order",
+        "required",
+        "outcome",
+        "reasonCode"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "maxLength": 64
+        },
+        "version": {
+          "description": "Package version, constrained to the manifest contract's syntax -- including its rejection of moving references and wildcard segments -- so evidence cannot describe a version a manifest could never have declared.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+          "maxLength": 64,
+          "not": {
+            "pattern": "^([Ll][Aa][Tt][Ee][Ss][Tt]|[Nn][Ee][Ww][Ee][Ss][Tt]|[Cc][Uu][Rr][Rr][Ee][Nn][Tt]|[Ss][Tt][Aa][Bb][Ll][Ee]|[Hh][Ee][Aa][Dd]|[Aa][Nn][Yy])$|(^|[.+-])[xX]([.+-]|$)"
+          }
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9999
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        },
+        "reasonCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "source_root_not_found",
+                "source_not_found",
+                "source_outside_root",
+                "source_link_rejected",
+                "unsupported_scheme",
+                "integrity_mismatch",
+                "staging_failed",
+                "unexpected_error"
+              ]
+            }
+          ]
+        },
+        "expected": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "actual": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          ]
+        }
+      }
+    },
+    "guestPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "order",
+        "required",
+        "outcome",
+        "reasonCode",
+        "restartRequired",
+        "installerAttempted"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "maxLength": 64
+        },
+        "version": {
+          "description": "Package version, constrained to the manifest contract's syntax -- including its rejection of moving references and wildcard segments -- so evidence cannot describe a version a manifest could never have declared.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+          "maxLength": 64,
+          "not": {
+            "pattern": "^([Ll][Aa][Tt][Ee][Ss][Tt]|[Nn][Ee][Ww][Ee][Ss][Tt]|[Cc][Uu][Rr][Rr][Ee][Nn][Tt]|[Ss][Tt][Aa][Bb][Ll][Ee]|[Hh][Ee][Aa][Dd]|[Aa][Nn][Yy])$|(^|[.+-])[xX]([.+-]|$)"
+          }
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9999
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "failed",
+            "incomplete"
+          ]
+        },
+        "reasonCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "integrity_mismatch",
+                "installer_failed",
+                "installer_initiated_reboot",
+                "restart_forbidden",
+                "install_timeout",
+                "install_timeout_termination_failed",
+                "validation_failed",
+                "validation_inconclusive",
+                "path_rejected",
+                "adapter_unsupported",
+                "unexpected_error",
+                "run_id_mismatch",
+                "descriptor_digest_mismatch",
+                "descriptor_invalid"
+              ]
+            }
+          ]
+        },
+        "restartRequired": {
+          "type": "boolean"
+        },
+        "validation": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "$ref": "#/definitions/validationCheck"
+              }
+            }
+          ]
+        },
+        "installerAttempted": {
+          "description": "Whether the installer process was launched at all. Distinct from its outcome: a package refused before execution and one whose installer failed are different events.",
+          "type": "boolean"
+        }
+      }
+    },
+    "validationCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "outcome",
+        "reasonCode"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "maxLength": 64
+        },
+        "kind": {
+          "enum": [
+            "file-exists",
+            "file-version",
+            "service-exists"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "failed",
+            "inconclusive"
+          ]
+        },
+        "reasonCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "file_absent",
+                "version_mismatch",
+                "version_unavailable",
+                "service_absent",
+                "root_unavailable",
+                "path_rejected",
+                "check_error"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "buildOrchestrationPayload": {
+      "description": "What the host observed while driving the harness. Cleanup outcomes live here because the guest phase cannot know whether its evidence was retrieved before the directory holding it was removed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packerExitCode",
+        "phases",
+        "hostCleanupOutcome",
+        "guestCleanupOutcome"
+      ],
+      "properties": {
+        "packerExitCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ]
+        },
+        "phases": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/definitions/orchestrationPhase"
+          }
+        },
+        "hostCleanupOutcome": {
+          "enum": [
+            "removed",
+            "retained",
+            "failed",
+            "not-attempted"
+          ]
+        },
+        "guestCleanupOutcome": {
+          "description": "Reported by the harness step, or not-attempted when the run never reached it.",
+          "enum": [
+            "removed",
+            "retained",
+            "failed",
+            "not-attempted"
+          ]
+        },
+        "terminalReasonCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "bundle_assembly_failed",
+                "evidence_missing",
+                "evidence_duplicate",
+                "evidence_malformed",
+                "evidence_run_id_mismatch",
+                "evidence_wrong_kind",
+                "phase_missing",
+                "packer_failed",
+                "cleanup_failed",
+                "unexpected_error",
+                "evidence_inconsistent"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "orchestrationPhase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "outcome"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "install",
+            "validate"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "failed",
+            "incomplete"
+          ]
+        },
+        "failedRequiredCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "artifactIdentity": {
+      "description": "An immutable vSphere artifact. A managed object reference is unique only within one vCenter instance and a recorded name is mutable, so identity is the instance, the reference, and the instance UUID together. The name is display metadata and must never be used to identify the artifact.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vCenterInstanceId",
+        "managedObjectReference",
+        "instanceUuid"
+      ],
+      "properties": {
+        "vCenterInstanceId": {
+          "description": "The vCenter instance the reference is scoped to.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[ -~]+$"
+        },
+        "managedObjectReference": {
+          "description": "The managed object reference, for example vm-1234.",
+          "type": "string",
+          "pattern": "^[A-Za-z]+-[0-9]+$"
+        },
+        "instanceUuid": {
+          "description": "Survives a rename and distinguishes a restored or re-registered object.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "recordedName": {
+          "description": "Display metadata only. Mutable, and never an identifier.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[ -~]+$"
+        }
+      }
+    },
+    "imageBuildPayload": {
+      "description": "The result of constructing and, when it got that far, sealing a candidate image.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "buildState",
+        "recipeInputVersion",
+        "recipeDigest",
+        "mediaId",
+        "phases"
+      ],
+      "properties": {
+        "buildState": {
+          "description": "How far the build got, stated explicitly rather than inferred from which fields are present. pre-seal: construction ran and sealing was not reached. sealed: sealing completed and was confirmed, and only this state may carry artifactIdentity. seal-unconfirmed: sealing was attempted and its result could not be confirmed -- an artifact may exist. That state exists so an artifact created when evidence emission failed stays representable, and it is never an accepted candidate.",
+          "type": "string",
+          "enum": [
+            "pre-seal",
+            "sealed",
+            "seal-unconfirmed"
+          ]
+        },
+        "recipeInputVersion": {
+          "description": "The recipe-input document version the digest was computed under. Two digests are only comparable within one version.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "recipeDigest": {
+          "description": "What was built. Determined by the inputs alone; see ADR 7.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "mediaId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
+        },
+        "artifactIdentity": {
+          "description": "Present only for a confirmed seal. Its presence is what makes a record an accepted sealed candidate, so the semantic validator requires buildState 'sealed' and a passed outcome alongside it.",
+          "$ref": "#/definitions/artifactIdentity"
+        },
+        "unconfirmedArtifact": {
+          "description": "An artifact that may exist after an unconfirmed seal, recorded so it can be reconciled or removed. Deliberately a different field from artifactIdentity: a reader looking for a sealed candidate must never find one here.",
+          "$ref": "#/definitions/artifactIdentity"
+        },
+        "phases": {
+          "description": "What ran, in order, with each phase's outcome.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "outcome"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": [
+                  "media-qualification",
+                  "answer-file",
+                  "construction",
+                  "provisioning",
+                  "pre-generalization",
+                  "generalization",
+                  "shutdown",
+                  "seal"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "passed",
+                  "failed",
+                  "incomplete",
+                  "skipped"
+                ]
+              },
+              "reasonCode": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "media_qualification_failed",
+                      "answer_file_render_failed",
+                      "construction_failed",
+                      "provisioning_failed",
+                      "pre_generalization_failed",
+                      "generalization_failed",
+                      "shutdown_not_observed",
+                      "seal_failed",
+                      "seal_unconfirmed",
+                      "credential_residue_present",
+                      "provenance_incomplete",
+                      "unexpected_error"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "terminalReasonCode": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "enum": [
+                "media_qualification_failed",
+                "answer_file_render_failed",
+                "construction_failed",
+                "provisioning_failed",
+                "pre_generalization_failed",
+                "generalization_failed",
+                "shutdown_not_observed",
+                "seal_failed",
+                "seal_unconfirmed",
+                "credential_residue_present",
+                "provenance_incomplete",
+                "unexpected_error"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -43,45 +43,115 @@ failed build should be describable.
 
 ### What `recipeDigest` is computed over
 
-Canonical, non-secret, and environment-independent. The digest is taken over a
-canonical JSON serialization — keys sorted, no insignificant whitespace, UTF-8
-without a byte-order mark — so the same inputs produce the same digest on any
-machine.
+The digest is taken over a **canonical recipe-input document**, itself versioned
+as `recipe-input-1`. Introducing a field, removing one, or changing how a value
+is represented produces `recipe-input-2`; the digest of a given recipe is only
+comparable within one version, and the version is recorded beside the digest.
 
-Included:
+#### Canonical form
 
-- **Media**: `mediaId`, hash algorithm and expected digest, image edition and
-  index, architecture and language. The expected digest, never the observed
-  one: the recipe says what the media must be, and an observation is a fact
-  about one run.
-- **Packages**: the manifest schema version, and for each package its
-  identifier, version, and expected SHA-256, ordered canonically. Not the
-  manifest file's own digest, which would change with a reordering or a comment
-  that alters nothing about what gets installed.
-- **Answer file**: the SHA-256 of the committed template and of its declaration,
-  plus the declared image selection. Never the rendered file, which contains a
-  credential.
-- **Tooling**: the Packer version, the pinned plugin versions, and the version
-  of the guest provisioning contract in use.
+Sorting object keys is not sufficient, so every representational choice is
+fixed:
 
-Excluded, deliberately:
+| Aspect | Rule |
+| --- | --- |
+| Encoding | UTF-8, no byte-order mark |
+| Object keys | sorted by ordinal code point, not by culture |
+| Arrays that carry sequence | **left in declared order** |
+| Arrays that carry a set | sorted by a named key, stated per field below |
+| Maps (for example MSI properties) | serialized as key-sorted objects |
+| Integers | shortest decimal form, no leading zeros, no exponent |
+| Booleans | `true` / `false` |
+| Strings | verbatim; no case folding, trimming, or normalization |
+| Absent optional values | omitted entirely, never `null` |
+| Whitespace | none between tokens |
+| Digest | SHA-256 over the resulting bytes |
 
-- **Credentials and anything derived from them.** A recipe digest is published
-  in provenance; nothing that could narrow a secret may contribute to it.
-- **Run-specific values**: `runId`, timestamps, temporary paths, evidence
-  output locations, the cleanup nonce. These differ between two builds that
-  ought to be recognised as identical.
-- **Environment-specific values**: hostnames, cluster, datastore, network, and
-  folder names, resource pools, and any vSphere object identifier. Two sites
-  building the same recipe must arrive at the same digest, or the digest
-  describes the site rather than the image.
-- **Observed results**: the media's observed digest, package validation
-  outcomes, timings. These describe what happened, not what was asked for, and
-  belong in the record beside the digest rather than inside it.
+Package order is semantic: the manifest declares an installation sequence, and
+two manifests differing only in that sequence can produce different images.
+**The package array is serialized in declared order and never sorted.**
 
-The rule that decides membership: **if changing it would change what is
-installed, it is an input; if it would only change where or when the build ran,
-it is not.**
+#### Included
+
+**Media.** `mediaId`, hash algorithm and expected digest, image edition and
+index, architecture and language. The expected digest, never the observed one:
+the recipe says what the media must be; an observation is a fact about one run.
+
+**Packages.** The manifest schema version, and the package array in declared
+order. For each package, everything that can change what is installed or whether
+the result is accepted:
+
+- `id`, `version`, expected SHA-256;
+- `order` and `required`;
+- installer `kind`;
+- the MSI property map (key-sorted) or the EXE argument tokens **in declared
+  order**, since arguments are positional;
+- `timeoutSeconds`, `restartPolicy`, and the exit-code policy;
+- the validation definitions, in declared order.
+
+Validation definitions are included rather than treated as separate policy. A
+change to what is checked changes whether a given image is accepted, and an
+image accepted under weaker checks is not interchangeable with one accepted
+under stronger ones. If acceptance policy is later versioned independently, it
+becomes a named `acceptancePolicyDigest` field inside this document rather than
+disappearing from it.
+
+**Answer file.** The SHA-256 of the committed template and of its declaration,
+plus the declared image selection. Never the rendered file, which contains a
+credential.
+
+**Build logic that affects content.** Implementation changes can alter an image
+without touching any of the above, so the recipe covers them:
+
+- the SHA-256 of the Packer build configuration files that contribute to
+  construction;
+- the SHA-256 of each provisioning script delivered into the guest, and the
+  guest provisioning contract version;
+- the virtual hardware and firmware selections: hardware version, firmware type,
+  secure boot state, disk controller and sizing, and vTPM presence.
+
+Without these, editing a provisioning script or switching firmware would produce
+a different image under an unchanged digest, which is the failure mode this
+whole mechanism exists to prevent.
+
+#### Excluded, deliberately
+
+- **Credentials and anything derived from them.** The digest is published in
+  provenance; nothing that could narrow a secret may contribute to it.
+- **Run-specific values**: `runId`, timestamps, temporary paths, evidence output
+  locations, the cleanup nonce.
+- **Environment-specific values**: hostnames, vCenter instance, cluster,
+  datastore, network, folder and resource-pool names, and every vSphere object
+  identifier. Two sites building one recipe must reach the same digest, or the
+  digest describes the site.
+- **Observed results**: the media's observed digest, package outcomes, timings.
+  They belong in the record beside the digest, not inside it.
+
+The rule that decides membership: **if changing it could change what is
+installed or whether the result is accepted, it is an input; if it only changes
+where or when the build ran, it is not.**
+
+#### Byte-level identity for file inputs, deliberately conservative
+
+The template, declaration, Packer configuration, and provisioning scripts enter
+by file digest, so a comment or a reformatting changes `recipeDigest` even
+though nothing installed changes. That contradicts a strict reading of the
+membership rule, and the contradiction is resolved in favour of the conservative
+option:
+
+**An input's identity may be coarser than its semantics. The digest must never
+miss a change that matters; it may report one that does not.**
+
+A false positive costs a rebuild. A false negative means two materially
+different images share an identity, and every downstream claim built on that
+identity is wrong. These are not comparable costs.
+
+The alternative — canonicalizing only the operationally significant fields of
+each file — was rejected. It requires deciding which parts of an answer file, a
+Packer configuration, and a provisioning script are operational, a judgment that
+must be revisited on every edit and that fails silently and permissively when
+wrong. The raw file digests are recorded in provenance regardless, so the
+conservative choice loses no information.
 
 ### The build result extends the evidence contract as version 3
 
@@ -102,10 +172,31 @@ been bitten by exactly that: the evidence consistency rules existed twice with
 different coverage until they were consolidated.
 
 The cost is real and accepted: a consumer validating strictly against version 2
-will reject a version 3 document. That is what a version is for, and there is no
-external consumer today.
+will reject a version 3 document. That is what a version is for.
 
-### Artifact binding waits for lab evidence
+**Support policy**, stated because external use of a public repository is not
+observable and cannot be assumed absent: a published contract version is never
+edited in place. Changes ship as a new version alongside it, the previous
+version's file stays byte-stable, and a test asserts that documents which
+validated under it still do. Anything consuming `evidence-envelope-2` continues
+to work; nothing is required to adopt version 3.
+
+### Artifact identity is scoped, and waits for lab evidence
+
+A managed object reference is unique only within one vCenter instance, and the
+name recorded against a VM is mutable. Neither alone identifies an artifact.
+Artifact identity is therefore all three:
+
+| Field | Role |
+| --- | --- |
+| vCenter instance identifier | the scope the reference is unique within |
+| managed object reference | the object within that scope |
+| VM instance UUID | survives a rename, and distinguishes a restored or re-registered object |
+| recorded name | **display metadata only**, never an identifier |
+
+These are environment-specific and therefore excluded from `recipeDigest`
+entirely. They appear only in a provenance record produced by a real build,
+which is also the only place they can be observed.
 
 The provenance record's artifact identity is **absent until a real vSphere build
 produces one**. A record without it describes a recipe and a run that did not
@@ -145,5 +236,15 @@ it cannot run in CI.
 - A version 2 envelope that validated before version 3 existed must still
   validate, proven by a test, and dispatch must refuse an unknown version rather
   than falling back to the newest.
-- Absent artifact identity must be accepted, and a record must never be reported
-  as a sealed candidate on the strength of the document alone.
+- Absent artifact identity must be accepted for failed, incomplete, and pre-seal
+  records, and required only for a positively sealed result. A record must never
+  be reported as a sealed candidate on the strength of the document alone.
+- Every included input needs a case proving the digest moves when it changes,
+  and the package array needs one proving a reordering changes it, since
+  sorting the sequence away is the most natural mistake to make.
+- Canonicalization needs cases for each representational rule: key ordering,
+  integer form, an omitted optional value against an explicit null, and a map
+  serialized from two different insertion orders.
+- Schema patterns must be ECMA-262 compatible. Envelope version 3 needs the same
+  semantic control-character rejection the package and transfer paths already
+  have, because a portable pattern cannot close that gap under .NET.

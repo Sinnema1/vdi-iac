@@ -21,7 +21,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 255,
-      "pattern": "\\A[A-Za-z0-9][A-Za-z0-9._-]*\\z"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
     },
     "imageSelection": {
       "description": "The image this answer file installs, which must agree with the qualified media reference. Setup selects an image; a build whose answer file and media reference disagree installs something other than what was qualified.",
@@ -38,7 +38,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
-          "pattern": "\\A[ -~]+\\z"
+          "pattern": "^[ -~]+$"
         },
         "index": {
           "type": "integer",
@@ -54,7 +54,7 @@
         },
         "language": {
           "type": "string",
-          "pattern": "\\A[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?\\z"
+          "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
         }
       }
     },
@@ -76,7 +76,7 @@
           "name": {
             "description": "Substituted where the template holds {{NAME}}. Upper snake case, so a placeholder is visually distinct from surrounding markup.",
             "type": "string",
-            "pattern": "\\A[A-Z][A-Z0-9_]{1,62}\\z"
+            "pattern": "^[A-Z][A-Z0-9_]{1,62}$"
           },
           "secret": {
             "description": "True for a value that must never reach a log, an argument list, evidence, or an exception message. A secret value is written through a byte buffer that is cleared afterwards rather than through a managed string.",
@@ -86,7 +86,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "pattern": "\\A[ -~]+\\z"
+            "pattern": "^[ -~]+$"
           }
         }
       }

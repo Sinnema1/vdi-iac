@@ -48,6 +48,8 @@
 
 Set-StrictMode -Version 3.0
 
+Import-Module (Join-Path $PSScriptRoot 'JsonSafety.psm1')
+
 $script:TemplateSchema = Join-Path $PSScriptRoot '..' '..' 'contracts' 'answer-file-template-1.schema.json'
 
 # Matches {{NAME}}. The name rule is the schema's, repeated here because this is
@@ -85,6 +87,7 @@ function Import-AnswerFileTemplate {
     }
 
     $declaration = $raw | ConvertFrom-Json
+    Assert-NoControlCharacter -Node $declaration -Location 'declaration' -Subject 'Answer-file declaration'
 
     $templatePath = Join-Path (Split-Path -Parent $Path) $declaration.templateFile
     if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) {

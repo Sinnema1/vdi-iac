@@ -24,11 +24,11 @@
     "runId": {
       "description": "The run that produced this record, correlating it with the rest of the build's evidence.",
       "type": "string",
-      "pattern": "\\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\z"
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     },
     "qualifiedUtc": {
       "type": "string",
-      "pattern": "\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z\\z"
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z$"
     },
     "outcome": {
       "description": "Only a passed record may be consumed by a build. A failed record exists so a refusal is recorded rather than inferred from an absent file.",
@@ -61,7 +61,7 @@
     },
     "mediaId": {
       "type": "string",
-      "pattern": "\\A[a-z0-9][a-z0-9-]{1,62}[a-z0-9]\\z"
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
     },
     "reference": {
       "description": "The exact media reference this record qualified, carried forward so the builder does not have to re-read the declaration to know what it is verifying.",
@@ -83,13 +83,13 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1024,
-          "pattern": "\\A[ -~]+\\z"
+          "pattern": "^[ -~]+$"
         },
         "fileName": {
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "\\A[A-Za-z0-9][A-Za-z0-9._-]{0,254}\\z"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$"
         },
         "sizeBytes": {
           "type": "integer",
@@ -118,7 +118,7 @@
         },
         "expectedDigest": {
           "type": "string",
-          "pattern": "\\A[0-9a-f]{64}\\z|\\A[0-9a-f]{96}\\z|\\A[0-9a-f]{128}\\z"
+          "pattern": "^[0-9a-f]{64}$|^[0-9a-f]{96}$|^[0-9a-f]{128}$"
         },
         "observedDigest": {
           "description": "Null when the artifact could not be read at all. Never absent, so a record cannot imply a comparison that did not happen.",
@@ -128,7 +128,7 @@
             },
             {
               "type": "string",
-              "pattern": "\\A[0-9a-f]{64}\\z|\\A[0-9a-f]{96}\\z|\\A[0-9a-f]{128}\\z"
+              "pattern": "^[0-9a-f]{64}$|^[0-9a-f]{96}$|^[0-9a-f]{128}$"
             }
           ]
         },
@@ -149,11 +149,11 @@
               "type": "string",
               "minLength": 12,
               "maxLength": 1024,
-              "pattern": "\\Ahttps://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(/[!-~]*)?\\z"
+              "pattern": "^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(/[!-~]*)?$"
             },
             "retrievedUtc": {
               "type": "string",
-              "pattern": "\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z\\z"
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z$"
             }
           },
           "description": "Where the expected digest was obtained. Independence from the artifact is NOT proven by this contract: it is constrained structurally -- the citation must be an HTTPS reference, which a path beside the media cannot be -- and otherwise attested by the reviewer who approved the reference. Do not read a valid citation as a verified one."
@@ -172,7 +172,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
-          "pattern": "\\A[ -~]+\\z"
+          "pattern": "^[ -~]+$"
         },
         "index": {
           "type": "integer",
@@ -199,7 +199,7 @@
         },
         "language": {
           "type": "string",
-          "pattern": "\\A[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?\\z"
+          "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
         }
       },
       "description": "The declared architecture and language, carried forward. Intent, not an observation of the media's contents."

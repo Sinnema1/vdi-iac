@@ -36,6 +36,7 @@
 Set-StrictMode -Version 3.0
 
 Import-Module (Join-Path $PSScriptRoot 'RunIdentity.psm1')
+Import-Module (Join-Path $PSScriptRoot 'JsonSafety.psm1')
 
 $script:ReferenceSchema = Join-Path $PSScriptRoot '..' '..' 'contracts' 'media-reference-1.schema.json'
 $script:RecordSchema = Join-Path $PSScriptRoot '..' '..' 'contracts' 'media-qualification-1.schema.json'
@@ -108,6 +109,11 @@ function Import-MediaReference {
     }
 
     $reference = $raw | ConvertFrom-Json
+
+    # The schema's patterns are ECMA-portable and therefore rely on .NET's more
+    # permissive $, which matches before a trailing newline. A citation or digest
+    # carrying one would validate cleanly, so the refusal happens here.
+    Assert-NoControlCharacter -Node $reference -Location 'reference' -Subject 'Media reference'
 
     $mismatch = Get-DigestLengthMismatch -Algorithm $reference.integrity.algorithm -Digest $reference.integrity.digest
     if ($mismatch) { throw (NewMediaError -Code 'digest_length_mismatch' -Message "Media reference declares $mismatch.") }

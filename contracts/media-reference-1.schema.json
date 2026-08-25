@@ -22,12 +22,12 @@
     "mediaId": {
       "description": "A stable identifier for this media reference, used in provenance and evidence.",
       "type": "string",
-      "pattern": "\\A[a-z0-9][a-z0-9-]{1,62}[a-z0-9]\\z"
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
     },
     "description": {
       "type": "string",
       "maxLength": 200,
-      "pattern": "\\A[ -~]*\\z"
+      "pattern": "^[ -~]*$"
     },
     "reference": {
       "description": "Where the media is obtained from, stated exactly. No discovery, no 'latest'.",
@@ -51,14 +51,14 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1024,
-          "pattern": "\\A[ -~]+\\z"
+          "pattern": "^[ -~]+$"
         },
         "fileName": {
           "description": "The expected file name of the artifact itself, so a locator resolving to a directory cannot silently select a different file.",
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "\\A[A-Za-z0-9][A-Za-z0-9._-]{0,254}\\z"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$"
         },
         "sizeBytes": {
           "description": "Optional. A cheap mismatch check before hashing gigabytes, never a substitute for the digest.",
@@ -88,7 +88,7 @@
         "digest": {
           "description": "Lowercase hexadecimal. Length is checked against the algorithm during qualification.",
           "type": "string",
-          "pattern": "\\A[0-9a-f]{64}\\z|\\A[0-9a-f]{96}\\z|\\A[0-9a-f]{128}\\z"
+          "pattern": "^[0-9a-f]{64}$|^[0-9a-f]{96}$|^[0-9a-f]{128}$"
         },
         "authority": {
           "description": "Where the expected digest was obtained. Independence from the artifact is NOT proven by this contract: it is constrained structurally -- the citation must be an HTTPS reference, which a path beside the media cannot be -- and otherwise attested by the reviewer who approved the reference. Do not read a valid citation as a verified one.",
@@ -110,11 +110,11 @@
               "type": "string",
               "minLength": 12,
               "maxLength": 1024,
-              "pattern": "\\Ahttps://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(/[!-~]*)?\\z"
+              "pattern": "^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(/[!-~]*)?$"
             },
             "retrievedUtc": {
               "type": "string",
-              "pattern": "\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z\\z"
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z$"
             }
           }
         }
@@ -134,10 +134,10 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
-          "pattern": "\\A[ -~]+\\z"
+          "pattern": "^[ -~]+$"
         },
         "index": {
-          "description": "The image index within the media. Stated alongside the edition so qualification can confirm the two agree rather than trusting either alone.",
+          "description": "The image index within the media. Stated alongside the edition so both are pinned rather than one being inferred from the other. Qualification does not open the media, so it never confirms the two agree; the pre-seal checks compare the installed operating system against this declared selection.",
           "type": "integer",
           "minimum": 1,
           "maximum": 64
@@ -163,7 +163,7 @@
         "language": {
           "description": "A BCP 47 language tag, for example en-US.",
           "type": "string",
-          "pattern": "\\A[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?\\z"
+          "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
         }
       }
     }

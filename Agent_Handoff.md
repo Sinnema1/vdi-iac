@@ -1047,14 +1047,17 @@ surface is as small as possible when a target finally exists.
    | Operational answer file and Windows SIM validation | **stage 4**; the committed template covers image selection and the credential positions, not a full hardware, disk, and network configuration |
 
    A committed template, runtime substitution, and a fail-closed check for
-   unsubstituted placeholders. CI-provable, and no
-   rendered file ever enters the repository tree. The stage owns the whole
-   credential lifecycle, not only the substitution: the value arrives as a
-   sensitive runtime input, never on a command line, in a log, or in evidence;
-   the rendered file is written to a restricted temporary location and removed
-   on every exit path including failure; setup residue that retains the value is
-   removed inside the guest; and the build credential is disabled or rotated
-   before sealing, so a sealed image never carries a working one;
+   unsubstituted placeholders. No rendered file ever enters the repository tree.
+
+   The stage **defines** the whole credential lifecycle and **implements the
+   host part** of it: the value arrives as a sensitive runtime input, never on a
+   command line, in a log, or in evidence; the rendered file is written to a
+   restricted location this repository owns, and is removed on every exit path
+   including failure, with a failed removal making the run fail. The guest
+   residue sweep is implemented and proven against fixtures. Disabling or
+   rotating the build credential is defined here and **implemented in stage 5**,
+   before sealing, so that a sealed image never carries a working one. The table
+   above is authoritative on what exists today;
 3. image identity and the provenance record -- CI-provable. Three identities
    stay distinct and all three are bound together in provenance, because
    collapsing any two makes a question unanswerable:
@@ -1070,13 +1073,25 @@ surface is as small as possible when a target finally exists.
    The record links an image to its media reference, manifest and schema version,
    package identities and hashes, answer-file revision, and tool versions.
 
-   Settled by [ADR 7](docs/decisions/0007-image-identity-and-provenance.md):
-   the build result enters the evidence contract as `evidence-envelope-3`, a new
-   file adding the `image-build` kind, with version 2 left exactly as it is. A
-   separate build-result contract was rejected because it would restate run
-   identity and redaction rules in a second place. ADR 7 also fixes what
-   `recipeDigest` is computed over and what is excluded from it, and defers
-   binding to a vSphere artifact until a real build produces one;
+   Settled by [ADR 7](docs/decisions/0007-image-identity-and-provenance.md),
+   which fixes the canonical `recipe-input-1` document, what it includes and
+   excludes, and how every value is represented. Implementation obligations that
+   follow from it:
+
+   - `evidence-envelope-2` is preserved byte-for-byte. Version 3 is a new file,
+     dispatch is a hard-coded version map, and a test asserts a version 2
+     document that validated before still validates;
+   - any common envelope rule duplicated into version 3 gets a parity test, as
+     the manifest and transfer contracts already do. Repeated shapes drift;
+   - version 3 carries the same semantic control-character rejection the package
+     and transfer paths have. Schema patterns stay ECMA-262 compatible, so the
+     gap cannot be closed inside the schema;
+   - artifact identity is required only for a positively sealed result. Failed,
+     incomplete, and pre-seal records omit it, and absence is not corruption;
+   - artifact identity is the vCenter instance scope, the managed object
+     reference, and the VM instance UUID. The recorded name is display metadata
+     and never an identifier. All of it is environment-specific, excluded from
+     `recipeDigest`, and only observable in a lab-produced record;
 4. the vSphere builder configuration -- source definition, pinned plugin
    versions, hardware and boot configuration, and the media reference. It
    consumes the Stage 1 qualification record and reverifies the media at its own

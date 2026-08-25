@@ -156,3 +156,58 @@ Describe 'committed schema identifiers' {
         }
     }
 }
+
+Describe 'schema pattern portability' {
+
+    BeforeAll {
+        $script:AllPatterns = foreach ($file in @(Get-ChildItem -Path (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'contracts') -Filter '*.schema.json' -File -Recurse)) {
+            $raw = Get-Content -LiteralPath $file.FullName -Raw
+            foreach ($match in [regex]::Matches($raw, '"pattern"\s*:\s*"(?<p>(\\.|[^"\\])*)"')) {
+                [PSCustomObject]@{ File = $file.Name; Pattern = $match.Groups['p'].Value }
+            }
+        }
+    }
+
+    It 'finds patterns to check' {
+        @($script:AllPatterns).Count | Should -BeGreaterThan 10
+    }
+
+    It 'uses no anchor ECMA-262 does not define' {
+        # JSON Schema draft-07 specifies ECMA-262 regular expressions. \A and \z
+        # are .NET constructs; a JavaScript engine reads \Ax\z as a literal A, an
+        # x, and a literal z, so a schema using them validates here and demands
+        # nonsense everywhere else -- silently, and in the permissive direction.
+        #
+        # The trailing-newline gap those anchors were reached for is closed
+        # semantically instead, by Assert-NoControlCharacter.
+        $offenders = @($script:AllPatterns | Where-Object { $_.Pattern -match '\\A|\\z|\\Z' } |
+            ForEach-Object { "$($_.File): $($_.Pattern)" })
+        $offenders | Should -BeNullOrEmpty
+    }
+
+    It 'compiles every pattern under ECMA-262 semantics' {
+        # A pattern that only .NET accepts is one no other validator can apply.
+        $node = Get-Command node -ErrorAction SilentlyContinue
+        if (-not $node) { Set-ItResult -Skipped -Because 'node is not installed'; return }
+
+        $script = @'
+let bad = [];
+for (const line of require('fs').readFileSync(process.argv[1], 'utf8').split('\n')) {
+  if (!line.trim()) continue;
+  const sep = line.indexOf('\t');
+  try { new RegExp(line.slice(sep + 1)); } catch (e) { bad.push(line.slice(0, sep) + ': ' + e.message); }
+}
+console.log(bad.join('\n'));
+'@
+        $listing = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString() + '.txt')
+        $scriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString() + '.js')
+        # The captured text is the JSON string literal, so its escapes are
+        # decoded before ECMA sees them, exactly as a validator would.
+        ($script:AllPatterns | ForEach-Object {
+            $_.File + "`t" + ($_.Pattern -replace '\\\\', '\' -replace '\\"', '"')
+        }) -join "`n" | Set-Content -LiteralPath $listing -Encoding utf8
+        $script | Set-Content -LiteralPath $scriptPath -Encoding utf8
+
+        (& node $scriptPath $listing) -join "`n" | Should -BeNullOrEmpty
+    }
+}

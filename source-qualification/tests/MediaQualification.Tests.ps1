@@ -183,11 +183,13 @@ Describe 'the checksum authority' {
         @{ label = 'embedded return';   value = "https://vendor.example/check`rsums" }
         @{ label = 'null character';    value = "https://vendor.example/checksums`0" }
     ) {
-        # The newline cases are why the patterns anchor with \A and \z. A
-        # regex ending in $ matches before a final newline, so a citation with
-        # one appended validated cleanly -- and a value that can carry a
-        # trailing newline can carry it into anything that later reads the
-        # field as a line.
+        # The control-character cases do not fail on the schema pattern. Under
+        # .NET a regex ending in $ matches before a final newline, and the
+        # patterns stay ECMA-262 portable rather than using anchors ECMA does
+        # not define, so a citation with a newline appended satisfies the
+        # pattern. Assert-NoControlCharacter is what refuses it -- and a value
+        # that can carry a trailing newline can carry it into anything that
+        # later reads the field as a line.
         $root = NewTempDir
         $media = NewMediaFile -Root $root
         $path = NewReference -Path (Join-Path $root 'media.json') -Digest $media.Digest -Citation $value

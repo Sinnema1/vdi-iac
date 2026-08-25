@@ -25,7 +25,12 @@
       - no whitespace between tokens;
       - absent values omitted by the caller, never encoded as null;
       - control characters refused outright, so no \u escape is ever emitted and
-        there is no question of which case its hex digits take.
+        there is no question of which case its hex digits take;
+      - unpaired surrogates refused. The default UTF-8 encoder replaces every
+        invalid code unit with U+FFFD, so two strings differing only in which
+        lone surrogate they carry encode to identical bytes and digest the same.
+        A collision in an identity mechanism is the one failure it cannot have,
+        so the encoder is strict and the check runs first to name the field.
 #>
 
 Set-StrictMode -Version 3.0
@@ -63,7 +68,12 @@ function Get-CanonicalJsonDigest {
     [OutputType([string])]
     param([Parameter(Mandatory)] [AllowNull()] $Node)
 
-    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-CanonicalJson -Node $Node))
+    # Strict: throwOnInvalidBytes, so an unpaired surrogate that somehow reached
+    # this point raises rather than being silently replaced with U+FFFD. The
+    # serializer refuses them first with a message naming the field; this is the
+    # backstop that makes a silent collision impossible rather than unlikely.
+    $encoding = [System.Text.UTF8Encoding]::new($false, $true)
+    $bytes = $encoding.GetBytes((ConvertTo-CanonicalJson -Node $Node))
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try { [System.BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
     finally { $sha256.Dispose() }
@@ -146,7 +156,26 @@ function WriteCanonicalString {
     param([string] $Value, [System.Text.StringBuilder] $Builder, [string] $Location)
 
     $null = $Builder.Append('"')
-    foreach ($character in $Value.ToCharArray()) {
+    $characters = $Value.ToCharArray()
+    for ($i = 0; $i -lt $characters.Length; $i++) {
+        $character = $characters[$i]
+
+        # Surrogate pairs are checked before anything else. A lone surrogate is
+        # not a character: the default encoder turns every one of them into the
+        # same replacement, so two distinct values would produce one digest.
+        if ([char]::IsHighSurrogate($character)) {
+            if ($i + 1 -ge $characters.Length -or -not [char]::IsLowSurrogate($characters[$i + 1])) {
+                throw "Canonical form refuses an unpaired high surrogate at $Location."
+            }
+            $null = $Builder.Append($character)
+            $null = $Builder.Append($characters[$i + 1])
+            $i++
+            continue
+        }
+        if ([char]::IsLowSurrogate($character)) {
+            throw "Canonical form refuses an unpaired low surrogate at $Location."
+        }
+
         if ([char]::IsControl($character)) {
             # Refused rather than escaped. Escaping would work, but it would
             # introduce choices -- which escape form, and which case its hex

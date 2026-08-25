@@ -591,6 +591,22 @@ Describe 'the duplicate-declaration bypass' {
             Should -Throw -ExpectedMessage '*more than once: ADMINISTRATOR_PASSWORD*'
     }
 
+    It 'refuses a declaration carrying a trailing control character' {
+        # The schema patterns are ECMA-262 portable, so under .NET a trailing
+        # newline satisfies a pattern ending in $. Assert-NoControlCharacter is
+        # what closes that, and the answer-file path needs it as much as the
+        # media path: a placeholder name with a newline appended would be
+        # substituted under one spelling and matched under another.
+        $root = NewTempDir
+        $path = NewTemplateSet -Root $root
+        $document = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+        $document.templateFile = "unattend.xml.template`n"
+        $document | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding utf8
+
+        { Import-AnswerFileTemplate -Path $path } |
+            Should -Throw -ExpectedMessage '*control character 0x0A*'
+    }
+
     It 'refuses a plain-text position filled by a non-secret placeholder' {
         # Schema-valid and internally consistent. What is wrong is that the
         # position holding a credential would be substituted from ordinary

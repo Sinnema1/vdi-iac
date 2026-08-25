@@ -52,8 +52,11 @@ function ConvertTo-RecipeInput {
         observed digest is a fact about one run and is not.
 
     .PARAMETER Manifest
-        The parsed package manifest. Package order is preserved exactly as
-        declared, because the manifest declares an installation sequence.
+        The result of Import-PackageManifest, which is validated against the
+        committed schema and semantically checked. Nothing here re-derives that
+        shape: an earlier version read fields the contract does not define and
+        was only ever exercised against a fabricated fixture, so it terminated
+        the first time a real manifest reached it.
 
     .PARAMETER AnswerFile
         TemplateDigest, DeclarationDigest, and the declared ImageSelection.
@@ -144,14 +147,20 @@ function NewMediaInput {
 function NewPackageInput {
     param($Manifest)
 
-    # Declared order, never sorted. The manifest declares an installation
-    # sequence, and two manifests differing only in that sequence can produce
-    # different images.
-    $packages = foreach ($package in $Manifest.packages) {
+    # Ascending `order` is the installation sequence, and it is the sequence
+    # that is canonical -- not the order the packages happen to appear in the
+    # JSON. Reordering the file without changing an `order` value describes the
+    # same installation and must digest the same; changing an `order` value
+    # describes a different one and must not.
+    $ordered = @($Manifest.Packages | Sort-Object -Property @{ Expression = { [int] $_.order } })
+
+    $packages = foreach ($package in $ordered) {
         $entry = [ordered]@{
             id             = $package.id
             version        = $package.version
-            expectedSha256 = $package.source.expectedSha256
+            # The contract names this `sha256` at the package root. It is not
+            # nested under `source`, which is the reference string.
+            expectedSha256 = $package.sha256
             order          = [int] $package.order
             required       = [bool] $package.required
             installerKind  = $package.installer.kind
@@ -197,7 +206,7 @@ function NewPackageInput {
     }
 
     [ordered]@{
-        manifestSchemaVersion = [int] $Manifest.schemaVersion
+        manifestSchemaVersion = [int] $Manifest.SchemaVersion
         entries               = @($packages)
     }
 }

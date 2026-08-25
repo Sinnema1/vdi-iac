@@ -178,8 +178,8 @@ Describe 'schema pattern portability' {
         # x, and a literal z, so a schema using them validates here and demands
         # nonsense everywhere else -- silently, and in the permissive direction.
         #
-        # The trailing-newline gap those anchors were reached for is closed
-        # semantically instead, by Assert-NoControlCharacter.
+        # The trailing-newline gap is closed semantically instead, by
+        # Assert-NoControlCharacter.
         $offenders = @($script:AllPatterns | Where-Object { $_.Pattern -match '\\A|\\z|\\Z' } |
             ForEach-Object { "$($_.File): $($_.Pattern)" })
         $offenders | Should -BeNullOrEmpty
@@ -208,6 +208,11 @@ console.log(bad.join('\n'));
         }) -join "`n" | Set-Content -LiteralPath $listing -Encoding utf8
         $script | Set-Content -LiteralPath $scriptPath -Encoding utf8
 
-        (& node $scriptPath $listing) -join "`n" | Should -BeNullOrEmpty
+        # The exit code is asserted too. A node that failed to start, or died
+        # part way through the listing, would print nothing -- which is exactly
+        # what a clean result looks like.
+        $output = (& node $scriptPath $listing) -join "`n"
+        $LASTEXITCODE | Should -Be 0 -Because 'node must have run the listing to completion'
+        $output | Should -BeNullOrEmpty
     }
 }

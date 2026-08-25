@@ -119,6 +119,38 @@ Describe 'canonical digest' {
         Get-CanonicalJsonDigest -Node $node | Should -Be $expected
     }
 
+    It 'gives distinct digests to strings differing only in a lone surrogate' {
+        # The default UTF-8 encoder replaces every invalid code unit with the
+        # same U+FFFD, so U+D800 and U+D801 encoded to identical bytes and
+        # digested identically -- a collision in an identity mechanism, which is
+        # the one failure it cannot have. Both are now refused outright.
+        $high = [ordered]@{ v = [string][char]0xD800 }
+        $other = [ordered]@{ v = [string][char]0xD801 }
+
+        { Get-CanonicalJsonDigest -Node $high } | Should -Throw -ExpectedMessage '*unpaired high surrogate*'
+        { Get-CanonicalJsonDigest -Node $other } | Should -Throw -ExpectedMessage '*unpaired high surrogate*'
+    }
+
+    It 'refuses an unpaired low surrogate' {
+        { ConvertTo-CanonicalJson -Node ([ordered]@{ v = [string][char]0xDC00 }) } |
+            Should -Throw -ExpectedMessage '*unpaired low surrogate*'
+    }
+
+    It 'refuses a high surrogate followed by something other than a low one' {
+        $malformed = [string]::new([char[]]@([char]0xD800, [char]'a'))
+        { ConvertTo-CanonicalJson -Node ([ordered]@{ v = $malformed }) } |
+            Should -Throw -ExpectedMessage '*unpaired high surrogate*'
+    }
+
+    It 'accepts a valid surrogate pair and distinguishes it from another' {
+        # The refusal must be of malformed text, not of astral characters.
+        $first = [string]::new([char[]]@([char]0xD83D, [char]0xDE00))
+        $second = [string]::new([char[]]@([char]0xD83D, [char]0xDE01))
+
+        (Get-CanonicalJsonDigest -Node ([ordered]@{ v = $first })) |
+            Should -Not -Be (Get-CanonicalJsonDigest -Node ([ordered]@{ v = $second }))
+    }
+
     It 'changes when any value changes' {
         (Get-CanonicalJsonDigest -Node ([ordered]@{ a = 1 })) |
             Should -Not -Be (Get-CanonicalJsonDigest -Node ([ordered]@{ a = 2 }))

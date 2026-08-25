@@ -38,6 +38,7 @@ What exists today:
 | Package manifest contract | version 1 supported and frozen; version 2 an implementation draft |
 | Base-image strategy | decided: construction from installation media ([ADR 6](docs/decisions/0006-base-image-from-installation-media.md)) |
 | Installation-media qualification | Increment 3 stage 1 complete, CI-proven; no real media qualified yet |
+| Unattended answer file and credential lifecycle | Increment 3 stage 2: host side CI-proven; guest residue sweep lab-pending |
 | Source qualification and integrity verification | host-side path implemented |
 | Guest provisioning and transfer bundle | implemented; lab validation pending |
 | Packer lab harness (null builder) | implemented; lab validation pending |

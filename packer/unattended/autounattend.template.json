@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "templateFile": "autounattend.xml.template",
+  "imageSelection": {
+    "edition": "Placeholder Edition",
+    "index": 1,
+    "architecture": "x64",
+    "language": "en-US"
+  },
+  "placeholders": [
+    {
+      "name": "PROCESSOR_ARCHITECTURE",
+      "secret": false,
+      "description": "Setup architecture token, derived from the qualified media reference."
+    },
+    {
+      "name": "UI_LANGUAGE",
+      "secret": false,
+      "description": "Language tag, derived from the qualified media reference."
+    },
+    {
+      "name": "IMAGE_INDEX",
+      "secret": false,
+      "description": "Image index within the media, derived from the qualified media reference."
+    },
+    {
+      "name": "ADMINISTRATOR_PASSWORD",
+      "secret": true,
+      "description": "Build administrator password. Injected at runtime, never committed, and disabled or rotated before sealing."
+    }
+  ]
+}

@@ -1035,8 +1035,10 @@ surface is as small as possible when a target finally exists.
    stage 5 compare the operating system actually installed against that intent,
    which is where the claim is settled. Do not add ISO-inspection tooling to
    make this stage's wording stronger;
-2. the answer-file contract -- a committed template, runtime substitution, and a
-   fail-closed check for unsubstituted placeholders. CI-provable, and no
+2. the answer-file contract -- **host-side complete and CI-proven; the guest
+   residue sweep and credential rotation are lab-pending**. A committed
+   template, runtime substitution, and a fail-closed check for unsubstituted
+   placeholders. CI-provable, and no
    rendered file ever enters the repository tree. The stage owns the whole
    credential lifecycle, not only the substitution: the value arrives as a
    sensitive runtime input, never on a command line, in a log, or in evidence;
@@ -1118,6 +1120,12 @@ Acceptance criteria:
   ADR selects** -- `evidence-envelope-2` has closed payloads and a bounded
   `resultKind`, so an image-build result does not belong to it by default and
   adding one is a contract change, not an enum edit;
+- the answer file's image selection agrees with the qualified media reference.
+  Media qualification records intent without opening the media, and the answer
+  file is what actually tells setup which image to install, so a disagreement
+  means the build installs something other than what provenance will name;
+- the build credential is disabled or rotated before sealing, and the sealing
+  gate reads the residue sweep's result rather than assuming it ran;
 - the pre-seal checks compare the installed operating system -- its edition,
   architecture, and language -- against the intent declared in the media
   reference. Media qualification proved the artifact's identity, not its

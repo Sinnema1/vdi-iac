@@ -71,6 +71,9 @@ jobs:
     # the target platform for the guest side, so the suite runs on both.
     name: PowerShell analysis and tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Well above the few minutes this takes, and far below the six-hour default.
+    # A stalled step should report a failure while someone is still watching.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -91,10 +94,24 @@ jobs:
           Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
       - name: PSScriptAnalyzer
         shell: pwsh
+        # A Windows run of this step once sat for over twenty minutes against
+        # roughly three seconds on other platforms, with the same pinned
+        # analyzer version. The cause is not established: the suspicion is
+        # command-name resolution walking a large module path, but disabling
+        # auto-loading makes the analyzer's own cmdlet unresolvable, so no
+        # mitigation is applied here on a single observation. The job carries a
+        # timeout so a repeat fails quickly, and the timing below will say which
+        # directory is responsible.
         run: |
           # Every directory holding PowerShell, not only the first one that did.
-          $findings = @('./source-qualification', './scripts/ci', './packer/scripts') |
-            ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Recurse -Severity Error,Warning }
+          # Timed per path so a future stall names the directory rather than
+          # leaving the whole step opaque.
+          $findings = foreach ($path in @('./source-qualification', './scripts/ci', './packer/scripts')) {
+            $watch = [System.Diagnostics.Stopwatch]::StartNew()
+            $result = Invoke-ScriptAnalyzer -Path $path -Recurse -Severity Error,Warning
+            Write-Host ("  {0,-26} {1,6:N1}s" -f $path, $watch.Elapsed.TotalSeconds)
+            $result
+          }
           if ($findings) {
             $findings | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message | Out-String -Width 200 | Write-Host
             throw "PSScriptAnalyzer reported $($findings.Count) finding(s)."
@@ -103,6 +120,10 @@ jobs:
       - name: Pester
         shell: pwsh
         run: |
+          # A mandatory parameter left unbound prompts rather than throwing, and
+          # a prompt in CI is an hour of a runner waiting for a keystroke that
+          # never comes. This turns that into an immediate failure.
+          $ConfirmPreference = 'None'
           $config = New-PesterConfiguration
           $config.Run.Path = './source-qualification/tests'
           $config.Run.Exit = $true

@@ -171,13 +171,23 @@ Describe 'the checksum authority' {
         { Import-MediaReference -Path $path } | Should -Throw
     }
 
-    It 'rejects an insecure or malformed citation: <value>' -ForEach @(
-        @{ value = 'http://vendor.example/checksums' }
-        @{ value = 'https://vendor' }
-        @{ value = 'https://' }
-        @{ value = 'ftp://vendor.example/checksums' }
-        @{ value = 'https://vendor.example/check sums' }
+    It 'rejects an insecure or malformed citation: <label>' -ForEach @(
+        @{ label = 'plain http';        value = 'http://vendor.example/checksums' }
+        @{ label = 'no domain dot';     value = 'https://vendor' }
+        @{ label = 'scheme only';       value = 'https://' }
+        @{ label = 'wrong scheme';      value = 'ftp://vendor.example/checksums' }
+        @{ label = 'embedded space';    value = 'https://vendor.example/check sums' }
+        @{ label = 'trailing newline';  value = "https://vendor.example/checksums`n" }
+        @{ label = 'embedded newline';  value = "https://vendor.example/check`nsums" }
+        @{ label = 'trailing tab';      value = "https://vendor.example/checksums`t" }
+        @{ label = 'embedded return';   value = "https://vendor.example/check`rsums" }
+        @{ label = 'null character';    value = "https://vendor.example/checksums`0" }
     ) {
+        # The newline cases are why the patterns anchor with \A and \z. A
+        # regex ending in $ matches before a final newline, so a citation with
+        # one appended validated cleanly -- and a value that can carry a
+        # trailing newline can carry it into anything that later reads the
+        # field as a line.
         $root = NewTempDir
         $media = NewMediaFile -Root $root
         $path = NewReference -Path (Join-Path $root 'media.json') -Digest $media.Digest -Citation $value
@@ -450,16 +460,32 @@ Describe 'the committed media reference example' {
             Should -Be ('0' * 64)
     }
 
-    It 'is an example only, never a live reference, at any depth' {
+    It 'is an example only, never a live reference, anywhere in the repository' {
         # This repository is a reference implementation and carries the
-        # synthetic example only. A live reference names a real artifact and its
-        # digest, and belongs in the repository that operates a build.
+        # synthetic example only. A live reference names a real artifact, its
+        # digest, and where it came from, and belongs in a private or otherwise
+        # access-controlled repository that consumes this one to operate a
+        # build.
         #
-        # Searched recursively: a top-level search would miss
-        # packer/media/windows/live.media.json, and the directory is not
-        # required to stay flat.
-        Get-ChildItem -Path (Join-Path $script:RepoRoot 'packer' 'media') -Filter '*.media.json' -File -Recurse |
-            Should -BeNullOrEmpty
+        # Searched across the whole tree rather than under packer/media: the
+        # convention is packer/media/**/*.media.json, but a live reference
+        # dropped anywhere else is exactly as published, and a guard that only
+        # looks where the convention says would miss it.
+        $live = Get-ChildItem -Path $script:RepoRoot -Filter '*.media.json' -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' }
+        $live | Should -BeNullOrEmpty
+    }
+
+    It 'keeps the example where the convention says it lives' {
+        # The guard above is broad; the convention is narrow. Stating it here
+        # means a future example cannot drift somewhere the documentation does
+        # not describe.
+        $examples = @(Get-ChildItem -Path $script:RepoRoot -Filter '*.media.json.example' -File -Recurse |
+            Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' })
+        $examples | Should -Not -BeNullOrEmpty
+        foreach ($example in $examples) {
+            $example.FullName | Should -BeLike (Join-Path $script:RepoRoot 'packer' 'media' '*')
+        }
     }
 }
 
@@ -512,7 +538,12 @@ Describe 'media contract parity' {
         $recordAuthority = $script:Record.properties.integrity.properties.authority
         $referenceAuthority = $script:Reference.properties.integrity.properties.authority
         ($recordAuthority.required -join ',') | Should -Be ($referenceAuthority.required -join ',')
-        ($recordAuthority.properties.kind.enum -join ',') | Should -Be ($referenceAuthority.properties.kind.enum -join ',')
+        # const, not enum. The kinds collapsed to a single const when
+        # operator-attested was removed, and comparing .enum then compared two
+        # nulls -- a parity assertion that passed no matter what either side
+        # said.
+        $recordAuthority.properties.kind.const | Should -Not -BeNullOrEmpty
+        $recordAuthority.properties.kind.const | Should -Be $referenceAuthority.properties.kind.const
     }
 
     It 'permits the same reference kinds in both contracts' {

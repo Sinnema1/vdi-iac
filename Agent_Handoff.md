@@ -1035,10 +1035,19 @@ surface is as small as possible when a target finally exists.
    stage 5 compare the operating system actually installed against that intent,
    which is where the claim is settled. Do not add ISO-inspection tooling to
    make this stage's wording stronger;
-2. the answer-file contract -- **host-side complete and CI-proven; the guest
-   residue sweep and credential rotation are lab-pending**. A committed
-   template, runtime substitution, and a fail-closed check for unsubstituted
-   placeholders. CI-provable, and no
+2. the answer-file contract. Maturity differs by part, so it is stated by part
+   rather than as one label:
+
+   | Part | State |
+   | --- | --- |
+   | Host renderer and credential handling | complete, CI-proven |
+   | Template and declaration contract | complete, CI-proven |
+   | Guest setup-residue sweep | implemented, CI-proven against fixtures; **lab-pending** against a real guest |
+   | Build-credential disable or rotation | **not implemented**; planned for stage 5, before sealing |
+   | Operational answer file and Windows SIM validation | **stage 4**; the committed template covers image selection and the credential positions, not a full hardware, disk, and network configuration |
+
+   A committed template, runtime substitution, and a fail-closed check for
+   unsubstituted placeholders. CI-provable, and no
    rendered file ever enters the repository tree. The stage owns the whole
    credential lifecycle, not only the substitution: the value arrives as a
    sensitive runtime input, never on a command line, in a log, or in evidence;
@@ -1093,11 +1102,13 @@ Acceptance criteria:
   A value read from beside the artifact it claims to verify is not a check, and
   a runtime-computed hash treated as expected is the failure the glossary names;
 - a media mismatch fails the build, proven by a test that supplies a mismatch;
-- this repository holds the synthetic `.example` reference only. A live media
-  reference names a real artifact, its digest, and where it came from, and is
-  version-controlled by the repository that consumes this one to operate a
-  build. CI fails if a live reference is committed here, searching recursively
-  so a nested one is not missed;
+- this repository holds the synthetic `.example` reference only, under
+  `packer/media/**/*.media.json.example`. A live media reference names a real
+  artifact, its digest, and where it came from, and is version-controlled in a
+  private or otherwise access-controlled repository that consumes this one to
+  operate a build. CI searches the whole tree for `*.media.json`, not only the
+  conventional directory, because a live reference dropped anywhere else is
+  exactly as published;
 - the qualification record is machine-consumed, not prose: an exact media
   reference, the hash algorithm and expected digest, the independently obtained
   checksum authority the digest came from, the selected edition or image index,
@@ -1124,8 +1135,13 @@ Acceptance criteria:
   Media qualification records intent without opening the media, and the answer
   file is what actually tells setup which image to install, so a disagreement
   means the build installs something other than what provenance will name;
-- the build credential is disabled or rotated before sealing, and the sealing
-  gate reads the residue sweep's result rather than assuming it ran;
+- the build credential is disabled or rotated before sealing -- stage 5 work,
+  not stage 2 -- and the sealing gate reads the residue sweep's result rather
+  than assuming it ran;
+- the answer file the build actually uses is completed in stage 4, with a full
+  hardware, disk, and network configuration and validation against Windows
+  System Image Manager. Stage 2 establishes the contract and the credential
+  path, not a production-ready answer file;
 - the pre-seal checks compare the installed operating system -- its edition,
   architecture, and language -- against the intent declared in the media
   reference. Media qualification proved the artifact's identity, not its

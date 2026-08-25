@@ -10,7 +10,13 @@
 
   This file is committed and carries no credential. The rendered file does: it
   holds a working administrator password for as long as it exists, is written to
-  a restricted location, and is removed on every exit path.
+  a restricted location this repository chooses, and is removed on every exit
+  path. A removal that fails makes the run fail.
+
+  Scope: this template establishes image selection and the credential positions.
+  It is NOT a production answer file. The hardware, disk, partitioning, and
+  network configuration, and validation against Windows System Image Manager,
+  are stage 4 work.
 -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
   <settings pass="windowsPE">

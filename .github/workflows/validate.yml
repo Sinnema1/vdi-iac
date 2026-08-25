@@ -153,11 +153,15 @@ jobs:
             Write-Host "  valid   $($e.Name)"
           }
 
-          # Recursive: a top-level search would miss packer/media/windows/live.media.json,
-          # and nothing requires this directory to stay flat. This repository is a
-          # reference implementation and carries the synthetic example only; a live
-          # reference belongs to the repository that operates a build.
-          $live = Get-ChildItem -Path 'packer/media' -Filter '*.media.json' -File -Recurse -ErrorAction SilentlyContinue
+          # The whole tree, not just packer/media. The convention is
+          # packer/media/**/*.media.json, but a live reference dropped anywhere
+          # else is exactly as published, and a guard that only looks where the
+          # convention says would miss it. This repository is a reference
+          # implementation and carries the synthetic example only; a live
+          # reference belongs in a private or otherwise access-controlled
+          # repository that consumes this one to operate a build.
+          $live = Get-ChildItem -Path . -Filter '*.media.json' -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' }
           if ($live) { throw "A live media reference is committed: $($live.FullName -join ', ')" }
 
   packer-harness:

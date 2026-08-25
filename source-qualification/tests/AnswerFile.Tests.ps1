@@ -55,7 +55,6 @@ BeforeAll {
         $declarationPath
     }
 
-    function DefaultValues { @{ IMAGE_INDEX = 1 } }
     function DefaultSecrets { @{ ADMINISTRATOR_PASSWORD = (AsSecure $script:SecretText) } }
 }
 
@@ -121,8 +120,8 @@ Describe 'rendering the answer file' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
 
-        $content = Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock { param($p) Get-Content -LiteralPath $p -Raw }
+        $content = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock { param($p) Get-Content -LiteralPath $p -Raw }
 
         $content | Should -Be "<v>$($script:SecretText)</v><i>1</i>"
         $content | Should -Not -Match '\{\{'
@@ -134,30 +133,73 @@ Describe 'rendering the answer file' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
 
-        { Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets @{ ADMINISTRATOR_PASSWORD = 'plain' } -WorkRoot $root -ScriptBlock { param($p) $p } } |
+        { Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets @{ ADMINISTRATOR_PASSWORD = 'plain' } -ScriptBlock { param($p) $p } } |
             Should -Throw -ExpectedMessage '*must be supplied as a SecureString*'
     }
 
-    It 'refuses a missing <kind> value' -ForEach @(
-        @{ kind = 'secret'; values = @{ IMAGE_INDEX = 1 }; secrets = @{} }
-        @{ kind = 'plain';  values = @{};                  secrets = $null }
-    ) {
+    It 'refuses a missing secret value' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
-        $suppliedSecrets = if ($null -eq $secrets) { DefaultSecrets } else { $secrets }
 
-        { Invoke-WithRenderedAnswerFile -Declaration $declaration -Values $values `
-            -Secrets $suppliedSecrets -WorkRoot $root -ScriptBlock { param($p) $p } } |
+        { Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets @{} -ScriptBlock { param($p) $p } } |
             Should -Throw -ExpectedMessage '*No value supplied*'
+    }
+
+    It 'refuses a non-secret placeholder it cannot derive a value for' {
+        # Non-secret values come from the validated declaration, never from the
+        # caller, so an undeclared derivation is an error rather than a blank.
+        # Failing closed here is what stops a caller supplying an index or
+        # language that disagrees with the qualified media.
+        $root = NewTempDir
+        $path = NewTemplateSet -Root $root -Template '<v>{{ADMINISTRATOR_PASSWORD}}</v><i>{{IMAGE_INDEX}}</i><z>{{TIME_ZONE}}</z>' -Placeholders @(
+            @{ name = 'ADMINISTRATOR_PASSWORD'; secret = $true;  description = 'Password.' }
+            @{ name = 'IMAGE_INDEX';            secret = $false; description = 'Index.' }
+            @{ name = 'TIME_ZONE';              secret = $false; description = 'Undeclared derivation.' })
+        $declaration = Import-AnswerFileTemplate -Path $path
+
+        { Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock { param($p) $p } } |
+            Should -Throw -ExpectedMessage '*No value is derived*'
+    }
+
+    It 'derives every non-secret value from the declaration' {
+        $root = NewTempDir
+        $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
+        $values = Get-AnswerFileValueSet -Declaration $declaration
+
+        $values['IMAGE_INDEX'] | Should -Be '1'
+        $values['UI_LANGUAGE'] | Should -Be 'en-US'
+        # Windows Setup spells the architecture differently from the canonical
+        # value the media reference carries.
+        $values['PROCESSOR_ARCHITECTURE'] | Should -Be 'amd64'
+    }
+
+    It 'maps arm64 to its own Setup token' {
+        $root = NewTempDir
+        $path = NewTemplateSet -Root $root
+        $declaration = Import-AnswerFileTemplate -Path $path
+        $declaration.imageSelection.architecture = 'arm64'
+
+        (Get-AnswerFileValueSet -Declaration $declaration)['PROCESSOR_ARCHITECTURE'] | Should -Be 'arm64'
+    }
+
+    It 'refuses an architecture with no Setup mapping' {
+        $root = NewTempDir
+        $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
+        $declaration.imageSelection.architecture = 'x86'
+
+        { Get-AnswerFileValueSet -Declaration $declaration } |
+            Should -Throw -ExpectedMessage '*No Windows Setup architecture token*'
     }
 
     It 'hands the scriptblock a path, never the content' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
 
-        $received = Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock { param($p) $p }
+        $received = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock { param($p) $p }
 
         $received | Should -BeOfType [string]
         $received | Should -Not -Match ([regex]::Escape($script:SecretText))
@@ -169,8 +211,8 @@ Describe 'rendering the answer file' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
 
-        Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock { param($p) $p } -WhatIf | Out-Null
+        Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock { param($p) $p } -WhatIf | Out-Null
 
         @(Get-ChildItem -Path $root -Filter 'autounattend-*.xml' -File) | Should -BeNullOrEmpty
     }
@@ -182,8 +224,8 @@ Describe 'the rendered file is short-lived' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
 
-        $path = Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock { param($p) $p }
+        $path = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock { param($p) $p }
 
         Test-Path -LiteralPath $path | Should -BeFalse
     }
@@ -194,8 +236,8 @@ Describe 'the rendered file is short-lived' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
 
-        { Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock {
+        { Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock {
                 param($p)
                 if (-not (Test-Path -LiteralPath $p)) { throw 'the answer file was absent during the scriptblock' }
                 throw 'build failed'
@@ -204,20 +246,47 @@ Describe 'the rendered file is short-lived' {
         @(Get-ChildItem -Path $root -Filter 'autounattend-*.xml' -File) | Should -BeNullOrEmpty
     }
 
-    It 'leaves nothing behind when rendering itself fails' {
+    It 'refuses an unsubstituted placeholder before writing any secret' {
+        # Checked against the template, not by rereading the finished file: a
+        # reread would build the managed string the whole design avoids. The
+        # consequence is that nothing is written at all, so there is no window
+        # in which a partly rendered credential exists.
         $root = NewTempDir
-        # Declared secret, absent from the template: import refuses it, so drive
-        # the renderer directly with a declaration the template cannot satisfy.
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
-        $declaration.placeholders[1].name = 'IMAGE_INDEX'
         Set-Content -LiteralPath $declaration.templatePath `
             -Value '<v>{{ADMINISTRATOR_PASSWORD}}</v><i>{{IMAGE_INDEX}}</i><x>{{LEFTOVER}}</x>' -Encoding utf8 -NoNewline
 
-        { Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock { param($p) $p } } |
-            Should -Throw -ExpectedMessage '*still holds 1 placeholder*'
+        $before = @(Get-ChildItem -Path ([System.IO.Path]::GetTempPath()) -Filter 'vdi-iac-answerfile-*' -Directory).Count
 
-        @(Get-ChildItem -Path $root -Filter 'autounattend-*.xml' -File) | Should -BeNullOrEmpty
+        { Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock { param($p) $p } } |
+            Should -Throw -ExpectedMessage '*unsubstituted placeholder*LEFTOVER*'
+
+        @(Get-ChildItem -Path ([System.IO.Path]::GetTempPath()) -Filter 'vdi-iac-answerfile-*' -Directory).Count |
+            Should -Be $before
+    }
+
+    It 'removes its own working directory, wherever it chose to put it' {
+        $root = NewTempDir
+        $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
+
+        $workRoot = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock { param($p) Split-Path -Parent $p }
+
+        Test-Path -LiteralPath $workRoot | Should -BeFalse
+    }
+
+    It 'writes the rendered file somewhere the caller did not choose' {
+        # The caller cannot name the location, so a rendered credential cannot
+        # be steered into the repository or through a redirected path.
+        $root = NewTempDir
+        $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
+
+        $path = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock { param($p) $p }
+
+        $path | Should -Not -BeLike "$script:RepoRoot*"
+        (Split-Path -Leaf (Split-Path -Parent $path)) | Should -BeLike 'vdi-iac-answerfile-*'
     }
 
     It 'reports rather than throws when removal is impossible' {
@@ -230,8 +299,8 @@ Describe 'the rendered file is short-lived' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
 
-        $mode = Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock {
+        $mode = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock {
                 param($p) [System.IO.File]::GetUnixFileMode($p)
             }
 
@@ -250,8 +319,8 @@ Describe 'the rendered file is short-lived' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
 
-        $acl = Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock { param($p) Get-Acl -LiteralPath $p }
+        $acl = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock { param($p) Get-Acl -LiteralPath $p }
 
         # Inheritance off, or a permissive parent directory silently grants
         # access the explicit rules never mention.
@@ -268,7 +337,7 @@ Describe 'the rendered file is short-lived' {
         # rendered credential is readable by anything else on the machine.
         $module = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'source-qualification' 'scripts' 'AnswerFile.psm1') -Raw
         $create = $module.IndexOf('NewRestrictedFile -Path $renderedPath')
-        $write = $module.IndexOf('WriteWithSecrets -Template')
+        $write = $module.IndexOf('WriteRenderedAnswerFile -Template')
         $create | Should -BeGreaterThan 0
         $create | Should -BeLessThan $write
     }
@@ -282,8 +351,8 @@ Describe 'the secret does not escape' {
 
         $caught = $null
         try {
-            Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-                -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock { param($p) throw "failed reading $p" }
+            Invoke-WithRenderedAnswerFile -Declaration $declaration `
+                -Secrets (DefaultSecrets) -ScriptBlock { param($p) throw "failed reading $p" }
         }
         catch { $caught = $_ }
 
@@ -296,8 +365,8 @@ Describe 'the secret does not escape' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
 
-        $returned = Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock {
+        $returned = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock {
                 param($p)
                 if (Test-Path -LiteralPath $p) { 'done' } else { 'missing' }
             }
@@ -310,8 +379,8 @@ Describe 'the secret does not escape' {
         $root = NewTempDir
         $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
 
-        $verbose = $($null = Invoke-WithRenderedAnswerFile -Declaration $declaration -Values (DefaultValues) `
-            -Secrets (DefaultSecrets) -WorkRoot $root -ScriptBlock { param($p) $p } -Verbose) 4>&1
+        $verbose = $($null = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets (DefaultSecrets) -ScriptBlock { param($p) $p } -Verbose) 4>&1
 
         "$verbose" | Should -Not -Match ([regex]::Escape($script:SecretText))
     }
@@ -449,5 +518,170 @@ Describe 'setup residue in the guest' {
 
         @($outcome.Results | Where-Object Outcome -EQ 'not-attempted').Count | Should -Be 2
         @(Get-SetupResidue -SystemDrive $drive).Count | Should -Be 2
+    }
+}
+
+Describe 'XML safety of the secret' {
+
+    It 'renders a password containing <label> to the exact intended value' -ForEach @(
+        @{ label = 'an ampersand';        secret = 'pa&ss' }
+        @{ label = 'a less-than sign';    secret = 'pa<ss' }
+        @{ label = 'both, and a quote';   secret = 'a&b<c>d"e''f' }
+        @{ label = 'only markup';         secret = '<&>' }
+        @{ label = 'an entity lookalike'; secret = '&amp;' }
+    ) {
+        # An unescaped & or < produces a document that is either malformed or
+        # parses to a different value than the one set on the account, and the
+        # symptom is a login that does not work -- a long way from the cause.
+        #
+        # The escaped write happens a run at a time straight into the stream, so
+        # proving it means parsing the result and comparing the decoded value.
+        # A single root element: the default fixture is two siblings, which is
+        # not a well-formed document and would fail this test for a reason that
+        # has nothing to do with escaping.
+        $root = NewTempDir
+        $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root `
+            -Template '<u><v>{{ADMINISTRATOR_PASSWORD}}</v><i>{{IMAGE_INDEX}}</i></u>')
+        $secure = AsSecure $secret
+        # Copied into a plainly named variable the scriptblock can see. Pester's
+        # -ForEach variable is not reachable from inside the block.
+        $expected = $secret
+
+        $verdict = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets @{ ADMINISTRATOR_PASSWORD = $secure } -ScriptBlock {
+                param($p)
+                $xml = [xml](Get-Content -LiteralPath $p -Raw)
+                [PSCustomObject]@{
+                    Parsed  = $true
+                    Decoded = ($xml.u.v -eq $expected)
+                }
+            }
+
+        $verdict.Parsed | Should -BeTrue -Because 'the rendered document must be well-formed XML'
+        $verdict.Decoded | Should -BeTrue -Because 'the parsed value must equal the password exactly'
+    }
+
+    It 'produces a well-formed document for the committed template' {
+        # No temporary directory needed: the renderer owns where it writes.
+        $declaration = Import-AnswerFileTemplate -Path $script:Committed
+
+        $wellFormed = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets @{ ADMINISTRATOR_PASSWORD = (AsSecure 'p@ss&word<1>') } -ScriptBlock {
+                param($p)
+                try { $null = [xml](Get-Content -LiteralPath $p -Raw); $true } catch { $false }
+            }
+
+        $wellFormed | Should -BeTrue
+    }
+}
+
+Describe 'the duplicate-declaration bypass' {
+
+    It 'refuses a placeholder declared twice' {
+        # uniqueItems compares whole objects, so the same name with different
+        # flags satisfies the schema. The duplicate is the bypass: the
+        # non-secret copy takes a plain value and fills the same position.
+        $root = NewTempDir
+        $path = NewTemplateSet -Root $root -Template '<v>{{ADMINISTRATOR_PASSWORD}}</v><i>{{IMAGE_INDEX}}</i>' -Placeholders @(
+            @{ name = 'ADMINISTRATOR_PASSWORD'; secret = $true;  description = 'The protected declaration.' }
+            @{ name = 'ADMINISTRATOR_PASSWORD'; secret = $false; description = 'The bypass.' }
+            @{ name = 'IMAGE_INDEX';            secret = $false; description = 'Index.' })
+
+        { Import-AnswerFileTemplate -Path $path } |
+            Should -Throw -ExpectedMessage '*more than once: ADMINISTRATOR_PASSWORD*'
+    }
+
+    It 'refuses a plain-text position filled by a non-secret placeholder' {
+        # Schema-valid and internally consistent. What is wrong is that the
+        # position holding a credential would be substituted from ordinary
+        # values and never take the protected write path.
+        $root = NewTempDir
+        Set-Content -LiteralPath (Join-Path $root 'unattend.xml.template') `
+            -Value '<Value>{{IMAGE_INDEX}}</Value><PlainText>true</PlainText>' -Encoding utf8 -NoNewline
+        $path = Join-Path $root 'unattend.template.json'
+        @{
+            schemaVersion = 1; templateFile = 'unattend.xml.template'
+            imageSelection = @{ edition = 'Windows Enterprise'; index = 1; architecture = 'x64'; language = 'en-US' }
+            placeholders = @(@{ name = 'IMAGE_INDEX'; secret = $false; description = 'Not secret.' })
+        } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding utf8
+
+        { Import-AnswerFileTemplate -Path $path } |
+            Should -Throw -ExpectedMessage '*must name a placeholder declared exactly once and marked secret*'
+    }
+}
+
+Describe 'a failed deletion is terminal' {
+
+    BeforeAll {
+        function BlockDeletion {
+            # A real filesystem condition. On Unix unlink needs write permission
+            # on the directory; on Windows an exclusive handle prevents removal.
+            param([string] $Path)
+            $parent = Split-Path -Parent $Path
+            if ($IsWindows) {
+                [PSCustomObject]@{
+                    Handle = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+                        [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+                    Parent = $parent; Mode = $null
+                }
+            }
+            else {
+                $mode = [System.IO.File]::GetUnixFileMode($parent)
+                [System.IO.File]::SetUnixFileMode($parent,
+                    [System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserExecute)
+                [PSCustomObject]@{ Handle = $null; Parent = $parent; Mode = $mode }
+            }
+        }
+
+        function UnblockDeletion {
+            param($Block)
+            if ($Block.Handle) { $Block.Handle.Dispose() }
+            if ($Block.Mode) { [System.IO.File]::SetUnixFileMode($Block.Parent, $Block.Mode) }
+        }
+    }
+
+    It 'fails the run when the rendered file cannot be removed' {
+        # The previous coverage exercised only the harmless 'absent' case, which
+        # says nothing about what happens when a credential is genuinely stuck
+        # on disk. Work that succeeded while leaving one there has not succeeded.
+        $root = NewTempDir
+        $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
+        $script:Block = $null
+
+        try {
+            { Invoke-WithRenderedAnswerFile -Declaration $declaration `
+                -Secrets (DefaultSecrets) -ScriptBlock {
+                    param($p)
+                    $script:Block = BlockDeletion -Path $p
+                    'work completed'
+                } } | Should -Throw -ExpectedMessage '*credential remains on disk*'
+        }
+        finally { if ($script:Block) { UnblockDeletion -Block $script:Block } }
+    }
+
+    It 'preserves the original failure when work and cleanup both fail' {
+        # The caller needs the failure that started it. The cleanup outcome is
+        # recorded beside it rather than replacing it, or the run reports a
+        # deletion problem and hides why the build broke.
+        $root = NewTempDir
+        $declaration = Import-AnswerFileTemplate -Path (NewTemplateSet -Root $root)
+        $script:Block = $null
+        $caught = $null
+
+        try {
+            try {
+                Invoke-WithRenderedAnswerFile -Declaration $declaration `
+                    -Secrets (DefaultSecrets) -ScriptBlock {
+                        param($p)
+                        $script:Block = BlockDeletion -Path $p
+                        throw 'the build failed first'
+                    } -WarningAction SilentlyContinue
+            }
+            catch { $caught = $_ }
+        }
+        finally { if ($script:Block) { UnblockDeletion -Block $script:Block } }
+
+        $caught.Exception.Message | Should -Be 'the build failed first'
+        $caught.Exception.Data['CleanupOutcome'] | Should -Be 'failed'
     }
 }

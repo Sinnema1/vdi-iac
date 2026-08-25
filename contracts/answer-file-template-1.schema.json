@@ -5,30 +5,61 @@
   "description": "Declares the placeholders an answer-file template carries and which of them are secret. Rendering is driven by this declaration rather than by scanning the template, so a placeholder that is present in one and not the other is an error instead of a silently unsubstituted token or an unnoticed extra substitution.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "templateFile", "imageSelection", "placeholders"],
+  "required": [
+    "schemaVersion",
+    "templateFile",
+    "imageSelection",
+    "placeholders"
+  ],
   "properties": {
-    "schemaVersion": { "type": "integer", "const": 1 },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
     "templateFile": {
       "description": "The template this declaration describes, relative to the declaration's own directory. Never an absolute path and never traversing upward.",
       "type": "string",
       "minLength": 1,
       "maxLength": 255,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      "pattern": "\\A[A-Za-z0-9][A-Za-z0-9._-]*\\z"
     },
     "imageSelection": {
       "description": "The image this answer file installs, which must agree with the qualified media reference. Setup selects an image; a build whose answer file and media reference disagree installs something other than what was qualified.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["edition", "index", "architecture", "language"],
+      "required": [
+        "edition",
+        "index",
+        "architecture",
+        "language"
+      ],
       "properties": {
-        "edition": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[ -~]+$" },
-        "index": { "type": "integer", "minimum": 1, "maximum": 64 },
-        "architecture": { "type": "string", "enum": ["x64", "arm64"] },
-        "language": { "type": "string", "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$" }
+        "edition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\A[ -~]+\\z"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "architecture": {
+          "type": "string",
+          "enum": [
+            "x64",
+            "arm64"
+          ]
+        },
+        "language": {
+          "type": "string",
+          "pattern": "\\A[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?\\z"
+        }
       }
     },
     "placeholders": {
-      "description": "Every placeholder the template carries. Rendering fails if the template holds one that is not declared here, or if this declares one the template does not hold.",
+      "description": "Every placeholder the template carries. uniqueItems compares whole objects, so it does not prevent one name appearing twice with different flags; that uniqueness is enforced semantically when the declaration is imported.",
       "type": "array",
       "minItems": 1,
       "maxItems": 32,
@@ -36,12 +67,16 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "secret", "description"],
+        "required": [
+          "name",
+          "secret",
+          "description"
+        ],
         "properties": {
           "name": {
             "description": "Substituted where the template holds {{NAME}}. Upper snake case, so a placeholder is visually distinct from surrounding markup.",
             "type": "string",
-            "pattern": "^[A-Z][A-Z0-9_]{1,62}$"
+            "pattern": "\\A[A-Z][A-Z0-9_]{1,62}\\z"
           },
           "secret": {
             "description": "True for a value that must never reach a log, an argument list, evidence, or an exception message. A secret value is written through a byte buffer that is cleared afterwards rather than through a managed string.",
@@ -51,7 +86,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "pattern": "^[ -~]+$"
+            "pattern": "\\A[ -~]+\\z"
           }
         }
       }

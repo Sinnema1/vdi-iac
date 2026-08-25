@@ -1024,8 +1024,9 @@ stage includes its own positive, negative, and regression tests**. The order is
 deliberate: everything provable without a lab comes first, so the untestable
 surface is as small as possible when a target finally exists.
 
-1. media qualification -- an exact media reference resolved and verified against
-   a separately published checksum, with evidence. Host-side and CI-provable.
+1. media qualification -- **complete, CI-proven**. An exact media reference
+   resolved and verified against a separately published checksum, with evidence.
+   Host-side.
 
    Scope, stated so it is not overread: this stage **fingerprints the artifact
    and records the declared installation selection**. It does not open the media,

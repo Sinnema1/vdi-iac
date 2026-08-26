@@ -1058,7 +1058,11 @@ surface is as small as possible when a target finally exists.
    rotating the build credential is defined here and **implemented in stage 5**,
    before sealing, so that a sealed image never carries a working one. The table
    above is authoritative on what exists today;
-3. image identity and the provenance record -- **complete, CI-proven**. Three identities
+3. image identity and the provenance record -- **implementation complete and
+   locally verified; remote CI confirmation pending due to the active GitHub
+   Actions incident**. Acceptance is distinct from progress: this stage is not
+   described as CI-proven until a workflow run for its exact commit reports
+   success, with the run's head SHA checked before the result is accepted. Three identities
    stay distinct and all three are bound together in provenance, because
    collapsing any two makes a question unanswerable:
 

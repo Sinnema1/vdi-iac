@@ -252,6 +252,11 @@ function Get-AnswerFileValueSet {
         IMAGE_INDEX            = [string]$selection.index
         UI_LANGUAGE            = $selection.language
         PROCESSOR_ARCHITECTURE = $architecture
+        # Build-VM settings, also from the declaration rather than the caller.
+        # They describe the machine the build runs on, not the image:
+        # generalization removes the computer name.
+        COMPUTER_NAME          = $Declaration.buildSettings.computerName
+        TIME_ZONE              = $Declaration.buildSettings.timeZone
     }
 }
 

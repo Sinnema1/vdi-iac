@@ -9,6 +9,7 @@
     "schemaVersion",
     "templateFile",
     "imageSelection",
+    "buildSettings",
     "placeholders"
   ],
   "properties": {
@@ -55,6 +56,29 @@
         "language": {
           "type": "string",
           "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
+        }
+      }
+    },
+    "buildSettings": {
+      "description": "Build-time settings the answer file states rather than leaving to the installer. They describe the build VM, not the image: generalization removes the computer name, and the time zone is set again by whatever provisions from the sealed image.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "computerName",
+        "timeZone"
+      ],
+      "properties": {
+        "computerName": {
+          "description": "The build VM's name. NetBIOS limits it to 15 characters.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,14}$"
+        },
+        "timeZone": {
+          "description": "A Windows time zone identifier, for example UTC.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[ -~]+$"
         }
       }
     },

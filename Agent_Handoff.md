@@ -1096,12 +1096,20 @@ surface is as small as possible when a target finally exists.
      reference, and the VM instance UUID. The recorded name is display metadata
      and never an identifier. All of it is environment-specific, excluded from
      `recipeDigest`, and only observable in a lab-produced record;
-4. the vSphere builder configuration -- source definition, pinned plugin
-   versions, hardware and boot configuration, and the media reference. It
+4. the vSphere builder configuration and the operational answer file -- source
+   definition, pinned plugin versions, hardware and boot configuration, the
+   media reference, and a full disk, locale, and account configuration. It
    consumes the Stage 1 qualification record and reverifies the media at its own
    input boundary, because a check performed by an earlier stage is a claim
-   about the past. Closes as **configuration validated in CI; execution lab
-   pending**: `packer validate` resolves references a syntax check would not,
+   about the past.
+
+   **The answer file has not been validated against Windows System Image
+   Manager.** Nothing in this repository parses component names or checks that a
+   setting sits in the right configuration pass, so a component in the wrong
+   pass satisfies every check here and then hangs a real setup at a prompt. SIM
+   validation is a lab obligation and is outstanding.
+
+   Closes as **configuration validated in CI; execution lab pending**: `packer validate` resolves references a syntax check would not,
    and proves nothing about vSphere connectivity, media reachability, boot
    behavior, or whether the build converts to a template;
 5. pre-generalization checks, generalization, shutdown, and sealing, with

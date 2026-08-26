@@ -44,7 +44,7 @@ What exists today:
 | Packer lab harness (null builder) | implemented; lab validation pending |
 | Lab scenarios (positive, payload tamper, descriptor tamper) | runnable against a target; never executed |
 | Image identity and provenance contract | Increment 3 stage 3 complete, locally verified; CI confirmation pending |
-| Packer image construction and sealing | not started |
+| Packer image construction and sealing | Increment 3 stage 4: configuration validated locally; never executed |
 | Terraform and Citrix MCS provisioning | not started |
 | Promotion, reconciliation, and retirement | not started |
 

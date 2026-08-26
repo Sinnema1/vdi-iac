@@ -194,7 +194,12 @@ jobs:
         with:
           version: 1.15.4
       - name: Format check
-        run: packer fmt -check -recursive packer/harness
+        run: packer fmt -check -recursive packer/harness packer/builds
+
+      - name: Install pinned plugins
+        # The build configuration declares the vSphere plugin. Without init,
+        # validate cannot resolve the source block and reports nothing useful.
+        run: packer init packer/builds
       - name: Validate the harness
         shell: pwsh
         run: |
@@ -241,6 +246,68 @@ jobs:
 
           # The step inherits the last exit code, and packer's expected non-zero
           # would fail a step whose assertion just passed.
+          exit 0
+
+  packer-build-config:
+    name: Packer build configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+        with:
+          version: 1.15.4
+      - name: Install pinned plugins
+        run: packer init packer/builds
+      - name: Validate the build configuration
+        shell: pwsh
+        run: |
+          # Configuration only. This resolves references and checks the
+          # configuration; it says nothing about vCenter connectivity, media
+          # reachability, boot behaviour, or whether a build converts to a
+          # template. Nothing in CI runs a build.
+          $work = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+          $evidence = Join-Path $work 'evidence'
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $work 'autounattend.xml') -Value '<x/>' -NoNewline
+
+          $varFile = Join-Path $work 'vars.pkrvars.hcl'
+          @"
+          vcenter_server              = "vcenter.example"
+          vcenter_username            = "builder@example"
+          vcenter_password            = "placeholder"
+          vcenter_insecure_connection = false
+          datacenter                  = "example-datacenter"
+          cluster                     = "example-cluster"
+          datastore                   = "example-datastore"
+          network                     = "example-network"
+          folder                      = "example-folder"
+          run_id                      = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
+          candidate_name              = "windows-candidate"
+          media_path                  = "[example-datastore] iso/windows.iso"
+          answer_file_path            = "$((Join-Path $work 'autounattend.xml') -replace '\\', '/')"
+          tools_source_dir            = "$((Join-Path $PWD 'source-qualification' 'scripts') -replace '\\', '/')"
+          guest_scripts_dir           = "$((Join-Path $PWD 'packer' 'scripts' 'guest') -replace '\\', '/')"
+          contracts_source_dir        = "$((Join-Path $PWD 'contracts') -replace '\\', '/')"
+          evidence_output_dir         = "$($evidence -replace '\\', '/')"
+          hardware_version            = 21
+          firmware                    = "efi-secure"
+          virtual_tpm                 = true
+          disk_controller_type        = "pvscsi"
+          disk_size_gb                = 80
+          cpus                        = 4
+          memory_mb                   = 8192
+          build_username              = "Administrator"
+          build_password              = "placeholder"
+          "@.Split("`n").TrimStart() -join "`n" | Set-Content -LiteralPath $varFile -Encoding utf8
+
+          packer validate "-var-file=$varFile" packer/builds
+      - name: Refuse to validate without inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $null = packer validate packer/builds 2>&1
+          if ($LASTEXITCODE -eq 0) { throw 'The build validated with nothing configured.' }
+          Write-Host "build refuses an unconfigured run (packer exit $LASTEXITCODE)"
           exit 0
 
   shell-lint:

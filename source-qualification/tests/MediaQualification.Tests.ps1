@@ -553,3 +553,135 @@ Describe 'media contract parity' {
             Should -Be ($script:Reference.properties.reference.properties.kind.enum -join ',')
     }
 }
+
+Describe 'the build re-verifies media at its own input boundary' {
+
+    BeforeAll {
+        function NewQualifiedMedia {
+            <#
+                Media, a reference, and a saved qualification record, as stage 1
+                would leave them for a build to consume.
+            #>
+            param([string] $RunId)
+            $root = NewTempDir
+            $media = NewMediaFile -Root $root
+            $referencePath = NewReference -Path (Join-Path $root 'media.json') -Digest $media.Digest
+            $record = Invoke-MediaQualification -ReferencePath $referencePath -MediaRoot $root -RunId $RunId
+            $recordPath = Join-Path $root 'qualification.json'
+            Save-MediaQualificationRecord -Record $record -Path $recordPath | Out-Null
+
+            [PSCustomObject]@{
+                Root = $root; Media = $media; RecordPath = $recordPath; RunId = $RunId
+            }
+        }
+    }
+
+    It 'accepts media that still matches what was qualified' {
+        $runId = Get-RunIdentifier
+        $qualified = NewQualifiedMedia -RunId $runId
+
+        $result = Assert-QualifiedMedia -RecordPath $qualified.RecordPath -MediaRoot $qualified.Root -RunId $runId
+        $result.MediaPath | Should -Be $qualified.Media.Path
+        $result.ObservedDigest | Should -Be $qualified.Media.Digest
+    }
+
+    It 'refuses media that changed after it was qualified' {
+        # The reason this boundary exists. The record says passed and is
+        # internally consistent; only the bytes have moved on. A build trusting
+        # the earlier check would install something nothing verified.
+        $runId = Get-RunIdentifier
+        $qualified = NewQualifiedMedia -RunId $runId
+        Set-Content -LiteralPath $qualified.Media.Path -Value 'substituted-after-qualification' -NoNewline -Encoding utf8
+
+        { Assert-QualifiedMedia -RecordPath $qualified.RecordPath -MediaRoot $qualified.Root -RunId $runId } |
+            Should -Throw -ExpectedMessage '*no longer matches the digest it was qualified against*'
+    }
+
+    It 'recomputes rather than trusting the digest the record observed' {
+        # A record whose observed digest was edited to match tampered media must
+        # still be refused: the comparison value is the expected digest, and the
+        # observation comes from the bytes now.
+        $runId = Get-RunIdentifier
+        $qualified = NewQualifiedMedia -RunId $runId
+        Set-Content -LiteralPath $qualified.Media.Path -Value 'substituted-after-qualification' -NoNewline -Encoding utf8
+        $tamperedDigest = (Get-FileHash -LiteralPath $qualified.Media.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+
+        $record = Get-Content -LiteralPath $qualified.RecordPath -Raw | ConvertFrom-Json
+        $record.integrity.observedDigest = $tamperedDigest
+        $record | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $qualified.RecordPath -Encoding utf8
+
+        { Assert-QualifiedMedia -RecordPath $qualified.RecordPath -MediaRoot $qualified.Root -RunId $runId } |
+            Should -Throw
+    }
+
+    It 'refuses a record reporting a failed qualification' {
+        $runId = Get-RunIdentifier
+        $root = NewTempDir
+        NewMediaFile -Root $root | Out-Null
+        $referencePath = NewReference -Path (Join-Path $root 'media.json') -Digest ('b' * 64)
+        $record = Invoke-MediaQualification -ReferencePath $referencePath -MediaRoot $root -RunId $runId
+        $recordPath = Join-Path $root 'qualification.json'
+        Save-MediaQualificationRecord -Record $record -Path $recordPath | Out-Null
+
+        { Assert-QualifiedMedia -RecordPath $recordPath -MediaRoot $root -RunId $runId } |
+            Should -Throw -ExpectedMessage '*Only qualified media may be built from*'
+    }
+
+    It 'refuses a record belonging to another run' {
+        # Consuming it would attach one run's qualification to another run's
+        # artifact, and provenance would name the wrong evidence.
+        $qualified = NewQualifiedMedia -RunId (Get-RunIdentifier)
+
+        { Assert-QualifiedMedia -RecordPath $qualified.RecordPath -MediaRoot $qualified.Root -RunId (Get-RunIdentifier) } |
+            Should -Throw -ExpectedMessage '*belongs to a different run*'
+    }
+
+    It 'refuses a record that is absent' {
+        # An absent record is not an implicit pass.
+        { Assert-QualifiedMedia -RecordPath (Join-Path (NewTempDir) 'missing.json') `
+            -MediaRoot (NewTempDir) -RunId (Get-RunIdentifier) } |
+            Should -Throw -ExpectedMessage '*not found*'
+    }
+
+    It 'refuses a record that does not satisfy its contract' {
+        $runId = Get-RunIdentifier
+        $qualified = NewQualifiedMedia -RunId $runId
+        '{ "schemaVersion": 1 }' | Set-Content -LiteralPath $qualified.RecordPath -Encoding utf8
+
+        { Assert-QualifiedMedia -RecordPath $qualified.RecordPath -MediaRoot $qualified.Root -RunId $runId } |
+            Should -Throw -ExpectedMessage '*does not satisfy its contract*'
+    }
+
+    It 'refuses a record carrying a control character' {
+        $runId = Get-RunIdentifier
+        $qualified = NewQualifiedMedia -RunId $runId
+        $record = Get-Content -LiteralPath $qualified.RecordPath -Raw | ConvertFrom-Json
+        $record.mediaId = "windows-baseline`n"
+        $record | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $qualified.RecordPath -Encoding utf8
+
+        { Assert-QualifiedMedia -RecordPath $qualified.RecordPath -MediaRoot $qualified.Root -RunId $runId } |
+            Should -Throw -ExpectedMessage '*control character 0x0A*'
+    }
+
+    It 'refuses media that has disappeared since qualification' {
+        $runId = Get-RunIdentifier
+        $qualified = NewQualifiedMedia -RunId $runId
+        Remove-Item -LiteralPath $qualified.Media.Path -Force
+
+        { Assert-QualifiedMedia -RecordPath $qualified.RecordPath -MediaRoot $qualified.Root -RunId $runId } |
+            Should -Throw
+    }
+
+    It 'refuses media reached through a link at the build boundary' -Skip:($IsWindows) {
+        # The same confinement rule qualification used: the locator is still a
+        # value from a document, and the root still bounds it.
+        $runId = Get-RunIdentifier
+        $qualified = NewQualifiedMedia -RunId $runId
+        $outside = NewMediaFile -Root (NewTempDir)
+        Remove-Item -LiteralPath $qualified.Media.Path -Force
+        $null = New-Item -ItemType SymbolicLink -Path $qualified.Media.Path -Target $outside.Path
+
+        { Assert-QualifiedMedia -RecordPath $qualified.RecordPath -MediaRoot $qualified.Root -RunId $runId } |
+            Should -Throw -ExpectedMessage '*redirected*'
+    }
+}

@@ -63,6 +63,7 @@ BeforeAll {
             Hardware = @{
                 HardwareVersion = 21; Firmware = 'efi'; SecureBoot = $true
                 DiskControllerType = 'pvscsi'; DiskSizeGb = 80; VirtualTpm = $true
+                Cpus = 4; MemoryMb = 8192; GuestOsType = 'windows11_64Guest'
             }
             Tooling = @{ PackerVersion = '1.15.4'; PluginVersions = @{ vsphere = '1.4.2' } }
         }
@@ -108,7 +109,7 @@ Describe 'recipe digest stability' {
         # version has to travel with it rather than be implied.
         $inputs = NewInputs
         $result = Get-RecipeDigest -RecipeInput (ConvertTo-RecipeInput @inputs)
-        $result.RecipeInputVersion | Should -Be 1
+        $result.RecipeInputVersion | Should -Be 2
         $result.RecipeDigest | Should -Match '^[0-9a-f]{64}$'
     }
 }
@@ -174,6 +175,9 @@ Describe 'every included input changes the digest' {
         @{ field = 'disk controller';   apply = { param($i) $i.Hardware.DiskControllerType = 'lsilogic' } }
         @{ field = 'disk size';         apply = { param($i) $i.Hardware.DiskSizeGb = 120 } }
         @{ field = 'virtual TPM';       apply = { param($i) $i.Hardware.VirtualTpm = $false } }
+        @{ field = 'processor count';   apply = { param($i) $i.Hardware.Cpus = 8 } }
+        @{ field = 'memory';            apply = { param($i) $i.Hardware.MemoryMb = 16384 } }
+        @{ field = 'guest OS type';     apply = { param($i) $i.Hardware.GuestOsType = 'windows9_64Guest' } }
         @{ field = 'packer version';    apply = { param($i) $i.Tooling.PackerVersion = '1.16.0' } }
         @{ field = 'plugin version';    apply = { param($i) $i.Tooling.PluginVersions['vsphere'] = '1.5.0' } }
     ) {
@@ -238,6 +242,8 @@ Describe 'a recipe cannot be partly specified' {
         @{ section = 'answer file'; table = 'AnswerFile'; key = 'TemplateDigest' }
         @{ section = 'build logic'; table = 'BuildLogic'; key = 'GuestContractVersion' }
         @{ section = 'hardware';    table = 'Hardware';   key = 'Firmware' }
+        @{ section = 'hardware';    table = 'Hardware';   key = 'Cpus' }
+        @{ section = 'hardware';    table = 'Hardware';   key = 'GuestOsType' }
         @{ section = 'tooling';     table = 'Tooling';    key = 'PackerVersion' }
     ) {
         # An absent input would otherwise digest as though it did not exist,

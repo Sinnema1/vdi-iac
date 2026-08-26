@@ -43,6 +43,14 @@ $script:SchemaFileByVersion = @{
 # must not promote.
 $script:SupportedRecipeInputVersions = @(1)
 
+# The manifest contract versions an image build can actually have consumed. The
+# recipe path reads installer kind, timeout, restart policy, exit codes, and
+# validation definitions; a version 1 package carries none of them, so a record
+# claiming version 1 describes provenance that path could not have produced. Not
+# a stylistic restriction -- the recipe would have terminated on the first
+# package rather than producing the digest the record carries.
+$script:SupportedImageBuildManifestVersions = @(2)
+
 # The ordered obligations a sealed candidate has to have met, from the charter.
 # Every one of them changes whether the image is usable or safe: media that was
 # never qualified, an answer file that never rendered, packages that never
@@ -215,6 +223,11 @@ function Test-SealedCandidate {
     # implements. One it does not know describes an identity it cannot reason
     # about, whatever else the record says.
     if ($Evidence.payload.recipeInputVersion -notin $script:SupportedRecipeInputVersions) { return $false }
+
+    # The manifest contract the run claims to have consumed must be one the
+    # recipe path can process. The envelope permits versions 1 and 2 because
+    # other result kinds legitimately carry version 1; an image build cannot.
+    if ($Evidence.manifestSchemaVersion -notin $script:SupportedImageBuildManifestVersions) { return $false }
 
 
     # Redundant, and kept deliberately. Mutation testing confirms no fixture can

@@ -69,9 +69,15 @@ fixed:
 
 Package order is semantic, and the sequence is the ascending explicit `order`
 value -- not the position a package happens to occupy in the file. **Packages
-are serialized in ascending `order`.** Reordering the JSON without changing an
-`order` value describes the same installation and must digest the same;
-changing an `order` value describes a different one and must not.
+are serialized in ascending `order`.**
+
+Two consequences, both of which must hold:
+
+- reordering the package array while every explicit `order` value stays the same
+  describes the same installation, and **must not** change the digest;
+- changing an `order` value changes what installs when, and **must** change it.
+
+A digest taken over array position would get both of these backwards.
 
 #### Included
 
@@ -239,6 +245,14 @@ it cannot run in CI.
   is most exposed to.
 - Changing an excluded value — `runId`, a timestamp, a datastore name, a
   temporary path — must leave the digest unchanged, one case per exclusion.
+- Synthetic artifact identities are appropriate in contract tests, and every
+  one must be labelled as invented at the point it is created. They exercise the
+  shape; they are never evidence that a platform artifact exists, and no
+  synthetic identity may be cited as a build having run.
+- The manifest contract version a build result claims must be one the recipe
+  path can process. The envelope admits version 1 because other result kinds
+  carry it legitimately; an image build cannot, since a version 1 package has no
+  installer or validation fields for the recipe to read.
 - A provenance record containing a credential, in any field, must be refused.
   Asserting the absence of one specific key is not enough; the test should
   search the serialized document for a canary value supplied as a secret.

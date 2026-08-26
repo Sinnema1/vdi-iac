@@ -449,6 +449,26 @@ Describe 'the candidate gate establishes schema validity itself' {
         Test-SealedCandidate -Json (AsJson $document) | Should -BeFalse
     }
 
+    It 'refuses a candidate claiming a manifest version the recipe path cannot process' {
+        # The envelope permits manifest version 1 because other result kinds
+        # legitimately carry it. An image build cannot: a version 1 package has
+        # no installer or validation fields, which are exactly what the recipe
+        # reads, so the digest in this record could never have been produced.
+        # The document is otherwise complete and schema-valid.
+        $document = NewBuildEvidence -ArtifactIdentity (NewArtifact)
+        $document.manifestSchemaVersion = 1
+
+        Test-EvidenceEnvelopeDocument -Json (AsJson $document) | Should -BeNullOrEmpty
+        Test-SealedCandidate -Json (AsJson $document) | Should -BeFalse
+    }
+
+    It 'accepts a candidate declaring manifest version 2' {
+        # The other half: the version check must not refuse everything.
+        $document = NewBuildEvidence -ArtifactIdentity (NewArtifact)
+        $document.manifestSchemaVersion = 2
+        Test-SealedCandidate -Json (AsJson $document) | Should -BeTrue
+    }
+
     It 'accepts the complete, valid candidate' {
         # The positive case, so the refusals above are not passing for want of a
         # document that could ever succeed.

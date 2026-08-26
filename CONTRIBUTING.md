@@ -93,7 +93,15 @@ pwsh -NoProfile -Command "'./source-qualification','./scripts/ci','./packer/scri
 ```
 
 ```bash
-packer fmt -check -recursive packer/harness
+packer fmt -check -recursive packer/harness packer/builds
+```
+
+The build configuration declares the vSphere plugin, so install it once before
+running the builder tests; without it `packer validate` fails on a missing
+plugin rather than on anything being tested:
+
+```bash
+packer init packer/builds
 ```
 
 A lab scenario needs a disposable Windows target and is never run by CI:

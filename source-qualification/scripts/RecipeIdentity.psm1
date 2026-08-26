@@ -182,9 +182,17 @@ function NewPackageInput {
         }
 
         if ($package.installer.PSObject.Properties.Name -contains 'exitCodes' -and $null -ne $package.installer.exitCodes) {
+            $exitCodes = $package.installer.exitCodes
             $entry.exitCodes = [ordered]@{
-                success         = @($package.installer.exitCodes.success | ForEach-Object { [int] $_ })
-                restartRequired = @($package.installer.exitCodes.restartRequired | ForEach-Object { [int] $_ })
+                success = @($exitCodes.success | ForEach-Object { [int] $_ })
+            }
+            # restartRequired is optional in the contract, and reading an absent
+            # property throws under StrictMode. Included only when the manifest
+            # declares it, so a schema-valid manifest without one still produces
+            # a recipe -- and so an empty list is not conflated with an absent
+            # policy, which would digest the same while meaning something else.
+            if ($exitCodes.PSObject.Properties.Name -contains 'restartRequired' -and $null -ne $exitCodes.restartRequired) {
+                $entry.exitCodes.restartRequired = @($exitCodes.restartRequired | ForEach-Object { [int] $_ })
             }
         }
 

@@ -29,8 +29,12 @@
       - unpaired surrogates refused. The default UTF-8 encoder replaces every
         invalid code unit with U+FFFD, so two strings differing only in which
         lone surrogate they carry encode to identical bytes and digest the same.
-        A collision in an identity mechanism is the one failure it cannot have,
-        so the encoder is strict and the check runs first to name the field.
+        A collision in an identity mechanism is the one failure it cannot have.
+        The explicit check is what prevents it, and it runs first so the error
+        names the field; the strict encoder is a backstop that would raise if a
+        value ever reached it another way. Because the check comes first, the
+        encoder cannot be exercised independently -- it is defence in depth, not
+        a separately tested control.
 #>
 
 Set-StrictMode -Version 3.0

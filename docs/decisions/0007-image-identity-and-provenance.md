@@ -34,7 +34,7 @@ belong to it by default and cannot be added by editing an enum in passing.
 | --- | --- | --- | --- |
 | `recipeDigest` | what was built | SHA-256 over canonical inputs | the inputs alone |
 | `runId` | which execution built it | canonical UUID, already defined by ADR 5 | the run |
-| artifact identity | which object resulted | vSphere managed object reference plus its recorded name | the platform |
+| artifact identity | which object resulted | vCenter instance id + managed object reference + VM instance UUID | the platform |
 
 Two builds from identical inputs share a `recipeDigest` and differ in `runId`
 and artifact identity. Change any input and all three differ. A build that fails
@@ -67,9 +67,11 @@ fixed:
 | Whitespace | none between tokens |
 | Digest | SHA-256 over the resulting bytes |
 
-Package order is semantic: the manifest declares an installation sequence, and
-two manifests differing only in that sequence can produce different images.
-**The package array is serialized in declared order and never sorted.**
+Package order is semantic, and the sequence is the ascending explicit `order`
+value -- not the position a package happens to occupy in the file. **Packages
+are serialized in ascending `order`.** Reordering the JSON without changing an
+`order` value describes the same installation and must digest the same;
+changing an `order` value describes a different one and must not.
 
 #### Included
 
@@ -81,12 +83,15 @@ the recipe says what the media must be; an observation is a fact about one run.
 order. For each package, everything that can change what is installed or whether
 the result is accepted:
 
-- `id`, `version`, expected SHA-256;
+- `id`, `version`, and the expected SHA-256, which the contract names `sha256`
+  at the package root -- `source` is the reference string, not a container;
 - `order` and `required`;
 - installer `kind`;
 - the MSI property map (key-sorted) or the EXE argument tokens **in declared
   order**, since arguments are positional;
-- `timeoutSeconds`, `restartPolicy`, and the exit-code policy;
+- `timeoutSeconds`, `restartPolicy`, and the exit-code policy. `restartRequired`
+  is optional in the contract and is included only when declared, so an absent
+  policy and an explicitly empty one stay distinguishable;
 - the validation definitions, in declared order.
 
 Validation definitions are included rather than treated as separate policy. A
@@ -192,7 +197,11 @@ Artifact identity is therefore all three:
 | vCenter instance identifier | the scope the reference is unique within |
 | managed object reference | the object within that scope |
 | VM instance UUID | survives a rename, and distinguishes a restored or re-registered object |
-| recorded name | **display metadata only**, never an identifier |
+| recorded name | **display metadata only**, never an identifier, and optional |
+
+All three of the first rows are required together. Any one of them alone is
+ambiguous: a reference is scoped to an instance, and a name can be changed by
+anyone with permission to rename a VM.
 
 These are environment-specific and therefore excluded from `recipeDigest`
 entirely. They appear only in a provenance record produced by a real build,
@@ -236,6 +245,15 @@ it cannot run in CI.
 - A version 2 envelope that validated before version 3 existed must still
   validate, proven by a test, and dispatch must refuse an unknown version rather
   than falling back to the newest.
+- A sealed candidate must carry every build obligation the charter defines,
+  once each, in order, passed, and naming no failure: media qualification, the
+  answer file, construction, provisioning, pre-generalization checks, credential
+  and residue removal, generalization, an observed shutdown, the seal itself,
+  and complete provenance. A single passed seal phase is a seal event, not a
+  build, and must not promote anything.
+- The gate that answers "is this a sealed candidate" must establish schema
+  validity itself rather than assuming a caller validated first, and must refuse
+  a recipe-input version it does not implement.
 - Absent artifact identity must be accepted for failed, incomplete, and pre-seal
   records, and required only for a positively sealed result. A record must never
   be reported as a sealed candidate on the strength of the document alone.

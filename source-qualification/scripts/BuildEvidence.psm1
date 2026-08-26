@@ -37,6 +37,35 @@ $script:SchemaFileByVersion = @{
     3 = 'evidence-envelope-3.schema.json'
 }
 
+# The recipe-input document versions this code knows how to interpret. A digest
+# is only comparable within one version, so a record declaring a version nobody
+# here implements describes an identity this code cannot reason about -- and
+# must not promote.
+$script:SupportedRecipeInputVersions = @(1)
+
+# The ordered obligations a sealed candidate has to have met, from the charter.
+# Every one of them changes whether the image is usable or safe: media that was
+# never qualified, an answer file that never rendered, packages that never
+# installed, a pre-generalization check that never ran, a credential left in the
+# image, an image never generalized, a shutdown never observed, a seal that
+# never completed, or provenance that cannot say what was built.
+#
+# Order is part of the requirement. Residue removal after generalization would
+# be sealing the credential in; provenance before sealing could not name the
+# artifact.
+$script:RequiredSealPhases = @(
+    'media-qualification'
+    'answer-file'
+    'construction'
+    'provisioning'
+    'pre-generalization'
+    'credential-residue'
+    'generalization'
+    'shutdown'
+    'seal'
+    'provenance'
+)
+
 function ResolveEnvelopeSchema {
     param([int] $Version)
 
@@ -69,8 +98,12 @@ function Test-EvidenceEnvelopeDocument {
     param([Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Json)
 
     try { $parsed = $Json | ConvertFrom-Json } catch { return 'evidence_malformed' }
+    if ($null -eq $parsed) { return 'evidence_malformed' }
 
-    if ($null -eq $parsed.resultSchemaVersion) { return 'evidence_malformed' }
+    # Presence first. Reading an absent property throws under StrictMode, so a
+    # document without a version would fail with an exception rather than the
+    # bounded reason a caller can act on.
+    if (-not (HasProperty -Object $parsed -Name 'resultSchemaVersion')) { return 'evidence_malformed' }
     try { $schema = ResolveEnvelopeSchema -Version ([int] $parsed.resultSchemaVersion) }
     catch { return 'evidence_unsupported_version' }
 
@@ -78,10 +111,15 @@ function Test-EvidenceEnvelopeDocument {
         return 'evidence_malformed'
     }
 
-    # The schema patterns are ECMA-262 portable, so under .NET a trailing
-    # newline satisfies a pattern ending in $. This is what refuses it.
-    try { Assert-NoControlCharacter -Node $parsed -Location 'envelope' -Subject 'Evidence' }
-    catch { return 'evidence_malformed' }
+    # Version 3 only. The patterns are ECMA-262 portable, so under .NET a
+    # trailing newline satisfies a pattern ending in $, and this refuses it.
+    # Applying it to version 2 as well would change what a published contract
+    # accepts, which is a behavioural change to a version that is meant to be
+    # stable -- and would be made here, silently, as a side effect.
+    if ([int] $parsed.resultSchemaVersion -eq 3) {
+        try { Assert-NoControlCharacter -Node $parsed -Location 'envelope' -Subject 'Evidence' }
+        catch { return 'evidence_malformed' }
+    }
 
     $null
 }
@@ -116,9 +154,8 @@ function Test-ImageBuildResult {
             if (@($payload.phases | Where-Object { $_.outcome -notin @('passed', 'skipped') }).Count -gt 0) {
                 return 'sealed_with_failed_phase'
             }
-            if (@($payload.phases | Where-Object { $_.name -eq 'seal' -and $_.outcome -eq 'passed' }).Count -ne 1) {
-                return 'sealed_without_a_passed_seal_phase'
-            }
+            $phaseReason = TestRequiredSealPhases -Phases @($payload.phases)
+            if ($phaseReason) { return $phaseReason }
         }
         'seal-unconfirmed' {
             # An artifact may exist. Recording it is useful; calling it a
@@ -160,9 +197,25 @@ function Test-SealedCandidate {
     #>
     [CmdletBinding()]
     [OutputType([bool])]
-    param([Parameter(Mandatory)] $Evidence)
+    param([Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Json)
+
+    # Schema validity is established here rather than assumed. This took a
+    # parsed object and answered from semantic rules alone, so a document the
+    # validator rejected -- a malformed artifact identity, an unsupported
+    # envelope version -- could still be reported as a candidate by any caller
+    # who forgot the separate step. A gate that depends on being called in the
+    # right order is not a gate.
+    if (Test-EvidenceEnvelopeDocument -Json $Json) { return $false }
+
+    $Evidence = $Json | ConvertFrom-Json
 
     if ($Evidence.resultKind -ne 'image-build') { return $false }
+
+    # A digest is only comparable within a recipe-input version this code
+    # implements. One it does not know describes an identity it cannot reason
+    # about, whatever else the record says.
+    if ($Evidence.payload.recipeInputVersion -notin $script:SupportedRecipeInputVersions) { return $false }
+
 
     # Redundant, and kept deliberately. Mutation testing confirms no fixture can
     # reach this line and pass the two below: a non-sealed state either carries
@@ -176,6 +229,35 @@ function Test-SealedCandidate {
     if ($Evidence.outcome -ne 'passed') { return $false }
     if (Test-ImageBuildResult -Evidence $Evidence) { return $false }
     $true
+}
+
+function TestRequiredSealPhases {
+    <#
+        A seal event is not a build. Before this existed a record carrying one
+        passed 'seal' phase was accepted as a candidate, so every obligation the
+        design rests on could be omitted, skipped, duplicated, or reordered
+        without preventing promotion -- and a phase marked passed while carrying
+        a failure reason was accepted too.
+
+        The sequence is matched exactly: same phases, same order, once each.
+    #>
+    param($Phases)
+
+    $observed = @($Phases | ForEach-Object { $_.name })
+    if ($observed.Count -ne $script:RequiredSealPhases.Count) { return 'sealed_without_every_required_phase' }
+
+    for ($i = 0; $i -lt $script:RequiredSealPhases.Count; $i++) {
+        if ($observed[$i] -ne $script:RequiredSealPhases[$i]) { return 'sealed_with_phases_out_of_order' }
+    }
+
+    foreach ($phase in $Phases) {
+        if ($phase.outcome -ne 'passed') { return 'sealed_with_a_phase_that_did_not_pass' }
+        # A passed phase naming a failure contradicts itself, and the reason is
+        # the more specific of the two claims.
+        if (HasProperty -Object $phase -Name 'reasonCode') { return 'sealed_with_a_phase_reporting_a_failure' }
+    }
+
+    $null
 }
 
 function HasProperty {

@@ -640,7 +640,7 @@
           "$ref": "#/definitions/artifactIdentity"
         },
         "phases": {
-          "description": "What ran, in order, with each phase's outcome.",
+          "description": "What ran, in order, with each phase's outcome. A record short of a sealed candidate may carry a subset; a sealed one may not.",
           "type": "array",
           "minItems": 1,
           "maxItems": 16,
@@ -660,10 +660,13 @@
                   "construction",
                   "provisioning",
                   "pre-generalization",
+                  "credential-residue",
                   "generalization",
                   "shutdown",
-                  "seal"
-                ]
+                  "seal",
+                  "provenance"
+                ],
+                "description": "The build phases. A sealed candidate must carry all of them, once each, in this order -- the ordering is enforced semantically, since a schema cannot express it."
               },
               "outcome": {
                 "enum": [

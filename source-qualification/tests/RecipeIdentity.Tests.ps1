@@ -329,6 +329,33 @@ Describe 'the committed manifest, through the real importer' {
         $after | Should -Not -Be $before
     }
 
+    It 'accepts an EXE package whose optional restart exit codes are absent' {
+        # restartRequired is optional in the contract, and reading an absent
+        # property throws under StrictMode. A schema-valid manifest omitting it
+        # imported cleanly and then terminated recipe generation.
+        $raw = Get-Content -LiteralPath $script:ManifestPath -Raw | ConvertFrom-Json -AsHashtable
+        foreach ($package in $raw.packages) {
+            if ($package.installer.kind -eq 'exe') { $package.installer.exitCodes = @{ success = @(0) } }
+        }
+        $path = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString() + '.json')
+        $raw | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path -Encoding utf8
+
+        $inputs = NewInputs
+        $inputs.Manifest = Import-PackageManifest -Path $path
+
+        { ConvertTo-RecipeInput @inputs } | Should -Not -Throw
+    }
+
+    It 'distinguishes absent restart exit codes from an empty list' {
+        # An absent policy and an explicitly empty one mean different things, and
+        # emitting an empty array for both would digest them identically.
+        $withCodes = NewInputs
+        $withoutCodes = NewInputs
+        $withoutCodes.Manifest.Packages[1].installer.exitCodes = [PSCustomObject]@{ success = @(0) }
+
+        DigestOf -Inputs $withoutCodes | Should -Not -Be (DigestOf -Inputs $withCodes)
+    }
+
     It 'carries the validation definitions the contract actually names' {
         # The contract names the discriminator `kind`. A fixture using `type`
         # would serialize a field no manifest carries and miss the real one.

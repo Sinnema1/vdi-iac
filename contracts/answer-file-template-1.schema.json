@@ -65,7 +65,8 @@
       "additionalProperties": false,
       "required": [
         "computerName",
-        "timeZone"
+        "timeZone",
+        "buildUsername"
       ],
       "properties": {
         "computerName": {
@@ -79,6 +80,11 @@
           "minLength": 1,
           "maxLength": 64,
           "pattern": "^[ -~]+$"
+        },
+        "buildUsername": {
+          "description": "The account the answer file configures and the build communicator authenticates as. Declared here so the two cannot disagree: a communicator authenticating as an account setup never configured waits at a timeout with nothing explaining why.",
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,19}$"
         }
       }
     },

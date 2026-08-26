@@ -93,38 +93,38 @@ variable "candidate_name" {
 }
 
 # ---------------------------------------------------------------------------
-# Inputs the build consumes. media_path is the path Assert-QualifiedMedia
-# returned, which is media whose digest was recomputed at this boundary.
+# Inputs the build consumes. media_url is the path Assert-QualifiedMedia
+# returned -- media whose digest was recomputed at this boundary -- and Packer
+# verifies the same file again against media_checksum before uploading it.
+#
+# The guest-side directories an earlier draft declared are gone: nothing in this
+# configuration provisions a guest yet, and an input nothing consumes is
+# scaffolding for a stage that has not been written.
 # ---------------------------------------------------------------------------
 
-variable "media_path" {
+variable "media_url" {
   type        = string
-  description = "Datastore path to media already re-verified at the build's input boundary."
+  description = "Path or URL to the media whose digest was recomputed at the build's input boundary. Packer verifies it again against media_checksum before uploading, so the bytes this build consumes are the bytes that were verified."
+}
+
+variable "media_checksum" {
+  type        = string
+  description = "The expected digest, algorithm-prefixed, from the qualification record. Established in version control before runtime, never computed from the artifact at build time."
+
+  validation {
+    condition     = can(regex("^sha(256|384|512):[0-9a-f]+$", var.media_checksum))
+    error_message = "The media_checksum must be algorithm-prefixed lowercase hex, for example sha256:abcd."
+  }
+}
+
+variable "winrm_bootstrap_path" {
+  type        = string
+  description = "The script the answer file's first-logon command runs to create the WinRM listener. Carries no credential."
 }
 
 variable "answer_file_path" {
   type        = string
   description = "The rendered answer file. It holds a working credential for as long as it exists and is removed by the renderer on every exit path."
-}
-
-variable "tools_source_dir" {
-  type        = string
-  description = "Guest-side modules uploaded to the build VM."
-}
-
-variable "guest_scripts_dir" {
-  type        = string
-  description = "Guest phase entry scripts."
-}
-
-variable "contracts_source_dir" {
-  type        = string
-  description = "Contracts uploaded so the guest can validate its own evidence."
-}
-
-variable "evidence_output_dir" {
-  type        = string
-  description = "Where retrieved guest evidence is written on the host."
 }
 
 # ---------------------------------------------------------------------------
@@ -169,12 +169,22 @@ variable "disk_size_gb" {
 
 variable "cpus" {
   type        = number
-  description = "Virtual CPUs for the build."
+  description = "Virtual CPUs. A recipe input: it is covered by recipeDigest, because installer behaviour and the resulting configuration can differ with it."
 }
 
 variable "memory_mb" {
   type        = number
-  description = "Memory for the build."
+  description = "Memory. A recipe input for the same reason as cpus, and because page file sizing follows from it."
+}
+
+variable "guest_os_type" {
+  type        = string
+  description = "The vSphere guest OS identifier. A recipe input: it changes the device model vSphere presents to setup. Restricted to Windows desktop identifiers, since the artifact is a desktop image."
+
+  validation {
+    condition     = contains(["windows9_64Guest", "windows11_64Guest"], var.guest_os_type)
+    error_message = "The guest_os_type must be a Windows desktop identifier: windows9_64Guest or windows11_64Guest."
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -183,7 +193,7 @@ variable "memory_mb" {
 
 variable "build_username" {
   type        = string
-  description = "Account the answer file creates, used to provision. Disabled or rotated before sealing."
+  description = "Account the answer file configures, supplied by ConvertTo-BuildVariableSet from the answer-file declaration so the two cannot disagree. Disabled or rotated before sealing, which is stage 5 work."
 }
 
 variable "build_password" {
@@ -192,13 +202,6 @@ variable "build_password" {
   description = "Injected at runtime. Matches the value rendered into the answer file."
 }
 
-locals {
-  guest_root       = "C:/vdi-iac-build"
-  tools_target     = "${local.guest_root}/tools"
-  guest_target     = "${local.guest_root}/guest"
-  contracts_target = "${local.guest_root}/contracts"
-  evidence_name    = "guest-evidence.json"
-}
 
 source "vsphere-iso" "windows" {
   vcenter_server      = var.vcenter_server
@@ -211,8 +214,13 @@ source "vsphere-iso" "windows" {
   datastore  = var.datastore
   folder     = var.folder
 
-  vm_name       = var.candidate_name
-  guest_os_type = "windows9Server64Guest"
+  vm_name = var.candidate_name
+
+  # Parameterised, not hard-coded. It was windows9Server64Guest -- a Windows
+  # Server identifier -- while the artifact this repository builds is a desktop
+  # image. Which desktop identifier is correct for a given media release needs
+  # lab confirmation; both permitted values are desktop ones.
+  guest_os_type = var.guest_os_type
 
   # Hardware, stated rather than inherited from a template.
   vm_version           = var.hardware_version
@@ -232,20 +240,42 @@ source "vsphere-iso" "windows" {
     network_card = "vmxnet3"
   }
 
-  # The media this build was authorised to use, and the answer file that drives
-  # it. The answer file travels as removable media rather than being typed at
-  # the boot prompt, so the credential never appears in a boot command.
-  iso_paths = [var.media_path]
+  # iso_url with a checksum, not iso_paths. The host re-verified a local file at
+  # the build's input boundary; iso_paths would name a datastore artifact that
+  # nothing here has seen, so the bytes verified would not be the bytes vSphere
+  # consumes. This way Packer verifies the same file against the same expected
+  # digest before uploading it.
+  iso_url      = var.media_url
+  iso_checksum = var.media_checksum
 
-  cd_files = [var.answer_file_path]
+  cd_files = [var.answer_file_path, var.winrm_bootstrap_path]
   cd_label = "OEMDRV"
 
   # WinRM rather than SSH: the guest is Windows, and provisioning runs
-  # PowerShell. The password is the one rendered into the answer file.
+  # PowerShell. The listener is created by the answer file's first-logon
+  # command; a fresh installation has none, and without it the build completes
+  # setup and then sits unreachable until this times out.
+  #
+  # HTTPS with a self-signed certificate. The build VM is transient and its
+  # certificate cannot belong to any trust chain, so accepting it is a bounded
+  # exception -- the alternative is a plaintext listener carrying the
+  # administrator password on the wire.
   communicator   = "winrm"
   winrm_username = var.build_username
   winrm_password = var.build_password
+  winrm_use_ssl  = true
+  winrm_insecure = true
+  winrm_port     = 5986
   winrm_timeout  = "4h"
+
+  # The answer file and the script its first-logon command runs. Both travel as
+  # removable media: a credential typed at a boot prompt is visible to anything
+  # watching the console and is recorded in the configuration itself.
+  #
+  # A boot_command is not used today. It is not prohibited -- a bounded,
+  # non-secret key sequence may prove necessary to start the installer, and
+  # whether it is needed is lab-validated. What must never appear in one is a
+  # credential.
 
   # Packer owns the shutdown, exactly as it owns the restart boundary. A guest
   # script that shut itself down would race the sealing step.
@@ -261,65 +291,34 @@ build {
   name    = "windows-candidate"
   sources = ["source.vsphere-iso.windows"]
 
-  # 1. Deliver the guest-side code and the contracts it validates against.
-  provisioner "file" {
-    source      = "${var.tools_source_dir}/"
-    destination = "${local.tools_target}/"
-  }
-
-  provisioner "file" {
-    source      = "${var.guest_scripts_dir}/"
-    destination = "${local.guest_target}/"
-  }
-
-  provisioner "file" {
-    source      = "${var.contracts_source_dir}/"
-    destination = "${local.contracts_target}/"
-  }
-
-  # 2. Pre-generalization checks, before anything is removed. Running them after
-  #    generalization would check a machine that no longer exists.
+  # STAGE 4 IS SOURCE AND BUILD CONFIGURATION ONLY.
+  #
+  # This build constructs a VM from qualified media and an unattended answer
+  # file, and stops there. It deliberately contains no provisioners, because
+  # everything that would follow belongs to later stages and none of it is
+  # implemented:
+  #
+  #   - guest provisioning: the Increment 2 transfer bundle, its verification,
+  #     installation, and evidence, are not wired in here yet. An earlier draft
+  #     downloaded guest-evidence.json, which nothing in this configuration
+  #     creates, so the build could not have reached generalization at all;
+  #   - credential disable or rotation before sealing;
+  #   - setup-residue removal inside the guest;
+  #   - pre-generalization checks, generalization, and an observed shutdown;
+  #   - provenance emission binding recipeDigest, runId, and the artifact.
+  #
+  # Those are stages 5 and 6. Listing them here rather than leaving the file
+  # silent means the gap is visible to whoever opens it next, and a provisioner
+  # added above this comment is a deliberate act rather than an accident.
+  #
+  # convert_to_template stays on the source: it is what makes the artifact
+  # immutable once a build does complete. Confirming a seal, and refusing to
+  # call anything a candidate without the full phase sequence, is stage 5 work
+  # already implemented in BuildEvidence.psm1 and not invoked from here.
   provisioner "powershell" {
-    use_pwsh = true
+    use_pwsh = false
     inline = [
-      "$ErrorActionPreference = 'Stop'",
-      "Import-Module '${local.tools_target}/AnswerFile.psm1' -Force",
-      "$residue = Get-SetupResidue -SystemDrive 'C:/'",
-      "Write-Host \"pre-generalization: setup residue copies found: $($residue.Count)\""
-    ]
-  }
-
-  # 3. Remove the answer-file copies setup left behind. Each retains the
-  #    administrator password in plain text, so this happens before the image is
-  #    generalized and long before it is sealed.
-  provisioner "powershell" {
-    use_pwsh = true
-    inline = [
-      "$ErrorActionPreference = 'Stop'",
-      "Import-Module '${local.tools_target}/AnswerFile.psm1' -Force",
-      "$outcome = Remove-SetupResidue -SystemDrive 'C:/'",
-      "if (-not $outcome.Clean) { throw \"Answer-file residue remains: $($outcome.Remaining -join ', ')\" }",
-      "Write-Host 'credential-residue: clear'"
-    ]
-  }
-
-  # 4. Retrieve evidence before anything destructive. A failing provisioner
-  #    stops the ones after it, so evidence collected later may never be.
-  provisioner "file" {
-    direction   = "download"
-    source      = "${local.guest_root}/${local.evidence_name}"
-    destination = "${var.evidence_output_dir}/${local.evidence_name}"
-  }
-
-  # 5. Generalize. After this the guest has no machine identity, so nothing that
-  #    needs one may run afterwards.
-  provisioner "powershell" {
-    use_pwsh = true
-    inline = [
-      "$ErrorActionPreference = 'Stop'",
-      "Write-Host 'generalization: running sysprep'",
-      "& \"$env:SystemRoot/System32/Sysprep/Sysprep.exe\" /generalize /oobe /quiet /quit",
-      "Write-Host 'generalization: complete'"
+      "Write-Host 'stage 4: construction only. No guest provisioning is configured.'"
     ]
   }
 }

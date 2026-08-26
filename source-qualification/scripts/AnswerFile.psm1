@@ -257,6 +257,7 @@ function Get-AnswerFileValueSet {
         # generalization removes the computer name.
         COMPUTER_NAME          = $Declaration.buildSettings.computerName
         TIME_ZONE              = $Declaration.buildSettings.timeZone
+        BUILD_USERNAME         = $Declaration.buildSettings.buildUsername
     }
 }
 

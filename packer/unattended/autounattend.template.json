@@ -9,7 +9,8 @@
   },
   "buildSettings": {
     "computerName": "vdi-build",
-    "timeZone": "UTC"
+    "timeZone": "UTC",
+    "buildUsername": "Administrator"
   },
   "placeholders": [
     {
@@ -36,6 +37,11 @@
       "name": "TIME_ZONE",
       "secret": false,
       "description": "Windows time zone identifier for the build, stated rather than left to the installer."
+    },
+    {
+      "name": "BUILD_USERNAME",
+      "secret": false,
+      "description": "The account setup configures and the build communicator authenticates as."
     },
     {
       "name": "ADMINISTRATOR_PASSWORD",

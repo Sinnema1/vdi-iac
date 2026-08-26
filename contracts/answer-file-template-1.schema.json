@@ -82,9 +82,9 @@
           "pattern": "^[ -~]+$"
         },
         "buildUsername": {
-          "description": "The account the answer file configures and the build communicator authenticates as. Declared here so the two cannot disagree: a communicator authenticating as an account setup never configured waits at a timeout with nothing explaining why.",
+          "description": "The account the answer file configures and the build communicator authenticates as. Constrained to Administrator in version 1, because that is the only account this answer file actually configures: it sets AdministratorPassword, and any other name would be a user setup never creates and never assigns that password to, so AutoLogon and WinRM would both fail. Supporting a separately created account means creating it in the answer file, which is a contract revision rather than a wider pattern.",
           "type": "string",
-          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,19}$"
+          "const": "Administrator"
         }
       }
     },

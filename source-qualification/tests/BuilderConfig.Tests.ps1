@@ -154,10 +154,15 @@ Describe 'the build pins what it depends on' {
 
 Describe 'the build seals what it constructed' {
 
-    It 'converts the result to a template' {
-        # What makes the artifact immutable: a template cannot be powered on and
-        # modified in place.
-        $script:Build | Should -Match 'convert_to_template\s*=\s*true'
+    It 'does not convert to a template at this stage' {
+        # Converting makes an artifact immutable, which is why it must not
+        # happen yet. At this point the VM still holds an enabled build account
+        # with a known password, a reachable WinRM listener, and possible
+        # answer-file residue, and it has not been generalized. Sealing that
+        # state produces an immutable artifact nobody can fix and a later stage
+        # might mistake for a candidate.
+        $script:Configuration | Should -Match 'convert_to_template\s*=\s*false'
+        $script:Configuration | Should -Not -Match 'convert_to_template\s*=\s*true'
     }
 
     It 'owns the shutdown rather than letting the guest take it' {
@@ -189,6 +194,17 @@ Describe 'the build seals what it constructed' {
         $script:Configuration | Should -Not -Match 'iso_paths'
     }
 
+    It 'authenticates the way the listener is configured to accept' {
+        # Packer defaults to Basic, and the bootstrap disables Basic on the
+        # listener. Without NTLM stated the two disagree and the build fails at
+        # connection with an error describing neither cause.
+        $script:Configuration | Should -Match 'winrm_use_ntlm\s*=\s*true'
+
+        $bootstrap = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'packer' 'unattended' 'Enable-BuildWinRM.ps1') -Raw
+        $bootstrap | Should -Match "Auth\\Basic' -Value \`$false"
+        $bootstrap | Should -Match "Auth\\Negotiate' -Value \`$true"
+    }
+
     It 'reaches the guest over an encrypted listener' {
         # A fresh installation has no listener at all; the answer file creates
         # one. Plaintext would carry the administrator password on the wire.
@@ -200,9 +216,18 @@ Describe 'the build seals what it constructed' {
         # Supplied by ConvertTo-BuildVariableSet from the declaration, so the two
         # cannot disagree.
         $declaration = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'packer' 'unattended' 'autounattend.template.json') -Raw | ConvertFrom-Json
-        $declaration.buildSettings.buildUsername | Should -Not -BeNullOrEmpty
+        $declaration.buildSettings.buildUsername | Should -Be 'Administrator'
         $template = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'packer' 'unattended' 'autounattend.xml.template') -Raw
         $template | Should -Match '<Username>\{\{BUILD_USERNAME\}\}</Username>'
+    }
+
+    It 'permits only the account it actually configures' {
+        # The answer file sets AdministratorPassword and creates no other user.
+        # Any other name would be an account setup never creates and never
+        # assigns that password to, so AutoLogon and WinRM would both fail.
+        # Supporting a separately created account is a contract revision.
+        $schema = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'contracts' 'answer-file-template-1.schema.json') -Raw | ConvertFrom-Json
+        $schema.properties.buildSettings.properties.buildUsername.const | Should -Be 'Administrator'
     }
 
     It 'configures no provisioning it has not implemented' {
@@ -213,6 +238,29 @@ Describe 'the build seals what it constructed' {
         $script:Configuration | Should -Not -Match 'Remove-SetupResidue'
         $script:Configuration | Should -Not -Match 'direction   = "download"'
         $script:Build | Should -Match 'STAGE 4 IS SOURCE AND BUILD CONFIGURATION ONLY'
+    }
+
+    It 'finds the bootstrap by volume label, not a drive letter' {
+        # cd_files produces CD media and no letter is reserved for it. A: is a
+        # floppy convention, and the CD's letter depends on how many volumes
+        # setup has already assigned. A wrong guess fails at first logon, before
+        # WinRM exists, so the build is unreachable and the reason is invisible.
+        $template = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'packer' 'unattended' 'autounattend.xml.template') -Raw
+        $commands = [regex]::Matches($template, '<CommandLine>(?<c>[^<]*)</CommandLine>')
+        $commands.Count | Should -BeGreaterThan 0
+
+        foreach ($match in $commands) {
+            $match.Groups['c'].Value | Should -Not -Match '(?i)\b[A-Z]:\\' -Because 'no first-logon command may assume a drive letter'
+        }
+
+        $template | Should -Match 'OEMDRV'
+        $template | Should -Match 'Enable-BuildWinRM\.ps1'
+    }
+
+    It 'labels the media it then searches for' {
+        # The label the answer file resolves and the label the build applies are
+        # the same string, and nothing else enforces that.
+        $script:Configuration | Should -Match 'cd_label\s*=\s*"OEMDRV"'
     }
 
     It 'restricts the guest OS identifier to a desktop one' {

@@ -260,11 +260,16 @@ source "vsphere-iso" "windows" {
   # certificate cannot belong to any trust chain, so accepting it is a bounded
   # exception -- the alternative is a plaintext listener carrying the
   # administrator password on the wire.
+  # NTLM stated explicitly. Packer defaults to Basic authentication, and the
+  # bootstrap disables Basic on the listener, so without this the communicator
+  # and the listener disagree about how to authenticate and the build fails at
+  # connection with an error that describes neither cause.
   communicator   = "winrm"
   winrm_username = var.build_username
   winrm_password = var.build_password
   winrm_use_ssl  = true
   winrm_insecure = true
+  winrm_use_ntlm = true
   winrm_port     = 5986
   winrm_timeout  = "4h"
 
@@ -282,9 +287,21 @@ source "vsphere-iso" "windows" {
   shutdown_command = "shutdown /s /t 10 /f /d p:4:1 /c \"packer build shutdown\""
   shutdown_timeout = "30m"
 
-  # Sealing. The artifact is converted to a template, which is what makes it
-  # immutable: a template cannot be powered on and modified in place.
-  convert_to_template = true
+  # Template conversion is OFF, deliberately, and stays off until stage 5.
+  #
+  # Converting makes an artifact immutable, which is exactly why it must not
+  # happen here. At this point in the build the VM still holds an enabled build
+  # account with a known password, a WinRM listener reachable on the network,
+  # and whatever answer-file residue setup left behind -- and it has not been
+  # generalized, so it also carries a machine identity. Sealing that state
+  # produces an immutable artifact nobody can fix and which a later stage might
+  # find and treat as a candidate.
+  #
+  # Stage 5 turns this on only behind the gates that make it safe: the build
+  # credential disabled or rotated, residue removed, generalization complete, a
+  # shutdown observed rather than assumed, and positive sealing evidence. Those
+  # gates are implemented in BuildEvidence.psm1 and are not invoked from here.
+  convert_to_template = false
 }
 
 build {

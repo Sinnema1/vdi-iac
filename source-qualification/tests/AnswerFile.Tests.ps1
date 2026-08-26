@@ -50,7 +50,7 @@ BeforeAll {
             schemaVersion  = 1
             templateFile   = 'unattend.xml.template'
             imageSelection = @{ edition = 'Windows Enterprise'; index = 1; architecture = 'x64'; language = 'en-US' }
-            buildSettings  = @{ computerName = 'vdi-build'; timeZone = 'UTC' }
+            buildSettings  = @{ computerName = 'vdi-build'; timeZone = 'UTC'; buildUsername = 'Administrator' }
             placeholders   = $Placeholders
         } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $declarationPath -Encoding utf8
         $declarationPath
@@ -108,7 +108,7 @@ Describe 'declaration and template agreement' {
         @{
             schemaVersion = 1; templateFile = 'unattend.xml.template'
             imageSelection = @{ edition = 'Windows Enterprise'; index = 1; architecture = 'x64'; language = 'en-US' }
-            buildSettings = @{ computerName = 'vdi-build'; timeZone = 'UTC' }
+            buildSettings = @{ computerName = 'vdi-build'; timeZone = 'UTC'; buildUsername = 'Administrator' }
             placeholders = @(@{ name = 'IMAGE_INDEX'; secret = $false; description = 'Index.' })
         } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding utf8
 
@@ -620,7 +620,7 @@ Describe 'the duplicate-declaration bypass' {
         @{
             schemaVersion = 1; templateFile = 'unattend.xml.template'
             imageSelection = @{ edition = 'Windows Enterprise'; index = 1; architecture = 'x64'; language = 'en-US' }
-            buildSettings = @{ computerName = 'vdi-build'; timeZone = 'UTC' }
+            buildSettings = @{ computerName = 'vdi-build'; timeZone = 'UTC'; buildUsername = 'Administrator' }
             placeholders = @(@{ name = 'IMAGE_INDEX'; secret = $false; description = 'Not secret.' })
         } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding utf8
 

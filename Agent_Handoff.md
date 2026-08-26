@@ -1059,10 +1059,17 @@ surface is as small as possible when a target finally exists.
    before sealing, so that a sealed image never carries a working one. The table
    above is authoritative on what exists today;
 3. image identity and the provenance record -- **implementation complete and
-   locally verified; remote CI confirmation pending due to the active GitHub
-   Actions incident**. Acceptance is distinct from progress: this stage is not
-   described as CI-proven until a workflow run for its exact commit reports
-   success, with the run's head SHA checked before the result is accepted. Three identities
+   locally verified; remote CI confirmation pending**. Acceptance is distinct
+   from progress: this stage is not described as CI-proven until a workflow run
+   reports success, with the run's head SHA checked before the result is
+   accepted.
+
+   How that run is obtained matters, because waiting alone will not produce one.
+   The workflow triggers on pushes to `main` and on pull requests, not on
+   ordinary feature-branch pushes, so a branch can sit indefinitely with no run
+   against it. Validation comes from opening a pull request. A green run on a
+   descendant commit confirms the ancestor's implementation, so no commit is
+   ever created solely to manufacture a run against an exact SHA. Three identities
    stay distinct and all three are bound together in provenance, because
    collapsing any two makes a question unanswerable:
 

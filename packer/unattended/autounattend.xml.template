@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Unattended setup template.
+  Unattended setup answer file, operational.
 
   Placeholders are double-braced upper-case tokens, declared in
   autounattend.template.json. Rendering is driven by that declaration and fails
@@ -13,10 +13,35 @@
   a restricted location this repository chooses, and is removed on every exit
   path. A removal that fails makes the run fail.
 
-  Scope: this template establishes image selection and the credential positions.
-  It is NOT a production answer file. The hardware, disk, partitioning, and
-  network configuration, and validation against Windows System Image Manager,
-  are stage 4 work.
+  Disk layout is UEFI/GPT and deliberately explicit. Letting setup choose
+  partitions makes the resulting image depend on what the installer decided on
+  the day, which is the opposite of a deterministic build. Three partitions are
+  created: EFI system, MSR, and Windows. No separate recovery partition is
+  created; Windows Recovery lives inside the Windows partition, which is the
+  supported arrangement and one fewer thing whose size has to be guessed.
+
+  DiskID 0 is the only disk attached to the build VM. WillWipeDisk is safe here
+  and only here: this runs against a freshly created, empty build VM inside a
+  Packer run, never against a machine with data on it.
+
+  WinRM is enabled by the first-logon command below. A fresh installation has no
+  listener, so without this the build completes setup and then sits unreachable
+  until the communicator times out.
+
+  The bootstrap script is located by the OEMDRV volume label, not by a drive
+  letter. cd_files produces CD media, and no letter is reserved for it: A: is a
+  floppy convention, and the CD's letter depends on how many volumes setup has
+  already assigned. A wrong guess fails at first logon, before WinRM exists, so
+  the build is unreachable and the reason is invisible. The listener is HTTPS with a self-signed
+  certificate: the build VM is transient and its certificate cannot be part of
+  any trust chain, so the alternative is a plaintext listener carrying the
+  administrator password on the wire. Packer is configured to accept the
+  self-signed certificate, which is a deliberate and bounded exception for a
+  short-lived build machine.
+
+  Validate changes with Windows System Image Manager before committing. SIM
+  catches component and pass errors that no schema here can see, and a
+  malformed answer file surfaces as a build that hangs at an unattended prompt.
 -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
   <settings pass="windowsPE">
@@ -37,6 +62,49 @@
       <UserData>
         <AcceptEula>true</AcceptEula>
       </UserData>
+      <DiskConfiguration>
+        <WillShowUI>OnError</WillShowUI>
+        <Disk wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
+          <CreatePartitions>
+            <CreatePartition wcm:action="add">
+              <Order>1</Order>
+              <Type>EFI</Type>
+              <Size>260</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>2</Order>
+              <Type>MSR</Type>
+              <Size>16</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>3</Order>
+              <Type>Primary</Type>
+              <Extend>true</Extend>
+            </CreatePartition>
+          </CreatePartitions>
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add">
+              <Order>1</Order>
+              <PartitionID>1</PartitionID>
+              <Label>System</Label>
+              <Format>FAT32</Format>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>2</Order>
+              <PartitionID>2</PartitionID>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>3</Order>
+              <PartitionID>3</PartitionID>
+              <Label>Windows</Label>
+              <Letter>C</Letter>
+              <Format>NTFS</Format>
+            </ModifyPartition>
+          </ModifyPartitions>
+        </Disk>
+      </DiskConfiguration>
       <ImageInstall>
         <OSImage>
           <InstallFrom>
@@ -45,12 +113,37 @@
               <Value>{{IMAGE_INDEX}}</Value>
             </MetaData>
           </InstallFrom>
-          <InstallToAvailablePartition>true</InstallToAvailablePartition>
+          <InstallTo>
+            <DiskID>0</DiskID>
+            <PartitionID>3</PartitionID>
+          </InstallTo>
+          <WillShowUI>OnError</WillShowUI>
         </OSImage>
       </ImageInstall>
     </component>
   </settings>
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="{{PROCESSOR_ARCHITECTURE}}"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <ComputerName>{{COMPUTER_NAME}}</ComputerName>
+      <TimeZone>{{TIME_ZONE}}</TimeZone>
+    </component>
+    <component name="Microsoft-Windows-TerminalServices-LocalSessionManager"
+               processorArchitecture="{{PROCESSOR_ARCHITECTURE}}"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <fDenyTSConnections>false</fDenyTSConnections>
+    </component>
+  </settings>
   <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="{{PROCESSOR_ARCHITECTURE}}"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>{{UI_LANGUAGE}}</InputLocale>
+      <SystemLocale>{{UI_LANGUAGE}}</SystemLocale>
+      <UILanguage>{{UI_LANGUAGE}}</UILanguage>
+      <UserLocale>{{UI_LANGUAGE}}</UserLocale>
+    </component>
     <component name="Microsoft-Windows-Shell-Setup"
                processorArchitecture="{{PROCESSOR_ARCHITECTURE}}"
                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
@@ -67,11 +160,25 @@
         </Password>
         <Enabled>true</Enabled>
         <LogonCount>1</LogonCount>
-        <Username>Administrator</Username>
+        <Username>{{BUILD_USERNAME}}</Username>
       </AutoLogon>
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>1</Order>
+          <Description>Enable the built-in administrator account</Description>
+          <CommandLine>cmd.exe /c net user "{{BUILD_USERNAME}}" /active:yes</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>2</Order>
+          <Description>Enable WinRM over HTTPS for the build communicator</Description>
+          <CommandLine>powershell.exe -ExecutionPolicy Bypass -NoProfile -Command "$d = (Get-CimInstance Win32_LogicalDisk | Where-Object VolumeName -eq 'OEMDRV' | Select-Object -First 1).DeviceID; if (-not $d) { throw 'OEMDRV media not found' }; &amp; ($d + '\Enable-BuildWinRM.ps1')"</CommandLine>
+        </SynchronousCommand>
+      </FirstLogonCommands>
       <OOBE>
         <HideEULAPage>true</HideEULAPage>
         <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Work</NetworkLocation>
         <ProtectYourPC>3</ProtectYourPC>
       </OOBE>
     </component>

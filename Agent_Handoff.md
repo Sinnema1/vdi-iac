@@ -1058,7 +1058,18 @@ surface is as small as possible when a target finally exists.
    rotating the build credential is defined here and **implemented in stage 5**,
    before sealing, so that a sealed image never carries a working one. The table
    above is authoritative on what exists today;
-3. image identity and the provenance record -- **complete, CI-proven**. Three identities
+3. image identity and the provenance record -- **implementation complete and
+   locally verified; remote CI confirmation pending**. Acceptance is distinct
+   from progress: this stage is not described as CI-proven until a workflow run
+   reports success, with the run's head SHA checked before the result is
+   accepted.
+
+   How that run is obtained matters, because waiting alone will not produce one.
+   The workflow triggers on pushes to `main` and on pull requests, not on
+   ordinary feature-branch pushes, so a branch can sit indefinitely with no run
+   against it. Validation comes from opening a pull request. A green run on a
+   descendant commit confirms the ancestor's implementation, so no commit is
+   ever created solely to manufacture a run against an exact SHA. Three identities
    stay distinct and all three are bound together in provenance, because
    collapsing any two makes a question unanswerable:
 
@@ -1092,12 +1103,20 @@ surface is as small as possible when a target finally exists.
      reference, and the VM instance UUID. The recorded name is display metadata
      and never an identifier. All of it is environment-specific, excluded from
      `recipeDigest`, and only observable in a lab-produced record;
-4. the vSphere builder configuration -- source definition, pinned plugin
-   versions, hardware and boot configuration, and the media reference. It
+4. the vSphere builder configuration and the operational answer file -- source
+   definition, pinned plugin versions, hardware and boot configuration, the
+   media reference, and a full disk, locale, and account configuration. It
    consumes the Stage 1 qualification record and reverifies the media at its own
    input boundary, because a check performed by an earlier stage is a claim
-   about the past. Closes as **configuration validated in CI; execution lab
-   pending**: `packer validate` resolves references a syntax check would not,
+   about the past.
+
+   **The answer file has not been validated against Windows System Image
+   Manager.** Nothing in this repository parses component names or checks that a
+   setting sits in the right configuration pass, so a component in the wrong
+   pass satisfies every check here and then hangs a real setup at a prompt. SIM
+   validation is a lab obligation and is outstanding.
+
+   Closes as **configuration validated in CI; execution lab pending**: `packer validate` resolves references a syntax check would not,
    and proves nothing about vSphere connectivity, media reachability, boot
    behavior, or whether the build converts to a template;
 5. pre-generalization checks, generalization, shutdown, and sealing, with

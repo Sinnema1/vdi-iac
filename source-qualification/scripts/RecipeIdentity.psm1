@@ -34,7 +34,12 @@ Import-Module (Join-Path $PSScriptRoot 'JsonSafety.psm1')
 # or changing how a value is represented produces a new version: digests are
 # only comparable within one, which is why the version travels beside the digest
 # rather than being implied.
-$script:RecipeInputVersion = 1
+#
+# Version 2 adds cpus, memoryMb, and guestOsType. They were build inputs the
+# builder consumed while the digest ignored them, so two builds differing in
+# processor count, memory, or the guest OS identifier vSphere presents to setup
+# shared an identity. Version 1 was never emitted by a real build.
+$script:RecipeInputVersion = 2
 
 function ConvertTo-RecipeInput {
     <#
@@ -278,7 +283,8 @@ function NewHardwareInput {
     param([hashtable] $Hardware)
 
     RequireKeys -Table $Hardware -Subject 'hardware' `
-        -Keys @('HardwareVersion', 'Firmware', 'SecureBoot', 'DiskControllerType', 'DiskSizeGb', 'VirtualTpm')
+        -Keys @('HardwareVersion', 'Firmware', 'SecureBoot', 'DiskControllerType', 'DiskSizeGb',
+                'VirtualTpm', 'Cpus', 'MemoryMb', 'GuestOsType')
 
     # Firmware and secure boot change what installs and how it boots; a vTPM
     # changes what the installed system can require.
@@ -289,6 +295,13 @@ function NewHardwareInput {
         diskControllerType = $Hardware.DiskControllerType
         diskSizeGb         = [int] $Hardware.DiskSizeGb
         virtualTpm         = [bool] $Hardware.VirtualTpm
+        # Added in recipe-input-2. The builder consumed these while the digest
+        # ignored them, so two builds differing in any of them shared an
+        # identity. The guest OS identifier changes the device model vSphere
+        # presents to setup, which changes what gets installed.
+        cpus               = [int] $Hardware.Cpus
+        memoryMb           = [int] $Hardware.MemoryMb
+        guestOsType        = $Hardware.GuestOsType
     }
 }
 

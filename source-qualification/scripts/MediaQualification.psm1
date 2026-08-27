@@ -314,6 +314,100 @@ function Test-MediaQualificationRecord {
     $null
 }
 
+function Assert-QualifiedMedia {
+    <#
+    .SYNOPSIS
+        Re-verifies media at the build's own input boundary, and returns its path.
+
+    .DESCRIPTION
+        Stage 4. Qualification produced a record; this is the build deciding
+        whether to act on it. The record is a statement about a specific artifact
+        at a specific time, and time has passed: the file may have been replaced,
+        truncated, or swapped for another edition since. A check performed by an
+        earlier stage is a claim about the past, so the digest is recomputed here
+        rather than read from the record.
+
+        The record's own observed digest is deliberately not trusted as the
+        comparison value. It is compared against the expected digest as a
+        consistency check -- a record whose two digests disagree is broken
+        regardless -- but what the build acts on is what the bytes say now.
+
+        Fails closed on every path. A build that cannot establish which media it
+        is about to install has nothing to install.
+
+    .PARAMETER RunId
+        The build's run. A record from a different run describes a different
+        execution's qualification, and consuming it would attach one run's
+        provenance to another's artifact.
+
+    .OUTPUTS
+        The resolved media path and the record that authorised it.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RecordPath,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $MediaRoot,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RunId
+    )
+
+    $expectedRunId = Assert-RunIdentifier -RunId $RunId
+
+    if (-not (Test-Path -LiteralPath $RecordPath -PathType Leaf)) {
+        throw (NewMediaError -Code 'record_not_found' -Message "Media qualification record not found: $RecordPath")
+    }
+
+    $raw = Get-Content -LiteralPath $RecordPath -Raw -Encoding utf8
+    if (-not (Test-Json -Json $raw -SchemaFile $script:RecordSchema -ErrorAction SilentlyContinue)) {
+        throw (NewMediaError -Code 'record_invalid' -Message 'The media qualification record does not satisfy its contract.')
+    }
+
+    $record = $raw | ConvertFrom-Json
+    Assert-NoControlCharacter -Node $record -Location 'record' -Subject 'Media qualification record'
+
+    $contradiction = Test-MediaQualificationRecord -Record $record
+    if ($contradiction) {
+        throw (NewMediaError -Code 'record_invalid' -Message "The media qualification record contradicts itself: $contradiction.")
+    }
+
+    if ($record.outcome -ne 'passed') {
+        throw (NewMediaError -Code 'media_not_qualified' `
+                -Message "The media qualification record reports '$($record.outcome)'. Only qualified media may be built from.")
+    }
+
+    if (-not [string]::Equals($record.runId, $expectedRunId, [System.StringComparison]::Ordinal)) {
+        throw (NewMediaError -Code 'record_run_id_mismatch' `
+                -Message 'The media qualification record belongs to a different run.')
+    }
+
+    # Resolved through the same confinement rule qualification used, because the
+    # locator is still a value from a document and the root still bounds it.
+    $mediaPath = Resolve-MediaPath -Locator $record.reference.locator -MediaRoot $MediaRoot
+
+    $item = Get-Item -LiteralPath $mediaPath -Force
+    if ($item.Name -cne $record.reference.fileName) {
+        throw (NewMediaError -Code 'media_name_mismatch' `
+                -Message "Media resolved to '$($item.Name)', but the record names '$($record.reference.fileName)'.")
+    }
+
+    $mismatch = Get-DigestLengthMismatch -Algorithm $record.integrity.algorithm -Digest $record.integrity.expectedDigest
+    if ($mismatch) { throw (NewMediaError -Code 'digest_length_mismatch' -Message "The record declares $mismatch.") }
+
+    # Recomputed now. This is the whole point of the boundary.
+    $observed = (Get-FileHash -LiteralPath $mediaPath -Algorithm $record.integrity.algorithm).Hash.ToLowerInvariant()
+    if (-not [string]::Equals($observed, $record.integrity.expectedDigest, [System.StringComparison]::Ordinal)) {
+        throw (NewMediaError -Code 'integrity_mismatch' `
+                -Message "The media no longer matches the digest it was qualified against. Expected $($record.integrity.expectedDigest), observed $observed.")
+    }
+
+    [PSCustomObject]@{
+        MediaPath      = $mediaPath
+        MediaId        = $record.mediaId
+        Record         = $record
+        ObservedDigest = $observed
+    }
+}
+
 function Save-MediaQualificationRecord {
     <#
     .SYNOPSIS
@@ -348,4 +442,4 @@ function Save-MediaQualificationRecord {
     $Path
 }
 
-Export-ModuleMember -Function Import-MediaReference, Invoke-MediaQualification, Resolve-MediaPath, Get-DigestLengthMismatch, Test-MediaQualificationRecord, Save-MediaQualificationRecord
+Export-ModuleMember -Function Import-MediaReference, Invoke-MediaQualification, Resolve-MediaPath, Get-DigestLengthMismatch, Test-MediaQualificationRecord, Save-MediaQualificationRecord, Assert-QualifiedMedia

@@ -7,6 +7,11 @@
     "architecture": "x64",
     "language": "en-US"
   },
+  "buildSettings": {
+    "computerName": "vdi-build",
+    "timeZone": "UTC",
+    "buildUsername": "Administrator"
+  },
   "placeholders": [
     {
       "name": "PROCESSOR_ARCHITECTURE",
@@ -22,6 +27,21 @@
       "name": "IMAGE_INDEX",
       "secret": false,
       "description": "Image index within the media, derived from the qualified media reference."
+    },
+    {
+      "name": "COMPUTER_NAME",
+      "secret": false,
+      "description": "Build VM name during construction. Generalization removes it, so it never reaches the image."
+    },
+    {
+      "name": "TIME_ZONE",
+      "secret": false,
+      "description": "Windows time zone identifier for the build, stated rather than left to the installer."
+    },
+    {
+      "name": "BUILD_USERNAME",
+      "secret": false,
+      "description": "The account setup configures and the build communicator authenticates as."
     },
     {
       "name": "ADMINISTRATOR_PASSWORD",

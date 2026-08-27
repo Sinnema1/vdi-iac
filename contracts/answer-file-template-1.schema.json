@@ -9,6 +9,7 @@
     "schemaVersion",
     "templateFile",
     "imageSelection",
+    "buildSettings",
     "placeholders"
   ],
   "properties": {
@@ -55,6 +56,35 @@
         "language": {
           "type": "string",
           "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
+        }
+      }
+    },
+    "buildSettings": {
+      "description": "Build-time settings the answer file states rather than leaving to the installer. They describe the build VM, not the image: generalization removes the computer name, and the time zone is set again by whatever provisions from the sealed image.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "computerName",
+        "timeZone",
+        "buildUsername"
+      ],
+      "properties": {
+        "computerName": {
+          "description": "The build VM's name. NetBIOS limits it to 15 characters.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,14}$"
+        },
+        "timeZone": {
+          "description": "A Windows time zone identifier, for example UTC.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[ -~]+$"
+        },
+        "buildUsername": {
+          "description": "The account the answer file configures and the build communicator authenticates as. Constrained to Administrator in version 1, because that is the only account this answer file actually configures: it sets AdministratorPassword, and any other name would be a user setup never creates and never assigns that password to, so AutoLogon and WinRM would both fail. Supporting a separately created account means creating it in the answer file, which is a contract revision rather than a wider pattern.",
+          "type": "string",
+          "const": "Administrator"
         }
       }
     },

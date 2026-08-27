@@ -93,7 +93,15 @@ pwsh -NoProfile -Command "'./source-qualification','./scripts/ci','./packer/scri
 ```
 
 ```bash
-packer fmt -check -recursive packer/harness
+packer fmt -check -recursive packer/harness packer/builds
+```
+
+The build configuration declares the vSphere plugin, so install it once before
+running the builder tests; without it `packer validate` fails on a missing
+plugin rather than on anything being tested:
+
+```bash
+packer init packer/builds
 ```
 
 A lab scenario needs a disposable Windows target and is never run by CI:
@@ -127,7 +135,13 @@ gitleaks git -v --redact .
 
 That command is optional. The CI job is the gate that must pass.
 
-The same checks run in CI. A stage is added to CI only when the repository
+The same checks run in CI, which triggers on pushes to `main` and on pull
+requests. A feature branch pushed on its own gets no run, so a branch is
+validated by opening a pull request rather than by waiting. A green run on a
+descendant commit confirms its ancestors; do not create empty commits to
+provoke a run against a particular SHA.
+
+A stage is added to CI only when the repository
 contains the responsibility it validates — do not add a Packer or Terraform job
 before there is a Packer or Terraform file to check.
 

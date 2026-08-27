@@ -50,6 +50,7 @@ BeforeAll {
             schemaVersion  = 1
             templateFile   = 'unattend.xml.template'
             imageSelection = @{ edition = 'Windows Enterprise'; index = 1; architecture = 'x64'; language = 'en-US' }
+            buildSettings  = @{ computerName = 'vdi-build'; timeZone = 'UTC'; buildUsername = 'Administrator' }
             placeholders   = $Placeholders
         } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $declarationPath -Encoding utf8
         $declarationPath
@@ -107,6 +108,7 @@ Describe 'declaration and template agreement' {
         @{
             schemaVersion = 1; templateFile = 'unattend.xml.template'
             imageSelection = @{ edition = 'Windows Enterprise'; index = 1; architecture = 'x64'; language = 'en-US' }
+            buildSettings = @{ computerName = 'vdi-build'; timeZone = 'UTC'; buildUsername = 'Administrator' }
             placeholders = @(@{ name = 'IMAGE_INDEX'; secret = $false; description = 'Index.' })
         } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding utf8
 
@@ -153,10 +155,10 @@ Describe 'rendering the answer file' {
         # Failing closed here is what stops a caller supplying an index or
         # language that disagrees with the qualified media.
         $root = NewTempDir
-        $path = NewTemplateSet -Root $root -Template '<v>{{ADMINISTRATOR_PASSWORD}}</v><i>{{IMAGE_INDEX}}</i><z>{{TIME_ZONE}}</z>' -Placeholders @(
+        $path = NewTemplateSet -Root $root -Template '<v>{{ADMINISTRATOR_PASSWORD}}</v><i>{{IMAGE_INDEX}}</i><z>{{PROXY_ADDRESS}}</z>' -Placeholders @(
             @{ name = 'ADMINISTRATOR_PASSWORD'; secret = $true;  description = 'Password.' }
             @{ name = 'IMAGE_INDEX';            secret = $false; description = 'Index.' }
-            @{ name = 'TIME_ZONE';              secret = $false; description = 'Undeclared derivation.' })
+            @{ name = 'PROXY_ADDRESS';          secret = $false; description = 'No derivation exists for this.' })
         $declaration = Import-AnswerFileTemplate -Path $path
 
         { Invoke-WithRenderedAnswerFile -Declaration $declaration `
@@ -618,6 +620,7 @@ Describe 'the duplicate-declaration bypass' {
         @{
             schemaVersion = 1; templateFile = 'unattend.xml.template'
             imageSelection = @{ edition = 'Windows Enterprise'; index = 1; architecture = 'x64'; language = 'en-US' }
+            buildSettings = @{ computerName = 'vdi-build'; timeZone = 'UTC'; buildUsername = 'Administrator' }
             placeholders = @(@{ name = 'IMAGE_INDEX'; secret = $false; description = 'Not secret.' })
         } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding utf8
 
@@ -699,5 +702,102 @@ Describe 'a failed deletion is terminal' {
 
         $caught.Exception.Message | Should -Be 'the build failed first'
         $caught.Exception.Data['CleanupOutcome'] | Should -Be 'failed'
+    }
+}
+
+Describe 'the operational answer file' {
+
+    BeforeAll {
+        $script:OperationalTemplate = Join-Path $script:RepoRoot 'packer' 'unattended' 'autounattend.xml.template'
+    }
+
+    It 'renders to a well-formed document with every placeholder substituted' {
+        $declaration = Import-AnswerFileTemplate -Path $script:Committed
+
+        $verdict = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets @{ ADMINISTRATOR_PASSWORD = (AsSecure $script:SecretText) } -ScriptBlock {
+                param($p)
+                $raw = Get-Content -LiteralPath $p -Raw
+                [PSCustomObject]@{
+                    WellFormed     = [bool]([xml]$raw)
+                    HasPlaceholder = ($raw -match '\{\{')
+                }
+            }
+
+        $verdict.WellFormed | Should -BeTrue
+        $verdict.HasPlaceholder | Should -BeFalse
+    }
+
+    It 'installs to the partition it created, not one setup chose' {
+        # Letting setup pick makes the image depend on what the installer decided
+        # on the day, which is the opposite of a deterministic build.
+        $xml = [xml](Get-Content -LiteralPath $script:OperationalTemplate -Raw)
+        $namespace = [System.Xml.XmlNamespaceManager]::new($xml.NameTable)
+        $namespace.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
+
+        $installTo = $xml.SelectSingleNode('//u:ImageInstall/u:OSImage/u:InstallTo', $namespace)
+        $installTo | Should -Not -BeNullOrEmpty
+        $installTo.DiskID | Should -Be '0'
+        $installTo.PartitionID | Should -Be '3'
+    }
+
+    It 'declares the full UEFI partition layout' {
+        # System, MSR, and Windows. A missing MSR partition produces an image
+        # that installs and then cannot be serviced.
+        $xml = [xml](Get-Content -LiteralPath $script:OperationalTemplate -Raw)
+        $namespace = [System.Xml.XmlNamespaceManager]::new($xml.NameTable)
+        $namespace.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
+
+        $types = @($xml.SelectNodes('//u:CreatePartitions/u:CreatePartition/u:Type', $namespace) |
+            ForEach-Object { $_.InnerText })
+        $types | Should -Be @('EFI', 'MSR', 'Primary')
+    }
+
+    It 'wipes only disk 0' {
+        # Safe here and only here: a freshly created, empty build VM inside a
+        # Packer run. A second disk would make this destructive.
+        $xml = [xml](Get-Content -LiteralPath $script:OperationalTemplate -Raw)
+        $namespace = [System.Xml.XmlNamespaceManager]::new($xml.NameTable)
+        $namespace.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
+
+        $disks = @($xml.SelectNodes('//u:DiskConfiguration/u:Disk', $namespace))
+        $disks.Count | Should -Be 1
+        $disks[0].DiskID | Should -Be '0'
+    }
+
+    It 'sets the computer name and time zone rather than leaving them to setup' {
+        $declaration = Import-AnswerFileTemplate -Path $script:Committed
+        $values = Get-AnswerFileValueSet -Declaration $declaration
+
+        $values['COMPUTER_NAME'] | Should -Be $declaration.buildSettings.computerName
+        $values['TIME_ZONE'] | Should -Be $declaration.buildSettings.timeZone
+    }
+
+    It 'never shows a user interface except on error' {
+        # An answer file that prompts turns a failed build into a build that
+        # hangs until it times out, with nothing explaining why.
+        $raw = Get-Content -LiteralPath $script:OperationalTemplate -Raw
+        foreach ($match in [regex]::Matches($raw, '<WillShowUI>(?<v>[^<]*)</WillShowUI>')) {
+            $match.Groups['v'].Value | Should -Be 'OnError'
+        }
+        $raw | Should -Match '<HideEULAPage>true</HideEULAPage>'
+    }
+
+    It 'carries no credential' {
+        $raw = Get-Content -LiteralPath $script:OperationalTemplate -Raw
+        $pairs = [regex]::Matches($raw, '<Value>(?<v>[^<]*)</Value>\s*<PlainText>true</PlainText>')
+        $pairs.Count | Should -BeGreaterThan 0
+        foreach ($match in $pairs) {
+            $match.Groups['v'].Value.Trim() | Should -Match '^\{\{[A-Z][A-Z0-9_]*\}\}$'
+        }
+    }
+
+    It 'has not been validated against Windows System Image Manager' {
+        # Recorded rather than implied. Nothing here parses component names or
+        # pass placement, so a component in the wrong pass validates cleanly and
+        # then hangs a real setup. SIM validation is a lab obligation, and this
+        # test exists so its absence is stated rather than assumed.
+        $handoff = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Agent_Handoff.md') -Raw
+        $handoff | Should -Match 'System Image Manager'
     }
 }

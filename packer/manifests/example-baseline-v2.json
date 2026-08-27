@@ -2,6 +2,39 @@
   "schemaVersion": 2,
   "packages": [
     {
+      "id": "vmware-tools",
+      "version": "12.5.0",
+      "source": "file://vmware-tools/12.5.0/setup64.exe",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "order": 5,
+      "required": true,
+      "installer": {
+        "kind": "exe",
+        "arguments": [
+          "/S",
+          "/v",
+          "/qn REBOOT=R"
+        ],
+        "timeoutSeconds": 1800,
+        "restartPolicy": "allow-deferred",
+        "exitCodes": {
+          "success": [
+            0
+          ],
+          "restartRequired": [
+            3010
+          ]
+        }
+      },
+      "validation": [
+        {
+          "id": "vmware-tools-service",
+          "kind": "service-exists",
+          "serviceName": "VMTools"
+        }
+      ]
+    },
+    {
       "id": "example-runtime",
       "version": "4.2.1",
       "source": "file://example-runtime/4.2.1/runtime.msi",
@@ -10,7 +43,9 @@
       "required": true,
       "installer": {
         "kind": "msi",
-        "properties": { "ALLUSERS": "1" },
+        "properties": {
+          "ALLUSERS": "1"
+        },
         "timeoutSeconds": 1800,
         "restartPolicy": "allow-deferred"
       },
@@ -34,14 +69,33 @@
       "required": true,
       "installer": {
         "kind": "exe",
-        "arguments": ["/quiet", "/norestart"],
+        "arguments": [
+          "/quiet",
+          "/norestart"
+        ],
         "timeoutSeconds": 900,
         "restartPolicy": "allow-deferred",
-        "exitCodes": { "success": [0], "restartRequired": [3010] }
+        "exitCodes": {
+          "success": [
+            0
+          ],
+          "restartRequired": [
+            3010
+          ]
+        }
       },
       "validation": [
-        { "id": "agent-binary", "kind": "file-exists", "root": "programFiles", "relativePath": "Example/Agent/agent.exe" },
-        { "id": "agent-service", "kind": "service-exists", "serviceName": "ExampleAgent" }
+        {
+          "id": "agent-binary",
+          "kind": "file-exists",
+          "root": "programFiles",
+          "relativePath": "Example/Agent/agent.exe"
+        },
+        {
+          "id": "agent-service",
+          "kind": "service-exists",
+          "serviceName": "ExampleAgent"
+        }
       ]
     }
   ]

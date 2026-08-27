@@ -86,4 +86,59 @@ function ConvertTo-BuildVariableSet {
     }
 }
 
-Export-ModuleMember -Function ConvertTo-BuildVariableSet
+function Test-ToolsVersionAgreement {
+    <#
+    .SYNOPSIS
+        Returns a reason when the VMware Tools version is not one value, or null.
+
+    .DESCRIPTION
+        Four places name it: the manifest package that installs it, the builder
+        variable the prerequisite gate compares against, the recipe input the
+        digest covers, and the provenance that results. They must be one value.
+
+        Disagreement is not cosmetic. If the manifest installs one build and the
+        recipe records another, the digest names a machine that was never
+        constructed -- and the gate would either refuse a correct build or pass
+        an incorrect one, depending which pair happened to match.
+
+        The installed version is not checked here. That happens in the guest,
+        against the same builder value, because only the guest can see it.
+
+    .OUTPUTS
+        A reason describing the disagreement, or null.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] $Manifest,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $BuilderVersion,
+        [Parameter(Mandatory)] [hashtable] $Tooling,
+        [Parameter()] [string] $PackageId = 'vmware-tools'
+    )
+
+    $package = @($Manifest.Packages | Where-Object { $_.id -eq $PackageId })
+    if ($package.Count -eq 0) {
+        # The prerequisite gate would then check for software nothing installs,
+        # and the build would fail at the gate having done everything right.
+        return "the manifest has no '$PackageId' package, so nothing installs the tooling the attestation channel needs"
+    }
+    if ($package.Count -gt 1) { return "the manifest declares '$PackageId' more than once" }
+
+    if (-not $Tooling.ContainsKey('VMwareToolsVersion')) {
+        return 'the recipe tooling does not record a VMware Tools version'
+    }
+
+    $manifestVersion = [string] $package[0].version
+    $recipeVersion = [string] $Tooling.VMwareToolsVersion
+
+    if (-not [string]::Equals($manifestVersion, $BuilderVersion, [System.StringComparison]::Ordinal)) {
+        return "the manifest installs $manifestVersion and the build checks for $BuilderVersion"
+    }
+    if (-not [string]::Equals($manifestVersion, $recipeVersion, [System.StringComparison]::Ordinal)) {
+        return "the manifest installs $manifestVersion and the recipe records $recipeVersion"
+    }
+
+    $null
+}
+
+Export-ModuleMember -Function ConvertTo-BuildVariableSet, Test-ToolsVersionAgreement

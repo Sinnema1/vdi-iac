@@ -985,6 +985,12 @@ Acceptance criteria:
   the increment closes as **implementation complete; lab validation pending**,
   and landing lab-test definitions does not substitute for running them.
 
+Known follow-up, not blocking: `relativePath` in manifest version 2 is
+`^[A-Za-z0-9][A-Za-z0-9._/-]*$`, which cannot express a path containing a space.
+Any package installing under a directory like `VMware Tools` therefore cannot be
+validated by file path and must use a service check instead. Widening the
+pattern is a manifest version 3, not an edit.
+
 Known follow-up, not blocking: a top-level `failed` result containing an
 `incomplete` package should normalize to `incomplete`. Neither value permits
 success or authorizes a restart, so the current behavior is safe and the

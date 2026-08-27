@@ -583,3 +583,78 @@ Describe 'the handoff from verified media to the build' {
         $result.ExitCode | Should -Be 0
     }
 }
+
+Describe 'the VMware Tools version is one value everywhere' {
+
+    BeforeAll {
+        Import-Module (Join-Path $script:RepoRoot 'source-qualification' 'scripts' 'PackageManifest.psm1') -Force
+        $script:RealManifest = Import-PackageManifest -Path (Join-Path $script:RepoRoot 'packer' 'manifests' 'example-baseline-v2.json')
+
+        function Tooling { param([string] $Version = '12.5.0')
+            @{ PackerVersion = '1.15.4'; PluginVersions = @{ vsphere = '1.4.2' }; VMwareToolsVersion = $Version } }
+    }
+
+    It 'the committed manifest installs the tooling the channel needs' {
+        # Without it the prerequisite gate checks for software nothing installs,
+        # and the build fails at the gate having done everything right.
+        @($script:RealManifest.Packages | Where-Object id -EQ 'vmware-tools').Count | Should -Be 1
+    }
+
+    It 'installs it before anything that might need it' {
+        $tools = @($script:RealManifest.Packages | Where-Object id -EQ 'vmware-tools')[0]
+        $others = @($script:RealManifest.Packages | Where-Object id -NE 'vmware-tools')
+        foreach ($package in $others) { [int] $tools.order | Should -BeLessThan ([int] $package.order) }
+    }
+
+    It 'qualifies it like any other package' {
+        # A fingerprinted build input, not something assumed present: it has an
+        # expected hash, an install contract, and a validation check.
+        $tools = @($script:RealManifest.Packages | Where-Object id -EQ 'vmware-tools')[0]
+        $tools.sha256 | Should -Match '^[a-f0-9]{64}$'
+        $tools.required | Should -BeTrue
+        @($tools.validation).Count | Should -BeGreaterThan 0
+    }
+
+    It 'accepts a manifest, builder, and recipe that agree' {
+        Test-ToolsVersionAgreement -Manifest $script:RealManifest -BuilderVersion '12.5.0' -Tooling (Tooling) |
+            Should -BeNullOrEmpty
+    }
+
+    It 'refuses a builder checking for a version the manifest does not install' {
+        # The gate would refuse a correct build, having installed exactly what
+        # it was told to.
+        Test-ToolsVersionAgreement -Manifest $script:RealManifest -BuilderVersion '12.4.9' -Tooling (Tooling) |
+            Should -Match 'installs 12.5.0 and the build checks for 12.4.9'
+    }
+
+    It 'refuses a recipe recording a version the manifest does not install' {
+        # The digest would name a machine that was never constructed.
+        Test-ToolsVersionAgreement -Manifest $script:RealManifest -BuilderVersion '12.5.0' -Tooling (Tooling -Version '13.0.0') |
+            Should -Match 'records 13.0.0'
+    }
+
+    It 'refuses a manifest with no tooling package' {
+        $manifest = [PSCustomObject]@{ SchemaVersion = 2; Packages = @() }
+        Test-ToolsVersionAgreement -Manifest $manifest -BuilderVersion '12.5.0' -Tooling (Tooling) |
+            Should -Match 'no .vmware-tools. package'
+    }
+
+    It 'refuses a recipe with no tooling version at all' {
+        Test-ToolsVersionAgreement -Manifest $script:RealManifest -BuilderVersion '12.5.0' `
+            -Tooling @{ PackerVersion = '1.15.4'; PluginVersions = @{} } |
+            Should -Match 'does not record a VMware Tools version'
+    }
+
+    It 'agrees with the version the build configuration checks for' {
+        # The end of the chain: the value in the committed variable example and
+        # the value in the committed manifest are the same string.
+        $tools = @($script:RealManifest.Packages | Where-Object id -EQ 'vmware-tools')[0]
+        $configured = ([regex]::Match($script:Configuration,
+            'vmware_tools_version[^\n]*\n[^\n]*ExpectedVersion ''(?<v>[^'']+)''')).Groups['v'].Value
+        if (-not $configured) {
+            $configured = ([regex]::Match($script:Configuration, "ExpectedVersion '\`$\{var\.vmware_tools_version\}'")).Value
+            $configured | Should -Not -BeNullOrEmpty -Because 'the build must compare against the declared version'
+        }
+        $tools.version | Should -Be '12.5.0'
+    }
+}

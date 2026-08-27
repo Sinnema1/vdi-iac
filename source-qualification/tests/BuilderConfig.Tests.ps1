@@ -35,6 +35,7 @@ BeforeAll {
         Set-Content -LiteralPath (Join-Path $work 'autounattend.xml') -Value '<x/>' -NoNewline
         Set-Content -LiteralPath (Join-Path $work 'bootstrap.ps1') -Value '# bootstrap' -NoNewline
         Set-Content -LiteralPath (Join-Path $work 'media.iso') -Value 'media' -NoNewline
+        $null = New-Item -ItemType Directory -Path (Join-Path $work 'bundle') -Force
 
         $values = [ordered]@{
             vcenter_server              = '"vcenter.example"'
@@ -52,6 +53,12 @@ BeforeAll {
             media_checksum              = '"sha256:' + ('0' * 64) + '"'
             answer_file_path            = '"' + (($work + '/autounattend.xml') -replace '\\', '/') + '"'
             winrm_bootstrap_path        = '"' + (($work + '/bootstrap.ps1') -replace '\\', '/') + '"'
+            bundle_path                 = '"' + (($work + '/bundle') -replace '\\', '/') + '"'
+            descriptor_sha256           = '"' + ('a' * 64) + '"'
+            tools_source_dir            = '"' + ((Join-Path $script:RepoRoot 'source-qualification' 'scripts') -replace '\\', '/') + '"'
+            guest_scripts_dir           = '"' + ((Join-Path $script:RepoRoot 'packer' 'scripts' 'guest') -replace '\\', '/') + '"'
+            contracts_source_dir        = '"' + ((Join-Path $script:RepoRoot 'contracts') -replace '\\', '/') + '"'
+            evidence_output_dir         = '"' + (($work + '/evidence') -replace '\\', '/') + '"'
             hardware_version            = '21'
             firmware                    = '"efi-secure"'
             virtual_tpm                 = 'true'
@@ -230,14 +237,75 @@ Describe 'the build seals what it constructed' {
         $schema.properties.buildSettings.properties.buildUsername.const | Should -Be 'Administrator'
     }
 
-    It 'configures no provisioning it has not implemented' {
-        # Stage 4 is construction only. An earlier draft downloaded an evidence
-        # file nothing creates and generalized a guest it never provisioned, so
-        # it could not have succeeded.
+    It 'configures nothing beyond the steps it implements' {
+        # Steps 1 and 2 provision and prove it worked. Everything that turns a
+        # provisioned VM into an image is absent and unimplemented.
         $script:Configuration | Should -Not -Match 'Sysprep\.exe'
         $script:Configuration | Should -Not -Match 'Remove-SetupResidue'
-        $script:Configuration | Should -Not -Match 'direction   = "download"'
-        $script:Build | Should -Match 'STAGE 4 IS SOURCE AND BUILD CONFIGURATION ONLY'
+        $script:Build | Should -Match 'STAGE 5 STEPS 1 AND 2 ONLY'
+    }
+
+    It 'reuses the Increment 2 entry point rather than a parallel format' {
+        # A second package-transfer path would need its own verification, its
+        # own evidence, and its own reasons to be trusted.
+        $script:Configuration | Should -Match 'Invoke-GuestPhase\.ps1'
+        $script:Configuration | Should -Match '-Phase install'
+        $script:Configuration | Should -Match '-Phase validate'
+    }
+
+    It 'delivers the descriptor digest out of band' {
+        # A digest carried inside the bundle would be rewritten by whoever
+        # rewrote the bundle.
+        $script:Configuration | Should -Match 'VDIIAC_DESCRIPTOR_SHA256=\$\{var\.descriptor_sha256\}'
+        $script:Configuration | Should -Not -Match 'descriptor_sha256.*bundle_path'
+    }
+
+    It 'accepts the logical-failure exit code on the guest phases' {
+        # 200 means the phase decided not to proceed and wrote bounded evidence
+        # saying why. That is a result to retrieve, not a transport failure.
+        ([regex]::Matches($script:Configuration, 'valid_exit_codes = \[0, 200\]')).Count | Should -Be 2
+    }
+
+    It 'runs install before validate, with a restart between them' {
+        $install = $script:Configuration.IndexOf('-Phase install')
+        $restart = $script:Configuration.IndexOf('windows-restart')
+        $validate = $script:Configuration.IndexOf('-Phase validate')
+
+        $install | Should -BeGreaterThan 0
+        $install | Should -BeLessThan $restart
+        $restart | Should -BeLessThan $validate
+    }
+
+    It 'retrieves install evidence before the restart gate' {
+        # A failing provisioner stops the ones after it, so evidence collected
+        # later than the gate would never be collected at all.
+        $download = $script:Configuration.IndexOf('install-${local.evidence_name}"')
+        $gate = $script:Configuration.IndexOf('Test-RestartAuthorization')
+        $download | Should -BeGreaterThan 0
+        $download | Should -BeLessThan $gate
+    }
+
+    It 'verifies both evidence documents before deleting the bundle' {
+        # Deleting first would destroy the packages the evidence describes while
+        # the evidence was still unverified.
+        $gate = $script:Configuration.IndexOf('Test-ProvisioningComplete')
+        $cleanup = $script:Configuration.IndexOf('Remove-GuestBundle')
+        $gate | Should -BeGreaterThan 0
+        $gate | Should -BeLessThan $cleanup
+    }
+
+    It 'stops the build when the provisioning gate refuses' {
+        # Fails closed. Nothing after this point is reversible, and
+        # convert_to_template cannot be a gate because it is static
+        # configuration -- what keeps a failed build from being sealed is that
+        # this throws.
+        $script:Configuration | Should -Match 'if \(-not \$decision\.Authorized\) \{ throw'
+    }
+
+    It 'derives what it deletes from the staging root, not the descriptor' {
+        # Cleanup has to work after descriptor tampering, so what gets deleted
+        # must not depend on a document an attacker may have rewritten.
+        $script:Configuration | Should -Match "Remove-GuestBundle -StagingRoot '\$\{local\.guest_root\}' -RunId '\$\{var\.run_id\}'"
     }
 
     It 'finds the bootstrap by volume label, not a drive letter' {
@@ -391,6 +459,9 @@ Describe 'the handoff from verified media to the build' {
         $declaration = Import-AnswerFileTemplate -Path (Join-Path $script:RepoRoot 'packer' 'unattended' 'autounattend.template.json')
         Set-Content -LiteralPath (Join-Path $qualified.Root 'rendered.xml') -Value '<x/>' -NoNewline
         Set-Content -LiteralPath (Join-Path $qualified.Root 'bootstrap.ps1') -Value '# bootstrap' -NoNewline
+        $bundleDir = Join-Path $qualified.Root 'bundle'
+        $evidenceDir = Join-Path $qualified.Root 'evidence'
+        $null = New-Item -ItemType Directory -Path $bundleDir, $evidenceDir -Force
 
         $variables = ConvertTo-BuildVariableSet -QualifiedMedia $qualified.Verified -Declaration $declaration `
             -Hardware (BuildHardware) -AnswerFilePath (Join-Path $qualified.Root 'rendered.xml') -RunId $qualified.RunId
@@ -404,6 +475,12 @@ Describe 'the handoff from verified media to the build' {
             datastore = 'example-datastore'; network = 'example-network'; folder = 'example-folder'
             candidate_name = 'windows-candidate'; build_password = 'placeholder'
             winrm_bootstrap_path = (Join-Path $qualified.Root 'bootstrap.ps1')
+            bundle_path = $bundleDir
+            descriptor_sha256 = ('a' * 64)
+            tools_source_dir = (Join-Path $script:RepoRoot 'source-qualification' 'scripts')
+            guest_scripts_dir = (Join-Path $script:RepoRoot 'packer' 'scripts' 'guest')
+            contracts_source_dir = (Join-Path $script:RepoRoot 'contracts')
+            evidence_output_dir = $evidenceDir
         }
 
         $lines = foreach ($pair in ($variables.GetEnumerator() + $platform.GetEnumerator())) {

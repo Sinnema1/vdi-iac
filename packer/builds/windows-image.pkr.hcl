@@ -122,6 +122,41 @@ variable "winrm_bootstrap_path" {
   description = "The script the answer file's first-logon command runs to create the WinRM listener. Carries no credential."
 }
 
+variable "bundle_path" {
+  type        = string
+  description = "The verified-only transfer bundle from Increment 2. Only content that passed host verification is in it."
+}
+
+variable "descriptor_sha256" {
+  type        = string
+  description = "The bundle descriptor's expected digest, delivered out of band. A digest carried inside the bundle would be rewritten by whoever rewrote the bundle."
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.descriptor_sha256))
+    error_message = "The descriptor_sha256 must be a lowercase hexadecimal SHA-256."
+  }
+}
+
+variable "tools_source_dir" {
+  type        = string
+  description = "Guest-side modules uploaded to the build VM."
+}
+
+variable "guest_scripts_dir" {
+  type        = string
+  description = "Guest phase entry scripts."
+}
+
+variable "contracts_source_dir" {
+  type        = string
+  description = "Contracts uploaded so the guest validates its own evidence against the same files the host does."
+}
+
+variable "evidence_output_dir" {
+  type        = string
+  description = "Where retrieved guest evidence is written on the host."
+}
+
 variable "answer_file_path" {
   type        = string
   description = "The rendered answer file. It holds a working credential for as long as it exists and is removed by the renderer on every exit path."
@@ -304,39 +339,166 @@ source "vsphere-iso" "windows" {
   convert_to_template = false
 }
 
+locals {
+  guest_root       = "C:/vdi-iac-build"
+  tools_target     = "${local.guest_root}/tools"
+  guest_target     = "${local.guest_root}/guest"
+  contracts_target = "${local.guest_root}/contracts"
+  bundle_target    = "${local.guest_root}/bundle"
+  evidence_name    = "guest-evidence.json"
+  halt_path        = "${local.guest_root}/halt.txt"
+}
+
 build {
   name    = "windows-candidate"
   sources = ["source.vsphere-iso.windows"]
 
-  # STAGE 4 IS SOURCE AND BUILD CONFIGURATION ONLY.
+  # STAGE 5 STEPS 1 AND 2 ONLY: PROVISION, AND PROVE IT WORKED.
   #
-  # This build constructs a VM from qualified media and an unattended answer
-  # file, and stops there. It deliberately contains no content-changing
-  # provisioners: the one provisioner below writes a line and changes nothing,
-  # which confirms the communicator can reach the guest. Everything that would
-  # follow belongs to later stages and none of it is implemented:
+  # This build constructs a VM, installs the qualified packages, validates them
+  # after a restart, and stops at a gate. Everything that turns a provisioned VM
+  # into an image is deliberately absent, and none of it is implemented:
   #
-  #   - guest provisioning: the Increment 2 transfer bundle, its verification,
-  #     installation, and evidence, are not wired in here yet. An earlier draft
-  #     downloaded guest-evidence.json, which nothing in this configuration
-  #     creates, so the build could not have reached generalization at all;
-  #   - credential disable or rotation before sealing;
-  #   - setup-residue removal inside the guest;
-  #   - pre-generalization checks, generalization, and an observed shutdown;
-  #   - provenance emission binding recipeDigest, runId, and the artifact.
+  #   - pre-generalization checks;
+  #   - answer-file residue removal;
+  #   - build-account disablement, WinRM and firewall teardown, generalization,
+  #     and shutdown -- which are ONE terminal transition, not separate
+  #     provisioners: Packer reaches this guest over WinRM, so nothing can
+  #     remove the listener and then open another session;
+  #   - provenance emission bound to the resulting artifact.
   #
-  # Those are stages 5 and 6. Listing them here rather than leaving the file
-  # silent means the gap is visible to whoever opens it next, and a provisioner
-  # added above this comment is a deliberate act rather than an accident.
+  # convert_to_template stays false. It is static configuration and cannot be a
+  # gate; what keeps a failed build from being sealed is that every provisioner
+  # below fails closed, so Packer never reaches conversion.
+
+  # 1. Guest-side code, the contracts it validates its own evidence against, and
+  #    the verified-only bundle. Nothing unverified crosses this boundary: the
+  #    bundle contains only content that passed host verification.
+  provisioner "file" {
+    source      = "${var.tools_source_dir}/"
+    destination = "${local.tools_target}/"
+  }
+
+  provisioner "file" {
+    source      = "${var.guest_scripts_dir}/"
+    destination = "${local.guest_target}/"
+  }
+
+  provisioner "file" {
+    source      = "${var.contracts_source_dir}/"
+    destination = "${local.contracts_target}/"
+  }
+
+  provisioner "file" {
+    source      = "${var.bundle_path}/"
+    destination = "${local.bundle_target}/"
+  }
+
+  # 2. Install. The expected descriptor digest arrives through the environment,
+  #    out of band from the bundle it authenticates -- a digest carried inside
+  #    the bundle would be rewritten by whoever rewrote the bundle. The
+  #    environment is the same channel that delivers this command, so an
+  #    attacker able to rewrite it is already executing code here.
   #
-  # convert_to_template stays on the source: it is what makes the artifact
-  # immutable once a build does complete. Confirming a seal, and refusing to
-  # call anything a candidate without the full phase sequence, is stage 5 work
-  # already implemented in BuildEvidence.psm1 and not invoked from here.
+  #    Exit code 200 is accepted: it means the phase decided not to proceed and
+  #    wrote bounded evidence saying why, which is a result to retrieve rather
+  #    than a transport failure.
   provisioner "powershell" {
-    use_pwsh = false
+    use_pwsh         = true
+    valid_exit_codes = [0, 200]
+    environment_vars = [
+      "VDIIAC_DESCRIPTOR_SHA256=${var.descriptor_sha256}",
+      "VDIIAC_RUN_ID=${var.run_id}",
+      "VDIIAC_HALT_PATH=${local.halt_path}"
+    ]
     inline = [
-      "Write-Host 'stage 4: construction only. No guest provisioning is configured.'"
+      "$ErrorActionPreference = 'Stop'",
+      "& '${local.guest_target}/Invoke-GuestPhase.ps1' -BundlePath '${local.bundle_target}' -ToolsPath '${local.tools_target}' -Phase install -EvidencePath '${local.guest_root}/install-${local.evidence_name}'"
     ]
   }
+
+  # 3. Install evidence is retrieved before the restart, not at the end. A
+  #    failing provisioner stops the ones after it, so evidence collected later
+  #    than the next gate would never be collected at all.
+  provisioner "file" {
+    direction   = "download"
+    source      = "${local.guest_root}/install-${local.evidence_name}"
+    destination = "${var.evidence_output_dir}/install-${local.evidence_name}"
+  }
+
+  # 4. The restart gate. Authorization is positive and comes from the install
+  #    evidence: an installer that may still be writing must never meet a
+  #    reboot. The halt marker is a supplementary signal, because writing it can
+  #    fail and a gate that permits a reboot whenever a file is absent is
+  #    fail-open.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
+      "$decision = Test-RestartAuthorization -EvidencePath '${local.guest_root}/install-${local.evidence_name}' -RunId '${var.run_id}' -SchemaPath '${local.contracts_target}/evidence-envelope-2.schema.json' -HaltMarkerPath '${local.halt_path}'",
+      "if (-not $decision.Authorized) { throw \"Restart refused: $($decision.ReasonCode).\" }",
+      "Write-Host 'gate: install completed, restart may proceed'"
+    ]
+  }
+
+  # 5. Packer owns the restart, as it owns the shutdown. Installation logic
+  #    reports that one is required and never triggers it.
+  provisioner "windows-restart" {
+    restart_timeout = "30m"
+  }
+
+  # 6. Validation, after the restart. This is what establishes that the software
+  #    is actually present rather than that an installer exited zero.
+  provisioner "powershell" {
+    use_pwsh         = true
+    valid_exit_codes = [0, 200]
+    environment_vars = [
+      "VDIIAC_DESCRIPTOR_SHA256=${var.descriptor_sha256}",
+      "VDIIAC_RUN_ID=${var.run_id}",
+      "VDIIAC_HALT_PATH=${local.halt_path}"
+    ]
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "& '${local.guest_target}/Invoke-GuestPhase.ps1' -BundlePath '${local.bundle_target}' -ToolsPath '${local.tools_target}' -Phase validate -EvidencePath '${local.guest_root}/validate-${local.evidence_name}'"
+    ]
+  }
+
+  provisioner "file" {
+    direction   = "download"
+    source      = "${local.guest_root}/validate-${local.evidence_name}"
+    destination = "${var.evidence_output_dir}/validate-${local.evidence_name}"
+  }
+
+  # 7. The provisioning gate, before anything irreversible. Both documents are
+  #    schema-validated and cross-checked here, and this runs BEFORE the bundle
+  #    is removed: deleting it first would destroy the packages the evidence
+  #    describes while the evidence was still unverified.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
+      "$decision = Test-ProvisioningComplete -InstallEvidencePath '${local.guest_root}/install-${local.evidence_name}' -ValidateEvidencePath '${local.guest_root}/validate-${local.evidence_name}' -RunId '${var.run_id}' -SchemaPath '${local.contracts_target}/evidence-envelope-2.schema.json'",
+      "if (-not $decision.Authorized) { throw \"Provisioning gate refused: $($decision.ReasonCode). The build stops here rather than generalizing a machine whose provisioning cannot be accounted for.\" }",
+      "Write-Host 'gate: provisioning complete and accounted for'"
+    ]
+  }
+
+  # 8. Remove the bundle, now that its evidence has been retrieved and verified.
+  #    The target is derived from the host-controlled staging root and the run
+  #    identifier, never read from the descriptor: cleanup has to work after
+  #    descriptor tampering, so what gets deleted must not depend on a document
+  #    an attacker may have rewritten.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
+      "$outcome = Remove-GuestBundle -StagingRoot '${local.guest_root}' -RunId '${var.run_id}'",
+      "Write-Host \"bundle cleanup: $outcome\""
+    ]
+  }
+
+  # STOP. The next provisioner belongs to step 3 and is not written.
 }

@@ -272,6 +272,8 @@ jobs:
           # template. Nothing in CI runs a build.
           $work = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
           New-Item -ItemType Directory -Path $work -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $work 'bundle') -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $work 'evidence') -Force | Out-Null
           Set-Content -LiteralPath (Join-Path $work 'autounattend.xml') -Value '<x/>' -NoNewline
           Set-Content -LiteralPath (Join-Path $work 'bootstrap.ps1') -Value '# bootstrap' -NoNewline
           Set-Content -LiteralPath (Join-Path $work 'media.iso') -Value 'media' -NoNewline
@@ -293,6 +295,12 @@ jobs:
           media_checksum              = "sha256:$('0' * 64)"
           answer_file_path            = "$((Join-Path $work 'autounattend.xml') -replace '\\', '/')"
           winrm_bootstrap_path        = "$((Join-Path $work 'bootstrap.ps1') -replace '\\', '/')"
+          bundle_path                 = "$((Join-Path $work 'bundle') -replace '\\', '/')"
+          descriptor_sha256           = "$('a' * 64)"
+          tools_source_dir            = "$((Join-Path $PWD 'source-qualification' 'scripts') -replace '\\', '/')"
+          guest_scripts_dir           = "$((Join-Path $PWD 'packer' 'scripts' 'guest') -replace '\\', '/')"
+          contracts_source_dir        = "$((Join-Path $PWD 'contracts') -replace '\\', '/')"
+          evidence_output_dir         = "$((Join-Path $work 'evidence') -replace '\\', '/')"
           hardware_version            = 21
           firmware                    = "efi-secure"
           virtual_tpm                 = true

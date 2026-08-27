@@ -85,6 +85,7 @@ post-provision validation.
 | [Agent_Handoff.md](Agent_Handoff.md) | Solution charter, architectural principles, lifecycle phases, ownership boundaries, delivery sequence |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to propose and validate a change |
 | [docs/glossary.md](docs/glossary.md) | Architectural vocabulary used throughout |
+| [docs/operations/lab-validation.md](docs/operations/lab-validation.md) | Preflight and invocation for the first disposable-target run |
 | [docs/decisions/](docs/decisions/) | Architecture decision records |
 | [contracts/](contracts/) | Machine-consumed schemas defining cross-domain boundaries |
 | [continue-config.md](continue-config.md) | Continue model routing, plan-mode workflow, context and slash-command guidance |

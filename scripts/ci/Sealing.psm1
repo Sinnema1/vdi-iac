@@ -43,60 +43,77 @@ $script:PhasesBeforeSeal = @(
     'pre-generalization', 'credential-residue', 'generalization', 'shutdown'
 )
 
-# The phases the build downloads evidence for, and the file each one arrives in.
-# Anything not listed here has no evidence and is reported as such rather than
-# assumed to have passed.
+# The phases established by a downloaded document, and the file each arrives in.
+# Everything else is established by an observed fact and is passed in, so no
+# phase is ever reported as passed merely because no file was expected for it.
 $script:PhaseEvidenceFiles = [ordered]@{
-    'media-qualification' = $null   # established host-side, before the build
-    'answer-file'         = $null   # established host-side, before the build
-    'construction'        = $null   # established by packer's own exit code
-    'provisioning'        = 'validate-guest-evidence.json'
-    'pre-generalization'  = 'pre-generalization-guest-evidence.json'
-    'credential-residue'  = 'credential-residue-guest-evidence.json'
-    'generalization'      = $null   # attested, not downloaded: the guest is gone
-    'shutdown'            = $null   # observed through the platform
+    'provisioning'       = 'validate-guest-evidence.json'
+    'pre-generalization' = 'pre-generalization-guest-evidence.json'
+    'credential-residue' = 'credential-residue-guest-evidence.json'
 }
+
+# Contract order for the phases established before sealing. generalization and
+# shutdown are appended by the coordinator, which is the thing that observes
+# them: the attestation it accepts, and the power state it reads.
+$script:PhasesBeforeGeneralization = @(
+    'media-qualification', 'answer-file', 'construction',
+    'provisioning', 'pre-generalization', 'credential-residue'
+)
 
 function Read-BuildPhaseEvidence {
     <#
     .SYNOPSIS
-        Reads the phase outcomes a build actually produced.
+        Reports each pre-seal phase from the fact that establishes it.
 
     .DESCRIPTION
-        Replaces a hard-coded list of phases marked passed, which asserted the
-        thing the seal was supposed to establish. Every phase with a downloaded
-        document is read from disk and validated; a document that is missing,
-        malformed, from another run, or reporting anything but success makes its
-        phase fail, and the candidate gate then refuses the seal.
+        Replaces a mapping that returned 'passed' for every phase with no
+        downloaded document. A missing record was becoming proof, which is the
+        opposite of what a phase list is for -- and three of the eight phases
+        had no file, so three eighths of a sealed candidate's evidence was
+        assertion.
 
-        The phases with no file are not assumed to have passed either -- they
-        are established elsewhere and named here so the list is complete and the
-        reader can see which is which. Construction is Packer's exit code,
-        generalization is attested by the guest, and the shutdown is observed
-        through the platform; each is decided by the caller and by the sealing
-        coordinator, not invented here.
+        Each phase now has a lineage:
+
+          media-qualification  the qualification record's outcome
+          answer-file          the answer file having been rendered and removed
+          construction         the captured Packer result
+          provisioning         the guest evidence the build downloaded
+          pre-generalization   the bounded phase result the build downloaded
+          credential-residue   the bounded phase result the build downloaded
+
+        generalization and shutdown are not here. They are established after the
+        guest is unreachable -- by the attestation and by the platform's power
+        state -- and the coordinator that observes them adds them itself.
 
     .OUTPUTS
-        One entry per phase, in contract order, with an outcome.
+        One entry per pre-seal phase, in contract order, with an outcome.
     #>
     [CmdletBinding()]
     [OutputType([object[]])]
     param(
         [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $EvidenceRoot,
         [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RunId,
-        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SchemaPath
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SchemaPath,
+        [Parameter(Mandatory)] [bool] $MediaQualified,
+        [Parameter(Mandatory)] [bool] $AnswerFilePrepared,
+        [Parameter(Mandatory)] [bool] $ConstructionSucceeded
     )
 
     $expectedRunId = Assert-RunIdentifier -RunId $RunId
 
-    @(foreach ($phase in $script:PhaseEvidenceFiles.Keys) {
-        $file = $script:PhaseEvidenceFiles[$phase]
-        if (-not $file) {
-            [PSCustomObject]@{ name = $phase; outcome = 'passed' }
+    $observed = @{
+        'media-qualification' = $MediaQualified
+        'answer-file'         = $AnswerFilePrepared
+        'construction'        = $ConstructionSucceeded
+    }
+
+    @(foreach ($phase in $script:PhasesBeforeGeneralization) {
+        if ($observed.ContainsKey($phase)) {
+            [PSCustomObject]@{ name = $phase; outcome = $(if ($observed[$phase]) { 'passed' } else { 'failed' }) }
             continue
         }
 
-        $path = Join-Path $EvidenceRoot $file
+        $path = Join-Path $EvidenceRoot $script:PhaseEvidenceFiles[$phase]
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             [PSCustomObject]@{ name = $phase; outcome = 'failed' }
             continue
@@ -346,6 +363,15 @@ function NewProvenanceDocument {
     foreach ($phase in @($CompletedPhases)) {
         $phases.Add([ordered]@{ name = $phase.name; outcome = $phase.outcome; reasonCode = $null })
     }
+
+    # generalization and shutdown are added here rather than supplied, because
+    # this is the code that observes them: generalization is what the accepted
+    # attestation reports, and the shutdown is the power state read from the
+    # platform. A caller could only have asserted them.
+    $observedOutcome = if ($Sealed) { 'passed' } elseif ($PreSeal) { 'skipped' } else { 'incomplete' }
+    $observedReason = if ($Sealed -or $PreSeal) { $null } else { $Reason }
+    $phases.Add([ordered]@{ name = 'generalization'; outcome = $observedOutcome; reasonCode = $observedReason })
+    $phases.Add([ordered]@{ name = 'shutdown'; outcome = $observedOutcome; reasonCode = $observedReason })
     # A pre-seal refusal never reached the seal, so it reports those phases as
     # skipped rather than as something that was attempted and did not finish.
     $sealOutcome = if ($Sealed) { 'passed' } elseif ($PreSeal) { 'skipped' } else { 'incomplete' }

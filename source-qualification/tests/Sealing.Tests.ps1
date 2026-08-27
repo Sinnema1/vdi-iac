@@ -140,10 +140,61 @@ BeforeAll {
     }
 
     function CompletedPhases {
-        @('media-qualification', 'answer-file', 'construction', 'provisioning',
-          'pre-generalization', 'credential-residue', 'generalization', 'shutdown') |
+        # Six, not eight. generalization and shutdown are observed by the
+        # coordinator and appended there, because a caller could only assert
+        # them.
+        @('media-qualification', 'answer-file', 'construction',
+          'provisioning', 'pre-generalization', 'credential-residue') |
             ForEach-Object { [PSCustomObject]@{ name = $_; outcome = 'passed' } }
     }
+
+        $script:PhaseSchema = Join-Path $script:RepoRoot 'contracts' 'evidence-envelope-2.schema.json'
+
+        function NewEvidenceRoot {
+            param([string] $RunId, [hashtable] $Override = @{})
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+            $null = New-Item -ItemType Directory -Path $root -Force
+
+            $guest = @{
+                resultSchemaVersion = 2; resultKind = 'guest-provisioning'
+                runId = $RunId; manifestSchemaVersion = 2
+                startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+                outcome = 'passed'
+                payload = @{
+                    phase = 'validate'; restartRequired = $false
+                    packageCount = 1; passedCount = 1; failedRequiredCount = 0
+                    installerAttemptCount = 1; cleanupOutcome = 'removed'
+                    packages = @(@{ id = 'a'; version = '1.0.0'; order = 1; required = $true
+                                    outcome = 'passed'; reasonCode = $null
+                                    restartRequired = $false; installerAttempted = $true })
+                }
+            }
+            $guest | ConvertTo-Json -Depth 12 |
+                Set-Content -LiteralPath (Join-Path $root 'validate-guest-evidence.json') -Encoding utf8
+
+            foreach ($phase in 'pre-generalization', 'credential-residue') {
+                @{ name = $phase; outcome = 'passed'; reasonCode = $null } | ConvertTo-Json |
+                    Set-Content -LiteralPath (Join-Path $root "$phase-guest-evidence.json") -Encoding utf8
+            }
+
+            foreach ($key in $Override.Keys) {
+                $path = Join-Path $root $key
+                if ($null -eq $Override[$key]) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+                else { $Override[$key] | Set-Content -LiteralPath $path -Encoding utf8 }
+            }
+            $root
+        }
+
+        function Phases {
+            param(
+                [string] $Root, [string] $RunId,
+                [bool] $MediaQualified = $true, [bool] $AnswerFilePrepared = $true,
+                [bool] $ConstructionSucceeded = $true
+            )
+            Read-BuildPhaseEvidence -EvidenceRoot $Root -RunId $RunId -SchemaPath $script:PhaseSchema `
+                -MediaQualified $MediaQualified -AnswerFilePrepared $AnswerFilePrepared `
+                -ConstructionSucceeded $ConstructionSucceeded
+        }
 
     function Seal {
         param($Platform, [string] $RunId, [string] $Nonce, [bool] $PackerSucceeded = $true, $Phases = $null)
@@ -746,55 +797,11 @@ Describe 'persistence is never reported from the writer alone' {
 
 Describe 'phase outcomes are read, not asserted' {
 
-    BeforeAll {
-        $script:PhaseSchema = Join-Path $script:RepoRoot 'contracts' 'evidence-envelope-2.schema.json'
-
-        function NewEvidenceRoot {
-            param([string] $RunId, [hashtable] $Override = @{})
-            $root = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
-            $null = New-Item -ItemType Directory -Path $root -Force
-
-            $guest = @{
-                resultSchemaVersion = 2; resultKind = 'guest-provisioning'
-                runId = $RunId; manifestSchemaVersion = 2
-                startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
-                outcome = 'passed'
-                payload = @{
-                    phase = 'validate'; restartRequired = $false
-                    packageCount = 1; passedCount = 1; failedRequiredCount = 0
-                    installerAttemptCount = 1; cleanupOutcome = 'removed'
-                    packages = @(@{ id = 'a'; version = '1.0.0'; order = 1; required = $true
-                                    outcome = 'passed'; reasonCode = $null
-                                    restartRequired = $false; installerAttempted = $true })
-                }
-            }
-            $guest | ConvertTo-Json -Depth 12 |
-                Set-Content -LiteralPath (Join-Path $root 'validate-guest-evidence.json') -Encoding utf8
-
-            foreach ($phase in 'pre-generalization', 'credential-residue') {
-                @{ name = $phase; outcome = 'passed'; reasonCode = $null } | ConvertTo-Json |
-                    Set-Content -LiteralPath (Join-Path $root "$phase-guest-evidence.json") -Encoding utf8
-            }
-
-            foreach ($key in $Override.Keys) {
-                $path = Join-Path $root $key
-                if ($null -eq $Override[$key]) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
-                else { $Override[$key] | Set-Content -LiteralPath $path -Encoding utf8 }
-            }
-            $root
-        }
-
-        function Phases {
-            param([string] $Root, [string] $RunId)
-            Read-BuildPhaseEvidence -EvidenceRoot $Root -RunId $RunId -SchemaPath $script:PhaseSchema
-        }
-    }
-
     It 'reports every contract phase, in order' {
         $runId = Get-RunIdentifier
         @(Phases -Root (NewEvidenceRoot -RunId $runId) -RunId $runId | ForEach-Object { $_.name }) |
-            Should -Be @('media-qualification', 'answer-file', 'construction', 'provisioning',
-                         'pre-generalization', 'credential-residue', 'generalization', 'shutdown')
+            Should -Be @('media-qualification', 'answer-file', 'construction',
+                         'provisioning', 'pre-generalization', 'credential-residue')
     }
 
     It 'passes when every downloaded document reports success' {
@@ -850,5 +857,51 @@ Describe 'phase outcomes are read, not asserted' {
         $result = Seal -Platform $platform -RunId $runId -Nonce $nonce -Phases $phases
 
         $result.BuildState | Should -Not -Be 'sealed'
+    }
+}
+
+Describe 'no phase passes for want of a file' {
+
+    It 'fails <phase> when the fact that establishes it is false' -ForEach @(
+        @{ phase = 'media-qualification'; argument = 'MediaQualified' }
+        @{ phase = 'answer-file';         argument = 'AnswerFilePrepared' }
+        @{ phase = 'construction';        argument = 'ConstructionSucceeded' }
+    ) {
+        # These three had no downloaded document and were reported passed
+        # unconditionally, so three eighths of a sealed candidate's evidence was
+        # assertion rather than observation.
+        $runId = Get-RunIdentifier
+        $arguments = @{ Root = (NewEvidenceRoot -RunId $runId); RunId = $runId; $argument = $false }
+
+        (Phases @arguments | Where-Object name -EQ $phase).outcome | Should -Be 'failed'
+    }
+
+    It 'does not report generalization or shutdown at all' {
+        # They are observed after the guest is unreachable, by the attestation
+        # and the platform. A caller could only have asserted them.
+        $runId = Get-RunIdentifier
+        $names = @(Phases -Root (NewEvidenceRoot -RunId $runId) -RunId $runId | ForEach-Object { $_.name })
+        $names | Should -Not -Contain 'generalization'
+        $names | Should -Not -Contain 'shutdown'
+    }
+
+    It 'the coordinator adds them, and a sealed record carries all ten' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+
+        $document = (Seal -Platform $platform -RunId $runId -Nonce $nonce).Provenance | ConvertFrom-Json
+        @($document.payload.phases | ForEach-Object { $_.name }) | Should -Be @(
+            'media-qualification', 'answer-file', 'construction', 'provisioning',
+            'pre-generalization', 'credential-residue', 'generalization',
+            'shutdown', 'seal', 'provenance')
+    }
+
+    It 'a failed observed fact stops the seal' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $phases = Phases -Root (NewEvidenceRoot -RunId $runId) -RunId $runId -ConstructionSucceeded $false
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+
+        (Seal -Platform $platform -RunId $runId -Nonce $nonce -Phases $phases).BuildState |
+            Should -Not -Be 'sealed'
     }
 }

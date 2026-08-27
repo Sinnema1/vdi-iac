@@ -125,7 +125,21 @@ function Get-WindowsFinalizationAdapter {
     # Captured into one object the closures read from. A parameter referenced
     # only inside a closure is invisible to static analysis, and the assignment
     # is the form it can see -- the same shape the test doubles use.
+    # The listener's certificate thumbprint, captured before anything is torn
+    # down. Removing by subject would delete every certificate whose subject is
+    # the computer name -- which on a real machine is not only the one this
+    # bootstrap created.
+    $thumbprint = $null
+    try {
+        $thumbprint = @(Get-ChildItem -Path 'WSMan:\localhost\Listener' -ErrorAction SilentlyContinue |
+            ForEach-Object { (Get-ChildItem -Path $_.PSPath -ErrorAction SilentlyContinue |
+                Where-Object Name -eq 'CertificateThumbprint').Value } |
+            Where-Object { $_ }) | Select-Object -First 1
+    }
+    catch { $thumbprint = $null }
+
     $settings = @{
+        Thumbprint    = $thumbprint
         BuildUsername = $BuildUsername
         SystemDrive   = $SystemDrive
         ToolsPath     = $ToolsPath
@@ -172,17 +186,27 @@ function Get-WindowsFinalizationAdapter {
         }.GetNewClosure()
 
         RemoveCertificate = {
-            # The listener's certificate and its private key. A generalized
-            # image carrying the private key of a listener it used to run is an
-            # image that ships with the means to impersonate one, and Sysprep
+            # The listener's certificate and its private key, by thumbprint.
+            # A generalized image carrying the private key of a listener it used
+            # to run ships with the means to impersonate one, and Sysprep
             # removes neither.
-            Get-ChildItem -Path 'Cert:\LocalMachine\My' -ErrorAction SilentlyContinue |
-                Where-Object { $_.Subject -eq "CN=$($settings.CertSubject)" } |
-                ForEach-Object { Remove-Item -Path $_.PSPath -DeleteKey -Force -ErrorAction SilentlyContinue }
+            #
+            # By thumbprint, not subject: matching on the computer name would
+            # delete every certificate issued to this machine, which on a real
+            # guest is not only the one the bootstrap created.
+            if (-not $settings.Thumbprint) {
+                # No thumbprint was captured, so there is nothing this step can
+                # identify. Refusing is correct: deleting by a broader match to
+                # make the step succeed is the failure mode itself.
+                return $false
+            }
 
-            $remaining = @(Get-ChildItem -Path 'Cert:\LocalMachine\My' -ErrorAction SilentlyContinue |
-                Where-Object { $_.Subject -eq "CN=$($settings.CertSubject)" })
-            $remaining.Count -eq 0
+            $certificate = Get-Item -Path "Cert:\LocalMachine\My\$($settings.Thumbprint)" -ErrorAction SilentlyContinue
+            if ($certificate) {
+                Remove-Item -Path $certificate.PSPath -DeleteKey -Force -ErrorAction SilentlyContinue
+            }
+
+            $null -eq (Get-Item -Path "Cert:\LocalMachine\My\$($settings.Thumbprint)" -ErrorAction SilentlyContinue)
         }.GetNewClosure()
 
         UnregisterTask = {
@@ -229,8 +253,8 @@ function Get-WindowsFinalizationAdapter {
 
             $firewall = $null -eq (Get-NetFirewallRule -DisplayName $settings.FirewallRule -ErrorAction SilentlyContinue)
 
-            $certificate = @(Get-ChildItem -Path 'Cert:\LocalMachine\My' -ErrorAction SilentlyContinue |
-                Where-Object { $_.Subject -eq "CN=$($settings.CertSubject)" }).Count -eq 0
+            $certificate = -not $settings.Thumbprint -or
+                $null -eq (Get-Item -Path "Cert:\LocalMachine\My\$($settings.Thumbprint)" -ErrorAction SilentlyContinue)
 
             $task = $null -eq (Get-ScheduledTask -TaskName $settings.TaskName -ErrorAction SilentlyContinue)
             $workspace = -not (Test-Path -LiteralPath $settings.WorkspaceRoot)

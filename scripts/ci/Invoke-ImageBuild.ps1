@@ -30,8 +30,7 @@ param(
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $MediaRoot,
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ManifestPath,
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $AnswerFileDeclarationPath,
-    [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $BundlePath,
-    [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $DescriptorSha256,
+    [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $PackageSourceRoot,
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $VarFile,
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $WorkRoot,
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $CandidateName,
@@ -48,7 +47,7 @@ Set-StrictMode -Version 3.0
 
 $scripts = Join-Path $PSScriptRoot '..' '..' 'source-qualification' 'scripts'
 foreach ($module in 'RunIdentity', 'PackageManifest', 'MediaQualification', 'AnswerFile',
-                    'RecipeIdentity', 'BuildInputs', 'Finalization', 'BuildEvidence') {
+                    'TransferBundle', 'RecipeIdentity', 'BuildInputs', 'Finalization', 'BuildEvidence') {
     Import-Module (Join-Path $scripts "$module.psm1") -Force
 }
 Import-Module (Join-Path $PSScriptRoot 'Sealing.psm1') -Force
@@ -113,44 +112,122 @@ $recipe | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $runRoo
 Write-Information "recipe $($recipeIdentity.RecipeDigest) (input version $($recipeIdentity.RecipeInputVersion))" -InformationAction Continue
 
 # ---------------------------------------------------------------------------
-# The build. Its exit code is captured here and never accepted from anywhere.
+# The bundle, assembled here from the same manifest the recipe digested. Taking
+# a bundle path and a descriptor digest as arguments let provenance describe one
+# manifest while the guest installed another, and nothing would have noticed:
+# both documents would have been internally consistent.
 # ---------------------------------------------------------------------------
+$bundle = New-TransferBundle -ManifestPath $ManifestPath -SourceRoot $PackageSourceRoot `
+    -BundleRoot (Join-Path $runRoot 'bundle') -RunId $runId
+
+if ($bundle.Outcome -ne 'passed') {
+    Write-Error "The transfer bundle was not assembled: $($bundle.Outcome). Nothing unverified crosses the boundary."
+    exit 1
+}
+Write-Information "bundle $($bundle.DescriptorSha256)" -InformationAction Continue
+
+# ---------------------------------------------------------------------------
+# The build password, from the environment. Never a parameter, never in the var
+# file, never on a command line: all three are readable by anything that can
+# list processes or read the working tree.
+# ---------------------------------------------------------------------------
+$buildSecret = $env:VDIIAC_BUILD_PASSWORD
+if ([string]::IsNullOrEmpty($buildSecret)) {
+    Write-Error 'VDIIAC_BUILD_PASSWORD is not set. The build password is never accepted as an argument.'
+    exit 2
+}
+$buildPassword = [securestring]::new()
+foreach ($character in $buildSecret.ToCharArray()) { $buildPassword.AppendChar($character) }
+$buildPassword.MakeReadOnly()
+Remove-Variable -Name buildSecret -ErrorAction SilentlyContinue
+
 $variables = ConvertTo-BuildVariableSet -QualifiedMedia $qualified -Declaration $declaration `
-    -Hardware $Hardware -AnswerFilePath $declaration.templatePath -RunId $runId
+    -Hardware $Hardware -AnswerFilePath 'rendered-at-build-time' -RunId $runId
+
+# ---------------------------------------------------------------------------
+# The build runs inside the rendering callback, so the answer file exists only
+# for as long as Packer needs it and is removed on every exit path -- including
+# a build that throws. Passing the template's own path here would have uploaded
+# a file full of unsubstituted placeholders under the wrong name.
+# ---------------------------------------------------------------------------
+# Captured into one object the callback reads from. The callback closes over
+# this rather than over each parameter, which is also the only form static
+# analysis can see -- it does not look inside a closure.
+$invocation = @{
+    VarFile        = $VarFile
+    Variables      = $variables
+    Nonce          = $nonce
+    CandidateName  = $CandidateName
+    BundlePath     = $bundle.BundlePath
+    DescriptorHash = $bundle.DescriptorSha256
+    MediaRecord    = $mediaRecordPath
+    EvidenceRoot   = $evidenceRoot
+    BuildDirectory = (Join-Path $PSScriptRoot '..' '..' 'packer' 'builds')
+    Password       = $buildPassword
+}
 
 $packerExitCode = 1
-if ($PSCmdlet.ShouldProcess($CandidateName, 'Build and seal a candidate image')) {
-    $arguments = @('build', '-on-error=cleanup', "-var-file=$VarFile")
-    foreach ($name in ($variables.Keys | Sort-Object)) { $arguments += @('-var', "$name=$($variables[$name])") }
-    $arguments += @(
-        '-var', "finalization_nonce=$nonce"
-        '-var', "candidate_name=$CandidateName"
-        '-var', "bundle_path=$BundlePath"
-        '-var', "descriptor_sha256=$DescriptorSha256"
-        '-var', "media_qualification_record_path=$mediaRecordPath"
-        '-var', "evidence_output_dir=$evidenceRoot"
-        (Join-Path $PSScriptRoot '..' '..' 'packer' 'builds')
-    )
+$answerFileRendered = $false
 
-    # ErrorActionPreference is lowered deliberately: a native command's stderr
-    # becomes a terminating error under Stop, and packer writes progress there.
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        & packer @arguments
-        $packerExitCode = $LASTEXITCODE
+if ($PSCmdlet.ShouldProcess($CandidateName, 'Build and seal a candidate image')) {
+    $packerExitCode = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+        -Secrets @{ ADMINISTRATOR_PASSWORD = $buildPassword } -ScriptBlock {
+        param($RenderedPath)
+
+        # -on-error=abort, not cleanup. Cleanup deletes the virtual machine,
+        # and a failed finalizer deliberately leaves one powered on for
+        # reconciliation -- deleting it would destroy the thing the
+        # unconfirmed-artifact record exists to point at. Removing a failed
+        # build is a separate authorized action, not an automatic consequence.
+        $arguments = @('build', '-on-error=abort', "-var-file=$($invocation.VarFile)")
+        foreach ($name in ($invocation.Variables.Keys | Sort-Object)) {
+            if ($name -eq 'answer_file_path') { continue }
+            $arguments += @('-var', "$name=$($invocation.Variables[$name])")
+        }
+        $arguments += @(
+            '-var', "answer_file_path=$RenderedPath"
+            '-var', "finalization_nonce=$($invocation.Nonce)"
+            '-var', "candidate_name=$($invocation.CandidateName)"
+            '-var', "bundle_path=$($invocation.BundlePath)"
+            '-var', "descriptor_sha256=$($invocation.DescriptorHash)"
+            '-var', "media_qualification_record_path=$($invocation.MediaRecord)"
+            '-var', "evidence_output_dir=$($invocation.EvidenceRoot)"
+            $invocation.BuildDirectory
+        )
+
+        # The password reaches Packer through PKR_VAR_, not an argument. A -var
+        # on the command line is visible to anything enumerating processes, and
+        # the var file is on disk.
+        $env:PKR_VAR_build_password = [System.Net.NetworkCredential]::new('', $invocation.Password).Password
+        try {
+            # ErrorActionPreference is lowered deliberately: a native command's
+            # stderr becomes a terminating error under Stop, and packer writes
+            # progress there.
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                & packer @arguments
+                $LASTEXITCODE
+            }
+            finally { $ErrorActionPreference = $previous }
+        }
+        finally { $env:PKR_VAR_build_password = $null }
     }
-    finally { $ErrorActionPreference = $previous }
+
+    $answerFileRendered = $true
 }
 
 Write-Information "packer exit code $packerExitCode" -InformationAction Continue
 
 # ---------------------------------------------------------------------------
-# The phases, read from what the build downloaded and validated before they are
-# believed. A hard-coded list of passed phases is a claim, not evidence.
+# The phases, each from the fact that establishes it. Nothing is reported as
+# passed because no file happened to be expected for it.
 # ---------------------------------------------------------------------------
 $phases = Read-BuildPhaseEvidence -EvidenceRoot $evidenceRoot -RunId $runId `
-    -SchemaPath (Join-Path $PSScriptRoot '..' '..' 'contracts' 'evidence-envelope-2.schema.json')
+    -SchemaPath (Join-Path $PSScriptRoot '..' '..' 'contracts' 'evidence-envelope-2.schema.json') `
+    -MediaQualified ($mediaRecord.outcome -eq 'passed') `
+    -AnswerFilePrepared $answerFileRendered `
+    -ConstructionSucceeded ($packerExitCode -eq 0)
 
 # ---------------------------------------------------------------------------
 # Sealing.

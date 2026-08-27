@@ -99,6 +99,13 @@ Describe 'the Windows guest adapter' {
         # boot naming a script that no longer exists; and the workspace holds
         # the scripts, contracts, evidence, and log.
         $script:AdapterCode | Should -Match 'DeleteKey'
+        # By thumbprint, captured before teardown. Matching on the computer name
+        # would delete every certificate issued to the machine.
+        # Matched without a doubled separator: the boundary scanner reads one
+        # as a UNC prefix, which is a documented false positive to design around
+        # rather than suppress.
+        $script:AdapterCode | Should -Match 'Cert:.LocalMachine.My.[$]\([$]settings[.]Thumbprint\)'
+        $script:AdapterCode | Should -Not -Match 'Subject -eq "CN='
         $script:AdapterCode | Should -Match 'Unregister-ScheduledTask'
         $script:AdapterCode | Should -Match 'Remove-Item -LiteralPath \$settings\.WorkspaceRoot'
     }
@@ -246,8 +253,12 @@ Describe 'the host orchestration entry point' {
     It 'invokes packer and captures the exit code itself' {
         # A script that accepts "the build succeeded" as a parameter will
         # eventually be handed that value by something that did not check.
+        # The exit code is the callback's return value now, because the build
+        # runs inside the answer-file rendering scope: $LASTEXITCODE is emitted
+        # from the scriptblock and lands in $packerExitCode.
         $script:Entry | Should -Match '& packer @arguments'
-        $script:Entry | Should -Match '\$packerExitCode = \$LASTEXITCODE'
+        $script:Entry | Should -Match '\$packerExitCode = Invoke-WithRenderedAnswerFile'
+        $script:Entry | Should -Match '(?m)^\s*\$LASTEXITCODE\s*$'
     }
 
     It 'accepts no build result, provenance, or identity from its caller' {
@@ -412,5 +423,131 @@ Describe 'the attestation contract version' {
     It 'version 2 declares its own version' {
         $v2 = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'contracts' 'finalization-attestation-2.schema.json') -Raw | ConvertFrom-Json
         $v2.properties.attestationSchemaVersion.const | Should -Be 2
+    }
+}
+
+Describe 'the answer file is rendered, not uploaded as a template' {
+
+    BeforeAll {
+        $script:EntryCode = CodeOf -Path (Join-Path $script:CiScripts 'Invoke-ImageBuild.ps1')
+        foreach ($module in 'RunIdentity', 'AnswerFile') {
+            Import-Module (Join-Path $script:RepoRoot 'source-qualification' 'scripts' "$module.psm1") -Force
+        }
+    }
+
+    It 'runs the build inside the rendering callback' {
+        # Passing the template's own path would upload a file full of
+        # unsubstituted placeholders, under the wrong name, holding no
+        # credential the guest could use.
+        $script:EntryCode | Should -Match 'Invoke-WithRenderedAnswerFile'
+        $script:EntryCode | Should -Not -Match '-AnswerFilePath \$declaration\.templatePath'
+    }
+
+    It 'passes the rendered path to Packer, not the template' {
+        $script:EntryCode | Should -Match 'answer_file_path=[$]RenderedPath'
+    }
+
+    It 'takes the build password from the environment' {
+        $script:EntryCode | Should -Match '\$env:VDIIAC_BUILD_PASSWORD'
+        $parameters = [regex]::Match($script:EntryCode, '(?s)^param\((?<p>.*?)^\)', 'Multiline')
+        $parameters.Groups['p'].Value | Should -Not -Match 'Password'
+    }
+
+    It 'gives Packer the password through a scoped variable and clears it' {
+        # A -var on the command line is visible to anything enumerating
+        # processes, and the var file is on disk.
+        $script:EntryCode | Should -Match '\$env:PKR_VAR_build_password ='
+        $script:EntryCode | Should -Match '\$env:PKR_VAR_build_password = \$null'
+        # Matched without embedding a quote character: PowerShell does not use
+        # backslash escapes in double-quoted strings, and the backtick form is
+        # harder to read than a wildcard for the quote itself.
+        $script:EntryCode | Should -Not -Match "-var',\s*.build_password"
+    }
+
+    It 'renders to autounattend.xml, with no placeholder left, and removes it' {
+        # The end-to-end property, exercised for real: the renderer the entry
+        # point calls produces the file the builder expects, substituted, and
+        # gone afterwards.
+        $root = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+        $null = New-Item -ItemType Directory -Path $root -Force
+
+        $declaration = Import-AnswerFileTemplate -Path (Join-Path $script:RepoRoot 'packer' 'unattended' 'autounattend.template.json')
+        $secure = [securestring]::new()
+        foreach ($character in 'Zq7-CanaryPassword-3nR'.ToCharArray()) { $secure.AppendChar($character) }
+        $secure.MakeReadOnly()
+
+        $observed = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+            -Secrets @{ ADMINISTRATOR_PASSWORD = $secure } -ScriptBlock {
+                param($p)
+                $raw = Get-Content -LiteralPath $p -Raw
+                [PSCustomObject]@{
+                    Path           = $p
+                    Name           = (Split-Path -Leaf $p)
+                    HasPlaceholder = ($raw -match '\{\{')
+                    WellFormed     = [bool]([xml]$raw)
+                }
+            }
+
+        $observed.Name | Should -Be 'autounattend.xml'
+        $observed.HasPlaceholder | Should -BeFalse
+        $observed.WellFormed | Should -BeTrue
+        Test-Path -LiteralPath $observed.Path | Should -BeFalse -Because 'the rendered credential must not survive'
+    }
+
+    It 'removes the rendered file when the build throws' {
+        $declaration = Import-AnswerFileTemplate -Path (Join-Path $script:RepoRoot 'packer' 'unattended' 'autounattend.template.json')
+        $secure = [securestring]::new()
+        foreach ($character in 'Zq7-CanaryPassword-3nR'.ToCharArray()) { $secure.AppendChar($character) }
+        $secure.MakeReadOnly()
+
+        $captured = $null
+        try {
+            Invoke-WithRenderedAnswerFile -Declaration $declaration `
+                -Secrets @{ ADMINISTRATOR_PASSWORD = $secure } -ScriptBlock {
+                    param($p) $script:CapturedRenderPath = $p; throw 'the build failed'
+                }
+        }
+        catch { $captured = $script:CapturedRenderPath }
+
+        $captured | Should -Not -BeNullOrEmpty
+        Test-Path -LiteralPath $captured | Should -BeFalse
+    }
+}
+
+Describe 'the bundle comes from the manifest the recipe digested' {
+
+    It 'assembles the bundle itself' {
+        # Taking a bundle path and descriptor digest as arguments let provenance
+        # describe one manifest while the guest installed another, and both
+        # documents would have been internally consistent.
+        $script:EntryCode | Should -Match 'New-TransferBundle -ManifestPath \$ManifestPath'
+        $script:EntryCode | Should -Match '-RunId \$runId'
+    }
+
+    It 'accepts no bundle path or descriptor digest from its caller' {
+        $parameters = [regex]::Match($script:EntryCode, '(?s)^param\((?<p>.*?)^\)', 'Multiline')
+        $parameters.Groups['p'].Value | Should -Not -Match 'BundlePath'
+        $parameters.Groups['p'].Value | Should -Not -Match 'DescriptorSha256'
+    }
+
+    It 'refuses to build when the bundle was not assembled' {
+        # Nothing unverified crosses the boundary, so a bundle that did not pass
+        # stops the run rather than being uploaded anyway.
+        $script:EntryCode | Should -Match "if \(\`$bundle\.Outcome -ne 'passed'\)"
+    }
+
+    It 'passes only the digest it derived' {
+        $script:EntryCode | Should -Match 'descriptor_sha256=\$\(\$invocation\.DescriptorHash\)'
+    }
+}
+
+Describe 'a failed build leaves its machine for reconciliation' {
+
+    It 'aborts rather than cleaning up' {
+        # Cleanup deletes the virtual machine, and a failed finalizer
+        # deliberately leaves one powered on. Deleting it destroys the thing the
+        # unconfirmed-artifact record exists to point at.
+        $script:EntryCode | Should -Match "'-on-error=abort'"
+        $script:EntryCode | Should -Not -Match "'-on-error=cleanup'"
     }
 }

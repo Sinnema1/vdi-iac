@@ -40,8 +40,13 @@ $ErrorActionPreference = 'Stop'
 function Write-FinalizationLog {
     <#
         Bounded, and local. Nothing written here carries a credential or a build
-        path: this file survives until Sysprep removes it, and it is the only
-        thing an operator has if the machine never shuts down.
+        path.
+
+        The log lives in the workspace, which the finalizer removes as its
+        second-to-last step. So it is what an operator has while the machine is
+        still running -- which is exactly the case that matters, since a
+        finalizer that refused leaves the machine up -- and it is gone by the
+        time the machine becomes an image.
 
         A logging failure is reported and never fatal. The finalizer's job is
         the teardown, and losing a log line must not stop it half way -- but

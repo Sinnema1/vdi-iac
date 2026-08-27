@@ -18,7 +18,8 @@ BeforeAll {
         )
         if ($null -eq $Log) { $Log = [System.Collections.Generic.List[string]]::new() }
 
-        $state = @{ FailAt = $FailAt; PublishSucceeds = $PublishSucceeds; Log = $Log; Published = $null }
+        $state = @{ FailAt = $FailAt; PublishSucceeds = $PublishSucceeds; Log = $Log
+                    Published = $null; PublishedKey = $null }
 
         # Each step gets its own closure rather than sharing a helper. A helper
         # invoked from inside a closure resolves its own free variables through
@@ -40,6 +41,10 @@ BeforeAll {
             PublishAttestation   = {
                 param($Key, $Json)
                 $state.Log.Add('PublishAttestation')
+                # The key is recorded as well as the value: publishing the right
+                # document under the wrong key is indistinguishable from not
+                # publishing at all, and the sealing phase reads one key.
+                $state.PublishedKey = $Key
                 $state.Published = $Json
                 $state.PublishSucceeds
             }.GetNewClosure()
@@ -179,6 +184,15 @@ Describe 'the attestation is bounded and boring' {
 
     It 'names a transient key, so a clone cannot inherit it' {
         Get-FinalizationAttestationKey | Should -Be 'guestinfo.vdiiac.finalization'
+    }
+
+    It 'publishes under the key the sealing phase reads' {
+        # The right document under the wrong key is indistinguishable from
+        # nothing published at all, and the sealing phase reads exactly one key.
+        $adapter = NewAdapter
+        $null = Finalize -Adapter $adapter -RunId (Get-RunIdentifier) -Nonce (Get-FinalizationNonce)
+
+        $adapter.State.PublishedKey | Should -Be (Get-FinalizationAttestationKey)
     }
 }
 

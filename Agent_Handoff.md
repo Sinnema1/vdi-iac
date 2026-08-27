@@ -1116,11 +1116,32 @@ surface is as small as possible when a target finally exists.
    pass satisfies every check here and then hangs a real setup at a prompt. SIM
    validation is a lab obligation and is outstanding.
 
-   Closes as **configuration validated in CI; execution lab pending**: `packer validate` resolves references a syntax check would not,
+   **Complete at the configuration and CI verification level.** Closes as
+   **configuration validated in CI; execution lab pending**: `packer validate` resolves references a syntax check would not,
    and proves nothing about vSphere connectivity, media reachability, boot
    behavior, or whether the build converts to a template;
-5. pre-generalization checks, generalization, shutdown, and sealing, with
-   evidence at each boundary. **Lab-only**; nothing here is CI-provable.
+5. the sealed-candidate path, in the order the gates have to hold. Everything
+   before generalization is host- or guest-side and testable against fixtures;
+   everything from generalization onward needs a lab.
+
+   1. transfer the verified package bundle and invoke guest provisioning;
+   2. collect installation and validation evidence;
+   3. run the pre-generalization checks;
+   4. remove answer-file residue;
+   5. disable or rotate the build account;
+   6. remove the WinRM listener and its firewall exception -- the listener
+      exists so the build can reach the guest, and an image that ships with one
+      reachable is an image that ships with a way in;
+   7. generalize Windows and observe the shutdown rather than assuming it;
+   8. enable template conversion **only after** every gate above has passed;
+   9. emit provenance bound to the resulting artifact.
+
+   The ordering is the safety property. Removing the listener before evidence is
+   collected loses the evidence; generalizing before the credential is disabled
+   seals it in; converting before any of it produces an immutable artifact
+   carrying all of them.
+
+   **Lab-only from step 7 onward**; nothing there is CI-provable.
 
    Sealing is a positive gate, not the absence of a failure. An artifact may be
    called a sealed candidate only when every one of these is affirmatively

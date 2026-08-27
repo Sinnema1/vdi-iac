@@ -225,3 +225,57 @@ Describe 'the sealing entry point' {
         ([regex]::Matches($script:Entry, '(?m)^exit 0$')).Count | Should -Be 0
     }
 }
+
+Describe 'the run annotation the builder writes and the resolver expects' {
+
+    BeforeAll {
+        $script:BuildConfig = CodeOf -Path (Join-Path $script:RepoRoot 'packer' 'builds' 'windows-image.pkr.hcl')
+        $script:PlatformCode = CodeOf -Path (Join-Path $script:CiScripts 'VSpherePlatform.psm1')
+
+        # The prefix each side uses, read from each side rather than restated
+        # here. A constant written into this test would agree with itself while
+        # the two implementations drifted apart.
+        $script:BuilderNote = ([regex]::Match($script:BuildConfig, 'notes\s*=\s*"(?<v>[^"]+)"')).Groups['v'].Value
+        $script:ResolverPrefix = ([regex]::Match($script:PlatformCode,
+            "RunAnnotationPrefix\s*=\s*'(?<v>[^']+)'")).Groups['v'].Value
+    }
+
+    It 'the builder writes an annotation at all' {
+        # Without this the resolver searches for something nothing ever sets,
+        # and every seal fails to find the machine it just built.
+        $script:BuilderNote | Should -Not -BeNullOrEmpty
+    }
+
+    It 'the resolver declares the prefix it searches for' {
+        $script:ResolverPrefix | Should -Not -BeNullOrEmpty
+    }
+
+    It 'produces exactly the string the resolver requires' {
+        # The end-to-end check: substitute a run identifier into the builder's
+        # template and into the resolver's construction, and require the two to
+        # be the same string. Anything else -- a stray space, a different
+        # separator, a prefix that drifted -- makes the seal unable to find a
+        # machine that exists.
+        $runId = '3f2504e0-4f89-41d3-9a0c-0305e82c3301'
+
+        $written = $script:BuilderNote -replace '\$\{var\.run_id\}', $runId
+        $expected = $script:ResolverPrefix + $runId
+
+        $written | Should -Be $expected
+    }
+
+    It 'compares the annotation exactly rather than by substring' {
+        # A substring match would accept a note that merely mentions the run --
+        # including one naming several runs, or a longer identifier this one is
+        # a prefix of.
+        $script:PlatformCode | Should -Match '\[string\]::Equals\(\$_\.Notes\.Trim\(\), \$expected'
+        $script:PlatformCode | Should -Not -Match '\$_\.Notes\.Contains'
+    }
+
+    It 'carries no value beyond the run identity' {
+        # The note is an identifier, not a description. Anything else in it
+        # would have to survive an exact comparison, and would be published on
+        # the artifact.
+        $script:BuilderNote | Should -Match '^[a-z-]+:\$\{var\.run_id\}$'
+    }
+}

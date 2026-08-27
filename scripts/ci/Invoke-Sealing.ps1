@@ -35,7 +35,8 @@ param(
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $MediaId,
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $StartedUtc,
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $VCenterServer,
-    [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $VCenterUsername
+    [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $VCenterUsername,
+    [Parameter(Mandatory)] [bool] $InsecureConnection
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,13 +86,27 @@ $completedPhases = @(
     'pre-generalization', 'credential-residue', 'generalization', 'shutdown'
 ) | ForEach-Object { [PSCustomObject]@{ name = $_; outcome = 'passed' } }
 
-$adapter = Get-VSpherePlatformAdapter -Server $VCenterServer -Credential $credential -EvidenceRoot $EvidenceRoot
+# The session is opened here and closed in the finally, so a seal that throws
+# part way does not leave an authenticated connection behind. Certificate
+# handling matches what the build itself used: a build that accepted an
+# unverified certificate and a seal that refuses one describe two different
+# trust decisions about the same platform.
+$connection = $null
+try {
+    $connection = Connect-VSpherePlatform -Server $VCenterServer -Credential $credential `
+        -InsecureConnection $InsecureConnection
 
-$result = Invoke-CandidateSealing -RunId $RunId -Nonce $Nonce -CandidateName $CandidateName `
-    -PackerSucceeded $packerSucceeded -CompletedPhases $completedPhases `
-    -RecipeDigest $RecipeDigest -RecipeInputVersion $RecipeInputVersion `
-    -ManifestSchemaVersion $ManifestSchemaVersion -MediaId $MediaId -StartedUtc $StartedUtc `
-    -Adapter $adapter -WhatIf:$WhatIfPreference
+    $adapter = Get-VSpherePlatformAdapter -Connection $connection -EvidenceRoot $EvidenceRoot
+
+    $result = Invoke-CandidateSealing -RunId $RunId -Nonce $Nonce -CandidateName $CandidateName `
+        -PackerSucceeded $packerSucceeded -CompletedPhases $completedPhases `
+        -RecipeDigest $RecipeDigest -RecipeInputVersion $RecipeInputVersion `
+        -ManifestSchemaVersion $ManifestSchemaVersion -MediaId $MediaId -StartedUtc $StartedUtc `
+        -Adapter $adapter -WhatIf:$WhatIfPreference
+}
+finally {
+    Disconnect-VSpherePlatform -Connection $connection
+}
 
 Write-Information "build state       : $($result.BuildState)" -InformationAction Continue
 Write-Information "outcome           : $($result.Outcome)" -InformationAction Continue

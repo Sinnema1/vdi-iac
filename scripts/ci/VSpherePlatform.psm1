@@ -37,6 +37,51 @@ function Test-VSpherePrerequisite {
     [PSCustomObject]@{ Satisfied = $true; ReasonCode = $null; Version = $module.Version.ToString() }
 }
 
+function Connect-VSpherePlatform {
+    <#
+    .SYNOPSIS
+        Establishes the authenticated session every operation runs inside.
+
+    .DESCRIPTION
+        Without this the credential is constructed and never used, and every
+        PowerCLI call runs against whatever ambient session happens to exist --
+        or none. -NotDefault keeps it out of the global default list, so a
+        session opened here cannot be picked up implicitly by something else.
+
+        Certificate handling is an explicit argument rather than a default. It
+        has to agree with the connection setting the build itself used: a build
+        that accepted an unverified certificate and a seal that refuses one
+        describe two different trust decisions about the same platform.
+
+    .OUTPUTS
+        The connection. Callers close it in a finally block.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Server,
+        [Parameter(Mandatory)] [pscredential] $Credential,
+        [Parameter(Mandatory)] [bool] $InsecureConnection
+    )
+
+    $action = if ($InsecureConnection) { 'Ignore' } else { 'Fail' }
+    Set-PowerCLIConfiguration -InvalidCertificateAction $action -Scope Session -Confirm:$false | Out-Null
+
+    Connect-VIServer -Server $Server -Credential $Credential -NotDefault -ErrorAction Stop
+}
+
+function Disconnect-VSpherePlatform {
+    <#
+        Closes the session. Never throws: it runs in a finally block, and an
+        exception here would replace whatever failure is already being reported.
+    #>
+    [CmdletBinding()]
+    param([Parameter()] $Connection)
+
+    if (-not $Connection) { return }
+    try { Disconnect-VIServer -Server $Connection -Confirm:$false -ErrorAction Stop | Out-Null }
+    catch { Write-Warning ('the vCenter session could not be closed: {0}' -f $_.Exception.GetType().Name) }
+}
+
 function Get-VSpherePlatformAdapter {
     <#
     .SYNOPSIS
@@ -60,14 +105,17 @@ function Get-VSpherePlatformAdapter {
     [CmdletBinding()]
     [OutputType([hashtable])]
     param(
-        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Server,
-        [Parameter(Mandatory)] [pscredential] $Credential,
+        [Parameter(Mandatory)] $Connection,
         [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $EvidenceRoot,
         [Parameter()] [string] $RunAnnotationPrefix = 'vdi-iac-run:'
     )
 
+    # Every operation runs against this connection explicitly. Passing a server
+    # name instead would let a call resolve to some other session, and the whole
+    # point of resolving the machine by run identity is that operations act on
+    # one known object.
     $settings = @{
-        Server = $Server; Credential = $Credential
+        Connection = $Connection
         EvidenceRoot = $EvidenceRoot; AnnotationPrefix = $RunAnnotationPrefix
     }
 
@@ -76,48 +124,59 @@ function Get-VSpherePlatformAdapter {
             param($RunId, $Name)
             # Name and run annotation together. The name narrows the search; the
             # annotation is what establishes identity.
-            $candidates = @(Get-VM -Name $Name -Server $settings.Server -ErrorAction SilentlyContinue)
+            $candidates = @(Get-VM -Name $Name -Server $settings.Connection -ErrorAction SilentlyContinue)
+            $expected = $settings.AnnotationPrefix + $RunId
+            # Exact, not contained. A substring match would accept a note that
+            # merely mentions the run -- including one naming several runs, or a
+            # longer identifier this one is a prefix of.
             $matching = @($candidates | Where-Object {
-                $_.Notes -and $_.Notes.Contains($settings.AnnotationPrefix + $RunId)
+                $_.Notes -and [string]::Equals($_.Notes.Trim(), $expected, [System.StringComparison]::Ordinal)
             })
             # Exactly one, or none. Two machines claiming one run is a state
             # nothing here should resolve by picking.
             if ($matching.Count -eq 1) { $matching[0] } else { $null }
         }.GetNewClosure()
 
-        GetPowerState = { param($Machine) [string] $Machine.PowerState }
+        GetPowerState = {
+            param($Machine)
+            # Re-read through the connection rather than trusting the object
+            # this function was handed, which was captured earlier.
+            [string] (Get-VM -Id $Machine.Id -Server $settings.Connection -ErrorAction Stop).PowerState
+        }.GetNewClosure()
 
         ReadGuestInfo = {
             param($Machine, $Key)
-            $entry = Get-AdvancedSetting -Entity $Machine -Name $Key -ErrorAction SilentlyContinue
+            $entry = Get-AdvancedSetting -Entity $Machine -Name $Key -Server $settings.Connection -ErrorAction SilentlyContinue
             if ($entry) { [string] $entry.Value } else { '' }
-        }
+        }.GetNewClosure()
 
         ClearGuestInfo = {
             param($Machine, $Key)
-            $entry = Get-AdvancedSetting -Entity $Machine -Name $Key -ErrorAction SilentlyContinue
+            $entry = Get-AdvancedSetting -Entity $Machine -Name $Key -Server $settings.Connection -ErrorAction SilentlyContinue
             if ($entry) { Remove-AdvancedSetting -AdvancedSetting $entry -Confirm:$false -ErrorAction Stop | Out-Null }
             $true
-        }
+        }.GetNewClosure()
 
         ConvertToTemplate = {
             param($Machine)
-            Set-VM -VM $Machine -ToTemplate -Confirm:$false -ErrorAction Stop | Out-Null
+            Set-VM -VM $Machine -ToTemplate -Confirm:$false -Server $settings.Connection -ErrorAction Stop | Out-Null
             $true
-        }
+        }.GetNewClosure()
 
         GetArtifactIdentity = {
             param($Machine)
-            $view = Get-View -Id $Machine.Id -ErrorAction Stop
+            # Both views scoped to this connection. An instance identifier read
+            # from a different session would name the wrong vCenter, and the
+            # reference is unique only within the instance that issued it.
+            $view = Get-View -Id $Machine.Id -Server $settings.Connection -ErrorAction Stop
+            $service = Get-View ServiceInstance -Server $settings.Connection -ErrorAction Stop
             [PSCustomObject]@{
-                # The instance the reference is scoped to. A managed object
-                # reference means nothing without it.
-                vCenterInstanceId      = (Get-View ServiceInstance -ErrorAction Stop).Content.About.InstanceUuid
+                vCenterInstanceId      = $service.Content.About.InstanceUuid
                 managedObjectReference = $view.MoRef.Value
                 instanceUuid           = $view.Config.InstanceUuid
                 recordedName           = $view.Name
             }
-        }
+        }.GetNewClosure()
 
         WriteHostEvidence = {
             param($Name, $Content)
@@ -148,4 +207,5 @@ function Get-VSpherePlatformAdapter {
     }
 }
 
-Export-ModuleMember -Function Test-VSpherePrerequisite, Get-VSpherePlatformAdapter
+Export-ModuleMember -Function Test-VSpherePrerequisite, Connect-VSpherePlatform,
+    Disconnect-VSpherePlatform, Get-VSpherePlatformAdapter

@@ -271,6 +271,13 @@ source "vsphere-iso" "windows" {
 
   vm_name = var.candidate_name
 
+  # The run annotation the host sealing phase resolves on. It is the identity a
+  # name cannot provide: a name is mutable and reusable, and sealing whatever
+  # answers to it is how one build's artifact acquires another build's
+  # provenance. The resolver compares this exactly, so the value written here
+  # and the value it expects are one string with no surrounding text.
+  notes = "vdi-iac-run:${var.run_id}"
+
   # Parameterised, not hard-coded. It was windows9Server64Guest -- a Windows
   # Server identifier -- while the artifact this repository builds is a desktop
   # image. Which desktop identifier is correct for a given media release needs

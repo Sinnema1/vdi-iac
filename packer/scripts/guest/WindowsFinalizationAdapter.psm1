@@ -155,9 +155,14 @@ function Get-WindowsFinalizationAdapter {
         }.GetNewClosure()
 
         RemoveFirewallRule = {
-            & netsh.exe advfirewall firewall delete rule name="$($settings.FirewallRule)" | Out-Null
-            $remaining = & netsh.exe advfirewall firewall show rule name="$($settings.FirewallRule)" 2>&1
-            ($remaining | Out-String) -match 'No rules match'
+            # Object-based, not netsh text. Matching the English phrase 'No
+            # rules match' reports the rule as removed on any machine that
+            # answers in another language, which is the kind of check that
+            # passes everywhere it was written and fails where it is deployed.
+            Get-NetFirewallRule -DisplayName $settings.FirewallRule -ErrorAction SilentlyContinue |
+                Remove-NetFirewallRule -ErrorAction SilentlyContinue
+
+            $null -eq (Get-NetFirewallRule -DisplayName $settings.FirewallRule -ErrorAction SilentlyContinue)
         }.GetNewClosure()
 
         Verify = {

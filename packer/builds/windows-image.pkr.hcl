@@ -311,9 +311,10 @@ build {
   # STAGE 4 IS SOURCE AND BUILD CONFIGURATION ONLY.
   #
   # This build constructs a VM from qualified media and an unattended answer
-  # file, and stops there. It deliberately contains no provisioners, because
-  # everything that would follow belongs to later stages and none of it is
-  # implemented:
+  # file, and stops there. It deliberately contains no content-changing
+  # provisioners: the one provisioner below writes a line and changes nothing,
+  # which confirms the communicator can reach the guest. Everything that would
+  # follow belongs to later stages and none of it is implemented:
   #
   #   - guest provisioning: the Increment 2 transfer bundle, its verification,
   #     installation, and evidence, are not wired in here yet. An earlier draft

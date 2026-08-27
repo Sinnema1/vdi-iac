@@ -56,6 +56,8 @@ BeforeAll {
             winrm_bootstrap_path        = '"' + (($work + '/bootstrap.ps1') -replace '\\', '/') + '"'
             bundle_path                 = '"' + (($work + '/bundle') -replace '\\', '/') + '"'
             media_qualification_record_path = '"' + (($work + '/qualification.json') -replace '\\', '/') + '"'
+            vmware_tools_version        = '"12.5.0"'
+            finalization_nonce          = '"' + ('0123456789abcdef' * 2) + '"'
             descriptor_sha256           = '"' + ('a' * 64) + '"'
             tools_source_dir            = '"' + ((Join-Path $script:RepoRoot 'source-qualification' 'scripts') -replace '\\', '/') + '"'
             guest_scripts_dir           = '"' + ((Join-Path $script:RepoRoot 'packer' 'scripts' 'guest') -replace '\\', '/') + '"'
@@ -278,18 +280,36 @@ Describe 'the build seals what it constructed' {
             Should -Be 2
     }
 
-    It 'stops before the terminal finalizer, loudly' {
-        # A build reaching this would otherwise wait at disable_shutdown for a
-        # shutdown nothing performs, and fail an hour later with a timeout that
-        # explains nothing.
-        $script:Configuration | Should -Match 'Stage 5 stops after residue removal'
+    It 'checks VMware Tools before launching the finalizer' {
+        # A finalizer discovering this would refuse to shut down, correctly, but
+        # only after disabling the account and removing the listener.
+        $tools = $script:Configuration.IndexOf('Test-VMwareToolsPrerequisite')
+        $launch = $script:Configuration.IndexOf('Start-DetachedFinalizer.ps1')
+        $tools | Should -BeGreaterThan 0
+        $tools | Should -BeLessThan $launch
     }
 
-    It 'schedules nothing after the finalizer, because there is no finalizer' {
-        # When one is added, nothing may follow it: it removes the listener
-        # Packer reached the guest through.
-        $script:Configuration | Should -Not -Match 'Invoke-GuestFinalization'
+    It 'launches the finalizer detached, as the last WinRM operation' {
+        # Everything after this happens in a session that survives the removal
+        # of the listener the command arrived on.
+        $script:Configuration | Should -Match 'Start-DetachedFinalizer\.ps1'
+    }
+
+    It 'schedules nothing after the finalizer launch' {
+        # The finalizer removes the listener, so a later provisioner has nothing
+        # to connect to. This is the invariant the whole design rests on.
+        $launch = $script:Configuration.IndexOf('Start-DetachedFinalizer.ps1')
+        $remainder = $script:Configuration.Substring($launch)
+
+        $remainder | Should -Not -Match 'provisioner "file"'
+        ([regex]::Matches($remainder, 'provisioner "')).Count | Should -Be 0
+    }
+
+    It 'seals nowhere inside the build' {
+        # Conversion is static configuration and cannot be a gate, so it happens
+        # on the host after Packer exits.
         $script:Configuration | Should -Not -Match 'Invoke-CandidateSealing'
+        $script:Configuration | Should -Match 'convert_to_template\s*=\s*false'
     }
 
     It 'configures nothing beyond the steps it implements' {
@@ -532,6 +552,8 @@ Describe 'the handoff from verified media to the build' {
             winrm_bootstrap_path = (Join-Path $qualified.Root 'bootstrap.ps1')
             bundle_path = $bundleDir
             media_qualification_record_path = (Join-Path $qualified.Root 'qualification.json')
+            vmware_tools_version = '12.5.0'
+            finalization_nonce = ('0123456789abcdef' * 2)
             descriptor_sha256 = ('a' * 64)
             tools_source_dir = (Join-Path $script:RepoRoot 'source-qualification' 'scripts')
             guest_scripts_dir = (Join-Path $script:RepoRoot 'packer' 'scripts' 'guest')

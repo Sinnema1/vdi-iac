@@ -44,7 +44,7 @@ What exists today:
 | Packer lab harness (null builder) | implemented; lab validation pending |
 | Lab scenarios (positive, payload tamper, descriptor tamper) | runnable against a target; never executed |
 | Image identity and provenance contract | Increment 3 stage 3 complete, CI-proven |
-| Terminal finalization and sealing | decided ([ADR 8](docs/decisions/0008-terminal-finalization-and-sealing.md)); orchestration CI-proven against test doubles, production adapters absent |
+| Terminal finalization and sealing | orchestration CI-proven; production adapters written and wired but never executed ([ADR 8](docs/decisions/0008-terminal-finalization-and-sealing.md)) |
 | Packer image construction and sealing | Increment 3 stage 4 complete, CI-verified configuration; never executed |
 | Terraform and Citrix MCS provisioning | not started |
 | Promotion, reconciliation, and retirement | not started |

@@ -1126,12 +1126,19 @@ surface is as small as possible when a target finally exists.
    | 2. collect install and validation evidence, and gate on it | implemented, wired, CI-proven; real build pending |
    | 3. pre-generalization checks | implemented, wired, CI-proven; real build pending |
    | 4. answer-file and credential residue removal | implemented, wired, CI-proven; real build pending |
-   | 5-7. the terminal transition | orchestration CI-proven against injected adapters; **production guest adapter and detached-task launcher absent** |
-   | 8. conversion | host coordinator logic implemented; **production platform adapter absent**. Moved out of the build entirely, per ADR 8 |
-   | 9. provenance bound to the artifact | complete only when the validated document is durably emitted, which the coordinator does; unexercised against a real artifact |
+   | 5-7. the terminal transition | orchestration CI-proven; production guest adapter and detached launcher written and wired; **never executed** |
+   | 8. conversion | host coordinator and vSphere adapter written; **never executed** |
+   | 9. provenance bound to the artifact | emitted, validated, and confirmed by retrieval; **never produced by a real build** |
 
-   No vSphere behaviour is proven. Nothing in steps 5 to 9 has run against a
-   platform, and the adapters those steps are written against are test doubles.
+   The production seams now exist: the Windows finalization adapter, the
+   detached SYSTEM launcher, the VMware Tools prerequisite and GuestInfo
+   publisher, the vSphere platform adapter, and the sealing entry point. They
+   are written and their shape is asserted; **none of them has run**. Parsing
+   and contract tests establish that they are code with the right seams, not
+   that any of it works.
+
+   **No vSphere or VMware Tools capability is proven.** The disposable-target
+   run is what would establish it, and it has not happened.
 
    Steps 5 to 7 are one terminal transition: disable the build account, remove
    the WinRM listener and its firewall exception -- the listener exists so the

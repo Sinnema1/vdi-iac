@@ -298,6 +298,8 @@ jobs:
           winrm_bootstrap_path        = "$((Join-Path $work 'bootstrap.ps1') -replace '\\', '/')"
           bundle_path                 = "$((Join-Path $work 'bundle') -replace '\\', '/')"
           media_qualification_record_path = "$((Join-Path $work 'qualification.json') -replace '\\', '/')"
+          vmware_tools_version        = "12.5.0"
+          finalization_nonce          = "0123456789abcdef0123456789abcdef"
           descriptor_sha256           = "$('a' * 64)"
           tools_source_dir            = "$((Join-Path $PWD 'source-qualification' 'scripts') -replace '\\', '/')"
           guest_scripts_dir           = "$((Join-Path $PWD 'packer' 'scripts' 'guest') -replace '\\', '/')"

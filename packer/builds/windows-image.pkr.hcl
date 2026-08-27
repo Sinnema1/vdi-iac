@@ -122,6 +122,11 @@ variable "winrm_bootstrap_path" {
   description = "The script the answer file's first-logon command runs to create the WinRM listener. Carries no credential."
 }
 
+variable "vmware_tools_version" {
+  type        = string
+  description = "The VMware Tools version the recipe names. Checked against the installed product before the finalizer launches, because the attestation channel is Tools' RPC interface and the version is a recipe input."
+}
+
 variable "media_qualification_record_path" {
   type        = string
   description = "The qualification record, uploaded so the pre-generalization checks can reconcile the installed Windows against the declared media intent. Qualification never opened the media, so this is where that intent is finally checked."
@@ -234,6 +239,16 @@ variable "guest_os_type" {
 variable "build_username" {
   type        = string
   description = "Account the answer file configures, supplied by ConvertTo-BuildVariableSet from the answer-file declaration so the two cannot disagree. Disabled or rotated before sealing, which is stage 5 work."
+}
+
+variable "finalization_nonce" {
+  type        = string
+  description = "Host-generated, per run. The host clears the attestation key before this launches, so a value carrying this nonce is one this run wrote. Not a credential: it is published in the attestation."
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{32}$", var.finalization_nonce))
+    error_message = "The finalization_nonce must be 32 lowercase hexadecimal characters."
+  }
 }
 
 variable "build_password" {
@@ -569,28 +584,48 @@ build {
     destination = "${var.evidence_output_dir}/credential-residue-${local.evidence_name}"
   }
 
-  # 11. The build stops here, deliberately and loudly.
+  # 11. VMware Tools, checked before anything depends on it. The attestation
+  #     channel is its RPC interface, and a fresh installation carries none of
+  #     it.
   #
-  #     What would come next is the VMware Tools prerequisite check and then the
-  #     detached finalizer. Neither has a production adapter, so a build that
-  #     ran to this point would otherwise wait at disable_shutdown for a
-  #     shutdown nothing is going to perform, and fail an hour later with a
-  #     timeout that explains nothing.
-  #
-  #     This is not a placeholder to delete when convenient: it is removed by
-  #     the commit that adds the finalizer, and not before.
+  #     Checked here rather than inside the finalizer: a finalizer discovering
+  #     this would have to refuse to shut down, correctly, but only after
+  #     disabling the account and removing the listener -- leaving a machine
+  #     nobody can reach and nothing can finish.
   provisioner "powershell" {
     use_pwsh = true
     inline = [
       "$ErrorActionPreference = 'Stop'",
-      "throw 'Stage 5 stops after residue removal. The VMware Tools check and the terminal finalizer have no production adapter, and sealing happens on the host after Packer exits.'"
+      "Import-Module '${local.tools_target}/Finalization.psm1' -Force",
+      "Import-Module '${local.guest_target}/WindowsFinalizationAdapter.psm1' -Force",
+      "$decision = Test-VMwareToolsPrerequisite -ExpectedVersion '${var.vmware_tools_version}' -Adapter (Get-WindowsToolsAdapter)",
+      "if (-not $decision.Satisfied) { throw \"VMware Tools prerequisite refused: $($decision.ReasonCode).\" }",
+      "Write-Host 'gate: VMware Tools present, running, and the expected version'"
     ]
   }
 
-  # STOP. Nothing beyond this point exists.
+  # 12. THE LAST OPERATION OVER WINRM.
   #
-  # The next provisioner would launch the detached SYSTEM finalizer, and after
-  # that nothing may be scheduled that requires WinRM: the finalizer removes the
-  # listener Packer reached the guest through. Sealing happens on the host after
-  # Packer exits, not here.
+  #     Hands the terminal transition to a scheduled task running as SYSTEM and
+  #     returns. Everything after this point happens in a session that survives
+  #     the removal of the listener this command arrived on.
+  #
+  #     NOTHING MAY BE SCHEDULED AFTER THIS PROVISIONER. The finalizer removes
+  #     the WinRM listener, so a later one has nothing to connect to -- a design
+  #     error, not a timeout to tune.
+  #
+  #     The build then waits at disable_shutdown for the guest to power itself
+  #     off. A finalizer that refused leaves the machine running, and the build
+  #     fails on that timeout, which is the intended signal.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "& '${local.guest_target}/Start-DetachedFinalizer.ps1' -RunId '${var.run_id}' -Nonce '${var.finalization_nonce}' -BuildUsername '${var.build_username}' -ToolsPath '${local.tools_target}' -GuestScriptsPath '${local.guest_target}'",
+      "Write-Host 'finalizer launched; this build expects no further guest connection'"
+    ]
+  }
+
+  # STOP. Sealing happens on the host after Packer exits, not here: conversion
+  # is static configuration and cannot be conditional, so it cannot be a gate.
 }

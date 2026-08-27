@@ -44,8 +44,79 @@ $script:AttestationKey = 'guestinfo.vdiiac.finalization'
 # nobody can reason about at the point it is read.
 $script:MaximumAttestationBytes = 4096
 
+# The steps a passed finalization performed, in the order it performed them.
+# Exactly this sequence: a missing step means something was not done, a
+# duplicate means the record was assembled rather than observed, and a reordered
+# one means the safety property the order carries did not hold. An additional
+# step is a finalizer this gate was not written for.
+$script:RequiredSteps = @(
+    'residue-confirmed'
+    'account-disabled'
+    'listener-removed'
+    'firewall-rule-removed'
+    'verified'
+)
+
 function Get-FinalizationAttestationKey { $script:AttestationKey }
 function Get-MaximumAttestationSize { $script:MaximumAttestationBytes }
+
+function Test-VMwareToolsPrerequisite {
+    <#
+    .SYNOPSIS
+        Confirms VMware Tools is present, running, and the expected version.
+
+    .DESCRIPTION
+        The attestation channel is Tools' guest RPC interface, so Tools is a
+        prerequisite rather than incidental software that happens to be there. A
+        fresh Windows installation carries none of it.
+
+        Checked before the finalizer launches, not inside it. A finalizer that
+        discovered the problem would have to refuse to shut down -- correct, but
+        it would have already disabled the account and removed the listener,
+        leaving a machine nobody can reach and nothing can finish.
+
+        The version is compared because it is a recipe input: a different Tools
+        version is a different image, with a different way of reporting on
+        itself.
+
+    .PARAMETER Adapter
+        GetToolsVersion and GetToolsRunning, injected. The production
+        implementation uses the supported Windows command path; nothing here
+        depends on which, and no vendor binary is committed.
+
+    .OUTPUTS
+        Satisfied, plus a bounded reason when it is not.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ExpectedVersion,
+        [Parameter(Mandatory)] [hashtable] $Adapter
+    )
+
+    function Unsatisfied([string] $Code) { [PSCustomObject]@{ Satisfied = $false; ReasonCode = $Code; Observed = $null } }
+
+    $observed = $null
+    try { $observed = & $Adapter['GetToolsVersion'] }
+    catch { return Unsatisfied 'tools_not_installed' }
+
+    if ([string]::IsNullOrWhiteSpace([string]$observed)) { return Unsatisfied 'tools_not_installed' }
+
+    $running = $false
+    try { $running = [bool](& $Adapter['GetToolsRunning']) }
+    catch { $running = $false }
+    if (-not $running) {
+        return [PSCustomObject]@{ Satisfied = $false; ReasonCode = 'tools_not_running'; Observed = [string]$observed }
+    }
+
+    if (-not [string]::Equals([string]$observed, $ExpectedVersion, [System.StringComparison]::Ordinal)) {
+        # Exact. A version is a recipe input, so "close enough" would mean the
+        # digest names a Tools build that is not the one installed.
+        return [PSCustomObject]@{ Satisfied = $false; ReasonCode = 'tools_version_mismatch'; Observed = [string]$observed }
+    }
+
+    [PSCustomObject]@{ Satisfied = $true; ReasonCode = $null; Observed = [string]$observed }
+}
 
 function Invoke-GuestFinalization {
     <#
@@ -133,7 +204,14 @@ function Invoke-GuestFinalization {
 
     $sysprepInvoked = $false
     if (-not $reason) {
-        & $Adapter['InvokeSysprep']
+        # The adapter confirms or throws. An implementation that returned
+        # nothing -- or false -- while doing nothing would otherwise be recorded
+        # as a shutdown that happened, which is the one thing this result must
+        # never claim falsely.
+        $confirmed = & $Adapter['InvokeSysprep']
+        if (-not $confirmed) {
+            throw 'The Sysprep adapter did not confirm it ran. Refusing to report a shutdown that may not have happened.'
+        }
         $sysprepInvoked = $true
     }
 
@@ -181,7 +259,24 @@ function Test-FinalizationAttestation {
     if (-not [string]::Equals($attestation.nonce, $Nonce, [System.StringComparison]::Ordinal)) {
         return 'attestation_nonce_mismatch'
     }
+    # Semantic consistency the schema cannot express: outcome and reason code
+    # have to agree with each other and with the steps.
+    $reason = if ($attestation.PSObject.Properties.Name -contains 'reasonCode') { $attestation.reasonCode } else { $null }
+
+    if ($attestation.outcome -eq 'passed' -and $reason) { return 'attestation_inconsistent' }
+    if ($attestation.outcome -eq 'failed' -and -not $reason) { return 'attestation_inconsistent' }
+
     if ($attestation.outcome -ne 'passed') { return 'finalization_failed' }
+
+    # Exactly the required sequence. Comparing sets or counting passes would
+    # accept a record with a step missing, one listed twice, or the teardown
+    # performed in an order whose safety property does not hold.
+    $observed = @($attestation.steps | ForEach-Object { $_.name })
+    if ($observed.Count -ne $script:RequiredSteps.Count) { return 'finalization_step_sequence_wrong' }
+    for ($i = 0; $i -lt $script:RequiredSteps.Count; $i++) {
+        if ($observed[$i] -ne $script:RequiredSteps[$i]) { return 'finalization_step_sequence_wrong' }
+    }
+
     if (@($attestation.steps | Where-Object { $_.outcome -ne 'passed' }).Count -gt 0) {
         return 'finalization_step_did_not_pass'
     }
@@ -198,8 +293,15 @@ function Get-FinalizationNonce {
     [CmdletBinding()]
     [OutputType([string])]
     param()
-    -join ((1..32) | ForEach-Object { '{0:x}' -f (Get-Random -Minimum 0 -Maximum 16) })
+
+    # Cryptographic, not Get-Random. The nonce is what distinguishes an
+    # attestation this run wrote from one left behind on a reused machine, so a
+    # predictable value would let a stale document be accepted by a later build
+    # that happened to draw the same sequence.
+    $bytes = [byte[]]::new(16)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    ([System.BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
 }
 
-Export-ModuleMember -Function Invoke-GuestFinalization, Test-FinalizationAttestation,
+Export-ModuleMember -Function Test-VMwareToolsPrerequisite, Invoke-GuestFinalization, Test-FinalizationAttestation,
     Get-FinalizationNonce, Get-FinalizationAttestationKey, Get-MaximumAttestationSize

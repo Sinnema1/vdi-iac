@@ -41,10 +41,10 @@ $script:SchemaFileByVersion = @{
 # is only comparable within one version, so a record declaring a version nobody
 # here implements describes an identity this code cannot reason about -- and
 # must not promote.
-# Version 1 was never emitted by a real build, and the canonicalizer now emits
-# version 2. Accepting 1 would admit a digest computed without the processor,
-# memory, and guest OS inputs the builder actually uses.
-$script:SupportedRecipeInputVersions = @(2)
+# No earlier version was ever emitted by a real build, and the canonicalizer now
+# emits version 3. Accepting an earlier one would admit a digest computed
+# without inputs the builder and the evidence path actually depend on.
+$script:SupportedRecipeInputVersions = @(3)
 
 # The manifest contract versions an image build can actually have consumed. The
 # recipe path reads installer kind, timeout, restart policy, exit codes, and

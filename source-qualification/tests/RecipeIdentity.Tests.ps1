@@ -65,7 +65,8 @@ BeforeAll {
                 DiskControllerType = 'pvscsi'; DiskSizeGb = 80; VirtualTpm = $true
                 Cpus = 4; MemoryMb = 8192; GuestOsType = 'windows11_64Guest'
             }
-            Tooling = @{ PackerVersion = '1.15.4'; PluginVersions = @{ vsphere = '1.4.2' } }
+            Tooling = @{ PackerVersion = '1.15.4'; PluginVersions = @{ vsphere = '1.4.2' }
+                         VMwareToolsVersion = '12.5.0' }
         }
     }
 
@@ -109,7 +110,7 @@ Describe 'recipe digest stability' {
         # version has to travel with it rather than be implied.
         $inputs = NewInputs
         $result = Get-RecipeDigest -RecipeInput (ConvertTo-RecipeInput @inputs)
-        $result.RecipeInputVersion | Should -Be 2
+        $result.RecipeInputVersion | Should -Be 3
         $result.RecipeDigest | Should -Match '^[0-9a-f]{64}$'
     }
 }
@@ -180,6 +181,7 @@ Describe 'every included input changes the digest' {
         @{ field = 'guest OS type';     apply = { param($i) $i.Hardware.GuestOsType = 'windows9_64Guest' } }
         @{ field = 'packer version';    apply = { param($i) $i.Tooling.PackerVersion = '1.16.0' } }
         @{ field = 'plugin version';    apply = { param($i) $i.Tooling.PluginVersions['vsphere'] = '1.5.0' } }
+        @{ field = 'VMware Tools';      apply = { param($i) $i.Tooling.VMwareToolsVersion = '13.0.0' } }
     ) {
         # One case per input. A digest that ignores an input it claims to cover
         # is the failure this mechanism is most exposed to, and it is invisible
@@ -245,6 +247,7 @@ Describe 'a recipe cannot be partly specified' {
         @{ section = 'hardware';    table = 'Hardware';   key = 'Cpus' }
         @{ section = 'hardware';    table = 'Hardware';   key = 'GuestOsType' }
         @{ section = 'tooling';     table = 'Tooling';    key = 'PackerVersion' }
+        @{ section = 'tooling';     table = 'Tooling';    key = 'VMwareToolsVersion' }
     ) {
         # An absent input would otherwise digest as though it did not exist,
         # which is exactly the silent collision this guards against.

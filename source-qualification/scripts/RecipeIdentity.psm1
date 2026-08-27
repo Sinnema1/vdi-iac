@@ -35,11 +35,16 @@ Import-Module (Join-Path $PSScriptRoot 'JsonSafety.psm1')
 # only comparable within one, which is why the version travels beside the digest
 # rather than being implied.
 #
+# Version 3 adds the VMware Tools version. The finalization attestation is
+# published through its guest RPC interface, so Tools is not incidental software
+# that happens to be present -- the evidence path depends on it, and a different
+# version is a different image with a different way of reporting on itself.
+#
 # Version 2 adds cpus, memoryMb, and guestOsType. They were build inputs the
 # builder consumed while the digest ignored them, so two builds differing in
 # processor count, memory, or the guest OS identifier vSphere presents to setup
 # shared an identity. Version 1 was never emitted by a real build.
-$script:RecipeInputVersion = 2
+$script:RecipeInputVersion = 3
 
 function ConvertTo-RecipeInput {
     <#
@@ -308,11 +313,13 @@ function NewHardwareInput {
 function NewToolingInput {
     param([hashtable] $Tooling)
 
-    RequireKeys -Table $Tooling -Subject 'tooling' -Keys @('PackerVersion', 'PluginVersions')
+    RequireKeys -Table $Tooling -Subject 'tooling' `
+        -Keys @('PackerVersion', 'PluginVersions', 'VMwareToolsVersion')
 
     [ordered]@{
-        packerVersion = $Tooling.PackerVersion
-        plugins       = @(foreach ($name in (OrdinalKeys -Table $Tooling.PluginVersions)) {
+        packerVersion      = $Tooling.PackerVersion
+        vmwareToolsVersion = $Tooling.VMwareToolsVersion
+        plugins            = @(foreach ($name in (OrdinalKeys -Table $Tooling.PluginVersions)) {
             [ordered]@{ name = $name; version = $Tooling.PluginVersions[$name] }
         })
     }

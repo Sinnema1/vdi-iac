@@ -14,12 +14,13 @@ BeforeAll {
         param(
             [string] $FailAt,
             [bool] $PublishSucceeds = $true,
+            [bool] $SysprepConfirms = $true,
             [System.Collections.Generic.List[string]] $Log = $null
         )
         if ($null -eq $Log) { $Log = [System.Collections.Generic.List[string]]::new() }
 
         $state = @{ FailAt = $FailAt; PublishSucceeds = $PublishSucceeds; Log = $Log
-                    Published = $null; PublishedKey = $null }
+                    Published = $null; PublishedKey = $null; SysprepConfirms = $SysprepConfirms }
 
         # Each step gets its own closure rather than sharing a helper. A helper
         # invoked from inside a closure resolves its own free variables through
@@ -48,7 +49,7 @@ BeforeAll {
                 $state.Published = $Json
                 $state.PublishSucceeds
             }.GetNewClosure()
-            InvokeSysprep        = { $state.Log.Add('InvokeSysprep') }.GetNewClosure()
+            InvokeSysprep        = { $state.Log.Add('InvokeSysprep'); $state.SysprepConfirms }.GetNewClosure()
         }
     }
 
@@ -263,5 +264,177 @@ Describe 'reading the attestation from outside the guest' {
 
         Test-FinalizationAttestation -Json ($document | ConvertTo-Json -Depth 8 -Compress) `
             -RunId $runId -Nonce $nonce | Should -Be 'finalization_step_did_not_pass'
+    }
+}
+
+Describe 'the step sequence is exact' {
+
+    BeforeAll {
+        function PassedAttestation {
+            param([string] $RunId, [string] $Nonce)
+            $adapter = NewAdapter
+            $null = Finalize -Adapter $adapter -RunId $RunId -Nonce $Nonce
+            $adapter.State.Published | ConvertFrom-Json
+        }
+
+        function Judge {
+            param($Document, [string] $RunId, [string] $Nonce)
+            Test-FinalizationAttestation -Json ($Document | ConvertTo-Json -Depth 8 -Compress) `
+                -RunId $RunId -Nonce $Nonce
+        }
+    }
+
+    It 'accepts exactly the required sequence' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        Judge -Document (PassedAttestation -RunId $runId -Nonce $nonce) -RunId $runId -Nonce $nonce |
+            Should -BeNullOrEmpty
+    }
+
+    It 'refuses a sequence with <case>' -ForEach @(
+        @{ case = 'a step missing';    action = 'remove' }
+        @{ case = 'a step duplicated'; action = 'duplicate' }
+        @{ case = 'steps reordered';   action = 'reorder' }
+        @{ case = 'an extra step';     action = 'extra' }
+    ) {
+        # Counting passes or comparing sets accepts every one of these. A
+        # missing step means something was not done; a duplicate means the
+        # record was assembled rather than observed; a reordering means the
+        # safety property the order carries did not hold.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $document = PassedAttestation -RunId $runId -Nonce $nonce
+        $steps = @($document.steps)
+
+        $document.steps = switch ($action) {
+            'remove'    { @($steps[0], $steps[1], $steps[3], $steps[4]) }
+            'duplicate' { @($steps[0], $steps[1], $steps[1], $steps[2], $steps[3], $steps[4]) }
+            'reorder'   { @($steps[0], $steps[2], $steps[1], $steps[3], $steps[4]) }
+            'extra'     { @($steps) + @([PSCustomObject]@{ name = 'verified'; outcome = 'passed' }) }
+        }
+
+        Judge -Document $document -RunId $runId -Nonce $nonce | Should -Be 'finalization_step_sequence_wrong'
+    }
+
+    It 'refuses a passed outcome carrying a reason code' {
+        # The summary contradicts itself, and the reason is the more specific of
+        # the two claims.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $document = PassedAttestation -RunId $runId -Nonce $nonce
+        $document.reasonCode = 'verification_failed'
+
+        Judge -Document $document -RunId $runId -Nonce $nonce | Should -Be 'attestation_inconsistent'
+    }
+
+    It 'refuses a failed outcome carrying no reason code' {
+        # A failure that will not say why is not a bounded result.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $document = PassedAttestation -RunId $runId -Nonce $nonce
+        $document.outcome = 'failed'
+        $document.reasonCode = $null
+
+        Judge -Document $document -RunId $runId -Nonce $nonce | Should -Be 'attestation_inconsistent'
+    }
+}
+
+Describe 'the Sysprep adapter must confirm' {
+
+    It 'refuses to report a shutdown the adapter did not confirm' {
+        # An adapter returning nothing while doing nothing would otherwise be
+        # recorded as a shutdown that happened, which is the one claim this
+        # result must never make falsely.
+        $adapter = NewAdapter -SysprepConfirms $false
+
+        { Finalize -Adapter $adapter -RunId (Get-RunIdentifier) -Nonce (Get-FinalizationNonce) } |
+            Should -Throw -ExpectedMessage '*did not confirm it ran*'
+    }
+
+    It 'reports a shutdown only when the adapter confirmed one' {
+        $adapter = NewAdapter
+        (Finalize -Adapter $adapter -RunId (Get-RunIdentifier) -Nonce (Get-FinalizationNonce)).SysprepInvoked |
+            Should -BeTrue
+    }
+}
+
+Describe 'the finalization nonce' {
+
+    It 'is 32 lowercase hexadecimal characters' {
+        Get-FinalizationNonce | Should -Match '^[0-9a-f]{32}$'
+    }
+
+    It 'does not repeat across draws' {
+        # A predictable nonce lets a stale attestation be accepted by a later
+        # build that happened to draw the same value.
+        $draws = 1..64 | ForEach-Object { Get-FinalizationNonce }
+        ($draws | Sort-Object -Unique).Count | Should -Be 64
+    }
+
+    It 'comes from a cryptographic generator' {
+        # Read with comments stripped. The module explains why Get-Random is not
+        # used, and a naive search finds that explanation and reports the
+        # opposite of the truth.
+        $module = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'source-qualification' 'scripts' 'Finalization.psm1')
+        $code = ($module | Where-Object { $_.TrimStart() -notlike '#*' }) -join "`n"
+
+        $code | Should -Match 'RandomNumberGenerator'
+        $code | Should -Not -Match 'Get-Random'
+    }
+}
+
+Describe 'VMware Tools is a prerequisite, not an assumption' {
+
+    BeforeAll {
+        function NewToolsAdapter {
+            param([string] $Version = '12.5.0', [bool] $Running = $true, [switch] $Throws)
+            $state = @{ Version = $Version; Running = $Running; Throws = [bool] $Throws }
+            @{
+                GetToolsVersion = {
+                    if ($state.Throws) { throw 'the RPC tool was not found' } else { $state.Version }
+                }.GetNewClosure()
+                GetToolsRunning = { $state.Running }.GetNewClosure()
+            }
+        }
+    }
+
+    It 'is satisfied by the expected version, running' {
+        $result = Test-VMwareToolsPrerequisite -ExpectedVersion '12.5.0' -Adapter (NewToolsAdapter)
+        $result.Satisfied | Should -BeTrue
+        $result.Observed | Should -Be '12.5.0'
+    }
+
+    It 'refuses a machine with no Tools at all' {
+        # A fresh Windows installation carries none of it, and the attestation
+        # channel is its RPC interface.
+        (Test-VMwareToolsPrerequisite -ExpectedVersion '12.5.0' -Adapter (NewToolsAdapter -Throws)).ReasonCode |
+            Should -Be 'tools_not_installed'
+    }
+
+    It 'refuses an empty version' {
+        (Test-VMwareToolsPrerequisite -ExpectedVersion '12.5.0' -Adapter (NewToolsAdapter -Version '')).ReasonCode |
+            Should -Be 'tools_not_installed'
+    }
+
+    It 'refuses Tools that is installed but not running' {
+        (Test-VMwareToolsPrerequisite -ExpectedVersion '12.5.0' -Adapter (NewToolsAdapter -Running $false)).ReasonCode |
+            Should -Be 'tools_not_running'
+    }
+
+    It 'refuses a version other than the one the recipe names' {
+        # The version is a recipe input, so "close enough" would mean the digest
+        # names a Tools build that is not the one installed.
+        $result = Test-VMwareToolsPrerequisite -ExpectedVersion '12.5.0' -Adapter (NewToolsAdapter -Version '12.4.9')
+        $result.ReasonCode | Should -Be 'tools_version_mismatch'
+        $result.Observed | Should -Be '12.4.9'
+    }
+
+    It 'compares exactly, not by prefix' {
+        (Test-VMwareToolsPrerequisite -ExpectedVersion '12.5.0' -Adapter (NewToolsAdapter -Version '12.5.01')).Satisfied |
+            Should -BeFalse
+    }
+
+    It 'commits no vendor binary to reach the tool' {
+        # The production adapter invokes the supported Windows command path by
+        # name from wherever Tools installs it.
+        Get-ChildItem -Path $script:RepoRoot -Recurse -File -Include '*.exe', '*.dll', '*.msi' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' } |
+            Should -BeNullOrEmpty
     }
 }

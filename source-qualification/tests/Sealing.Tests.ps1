@@ -19,6 +19,9 @@ BeforeAll {
             DisableAccount       = { $true }
             RemoveListener       = { $true }
             RemoveFirewallRule   = { $true }
+            RemoveCertificate    = { $true }
+            UnregisterTask       = { $true }
+            RemoveWorkspace      = { $true }
             Verify               = { $true }
             PublishAttestation   = { param($Key, $Json) $captured.Key = $Key; $captured.Json = $Json; $true }.GetNewClosure()
             InvokeSysprep        = { $true }

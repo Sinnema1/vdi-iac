@@ -313,6 +313,12 @@ source "vsphere-iso" "windows" {
   cd_files = [var.answer_file_path, var.winrm_bootstrap_path]
   cd_label = "OEMDRV"
 
+  # The answer file and its bootstrap travel on removable media, and that media
+  # holds a rendered credential. Detached before the artifact is accepted, so
+  # neither the installation media nor the OEMDRV volume remains attached to a
+  # machine that is about to become an image.
+  remove_cdrom = true
+
   # WinRM rather than SSH: the guest is Windows, and provisioning runs
   # PowerShell. The listener is created by the answer file's first-logon
   # command; a fresh installation has none, and without it the build completes
@@ -628,7 +634,7 @@ build {
     use_pwsh = true
     inline = [
       "$ErrorActionPreference = 'Stop'",
-      "& '${local.guest_target}/Start-DetachedFinalizer.ps1' -RunId '${var.run_id}' -Nonce '${var.finalization_nonce}' -BuildUsername '${var.build_username}' -ToolsPath '${local.tools_target}' -GuestScriptsPath '${local.guest_target}'",
+      "& '${local.guest_target}/Start-DetachedFinalizer.ps1' -RunId '${var.run_id}' -Nonce '${var.finalization_nonce}' -BuildUsername '${var.build_username}' -ToolsPath '${local.tools_target}' -GuestScriptsPath '${local.guest_target}' -WorkspaceRoot '${local.guest_root}'",
       "Write-Host 'finalizer launched; this build expects no further guest connection'"
     ]
   }

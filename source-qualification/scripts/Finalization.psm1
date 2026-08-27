@@ -27,13 +27,21 @@
     Every platform interaction goes through an injected adapter, so the ordering
     and the refusals are exercised on any machine, with no VMware Tools, no
     WinRM, and no Sysprep present.
+
+    What counts as torn down is the whole of the build's access, not just the
+    parts that are obviously credentials. Sysprep removes none of it: the
+    finalizer's own scheduled task, the build workspace holding scripts,
+    contracts, evidence, and its log, and the WinRM certificate with its private
+    key would all survive into the image. A generalized image carrying the
+    private key of a listener it used to run is an image that ships with the
+    means to impersonate one.
 #>
 
 Set-StrictMode -Version 3.0
 
 Import-Module (Join-Path $PSScriptRoot 'RunIdentity.psm1')
 
-$script:AttestationSchema = Join-Path $PSScriptRoot '..' '..' 'contracts' 'finalization-attestation-1.schema.json'
+$script:AttestationSchema = Join-Path $PSScriptRoot '..' '..' 'contracts' 'finalization-attestation-2.schema.json'
 
 # The guest RPC key. Transient by design: the host clears it before launching the
 # finalizer and again after reading it, so a value found here is one this run
@@ -54,6 +62,9 @@ $script:RequiredSteps = @(
     'account-disabled'
     'listener-removed'
     'firewall-rule-removed'
+    'certificate-removed'
+    'task-unregistered'
+    'workspace-removed'
     'verified'
 )
 
@@ -147,12 +158,18 @@ function Invoke-GuestFinalization {
     # listener is removed leaves a window with a listener and no way in, which is
     # harmless; the reverse leaves a reachable listener and a live account, which
     # is the state this exists to prevent.
+    # The workspace is removed second to last, because the steps before it read
+    # from it -- the residue module lives there. The verification that follows
+    # reads nothing from disk, which is what makes that ordering possible.
     foreach ($step in @(
-            @{ Name = 'residue-confirmed';    Operation = 'ConfirmResidueAbsent'; Reason = 'residue_present' }
-            @{ Name = 'account-disabled';     Operation = 'DisableAccount';       Reason = 'account_not_disabled' }
-            @{ Name = 'listener-removed';     Operation = 'RemoveListener';       Reason = 'listener_not_removed' }
-            @{ Name = 'firewall-rule-removed'; Operation = 'RemoveFirewallRule';  Reason = 'firewall_rule_not_removed' }
-            @{ Name = 'verified';             Operation = 'Verify';               Reason = 'verification_failed' })) {
+            @{ Name = 'residue-confirmed';     Operation = 'ConfirmResidueAbsent'; Reason = 'residue_present' }
+            @{ Name = 'account-disabled';      Operation = 'DisableAccount';       Reason = 'account_not_disabled' }
+            @{ Name = 'listener-removed';      Operation = 'RemoveListener';       Reason = 'listener_not_removed' }
+            @{ Name = 'firewall-rule-removed'; Operation = 'RemoveFirewallRule';   Reason = 'firewall_rule_not_removed' }
+            @{ Name = 'certificate-removed';   Operation = 'RemoveCertificate';    Reason = 'certificate_not_removed' }
+            @{ Name = 'task-unregistered';     Operation = 'UnregisterTask';       Reason = 'task_not_unregistered' }
+            @{ Name = 'workspace-removed';     Operation = 'RemoveWorkspace';      Reason = 'workspace_not_removed' }
+            @{ Name = 'verified';              Operation = 'Verify';               Reason = 'verification_failed' })) {
 
         if ($reason) {
             # Everything after a failure is skipped rather than attempted. A
@@ -174,7 +191,7 @@ function Invoke-GuestFinalization {
     }
 
     $attestation = [ordered]@{
-        attestationSchemaVersion = 1
+        attestationSchemaVersion = 2
         runId                    = $validatedRunId
         nonce                    = $Nonce
         completedUtc             = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')

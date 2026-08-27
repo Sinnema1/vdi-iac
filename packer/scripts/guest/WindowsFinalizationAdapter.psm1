@@ -79,16 +79,16 @@ function Get-WindowsToolsAdapter {
 
     @{
         GetToolsVersion = {
-            $service = Get-CimInstance -ClassName Win32_Product -Filter "Name LIKE '%VMware Tools%'" -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if ($service) { return $service.Version }
-
-            # Fall back to the file version of the daemon itself. Win32_Product
-            # is slow and not always populated; the binary is authoritative
-            # about what is installed.
+            # One defined source: the daemon binary's own file version.
+            #
+            # Win32_Product is not used and must not be reintroduced. Querying
+            # it makes Windows Installer walk every installed MSI and can
+            # trigger a reconfiguration of products it finds inconsistent --
+            # on a machine mid-build, that is a repair pass nobody asked for
+            # during a prerequisite check.
             $tool = Resolve-ToolsCommand
             if (-not $tool) { throw 'VMware Tools is not installed.' }
-            (Get-Item -LiteralPath $tool.Path).VersionInfo.FileVersion
+            [string] (Get-Item -LiteralPath $tool.Path).VersionInfo.FileVersion
         }
         GetToolsRunning = {
             $service = Get-Service -Name 'VMTools' -ErrorAction SilentlyContinue
@@ -116,7 +116,10 @@ function Get-WindowsFinalizationAdapter {
     param(
         [Parameter(Mandatory)] [string] $BuildUsername,
         [Parameter(Mandatory)] [string] $SystemDrive,
-        [Parameter(Mandatory)] [string] $ToolsPath
+        [Parameter(Mandatory)] [string] $ToolsPath,
+        [Parameter(Mandatory)] [string] $WorkspaceRoot,
+        [Parameter()] [string] $TaskName = 'vdi-iac-finalize',
+        [Parameter()] [string] $CertificateSubject = $env:COMPUTERNAME
     )
 
     # Captured into one object the closures read from. A parameter referenced
@@ -126,6 +129,9 @@ function Get-WindowsFinalizationAdapter {
         BuildUsername = $BuildUsername
         SystemDrive   = $SystemDrive
         ToolsPath     = $ToolsPath
+        WorkspaceRoot = $WorkspaceRoot
+        TaskName      = $TaskName
+        CertSubject   = $CertificateSubject
         FirewallRule  = 'WinRM HTTPS (build)'
     }
 
@@ -165,17 +171,75 @@ function Get-WindowsFinalizationAdapter {
             $null -eq (Get-NetFirewallRule -DisplayName $settings.FirewallRule -ErrorAction SilentlyContinue)
         }.GetNewClosure()
 
+        RemoveCertificate = {
+            # The listener's certificate and its private key. A generalized
+            # image carrying the private key of a listener it used to run is an
+            # image that ships with the means to impersonate one, and Sysprep
+            # removes neither.
+            Get-ChildItem -Path 'Cert:\LocalMachine\My' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Subject -eq "CN=$($settings.CertSubject)" } |
+                ForEach-Object { Remove-Item -Path $_.PSPath -DeleteKey -Force -ErrorAction SilentlyContinue }
+
+            $remaining = @(Get-ChildItem -Path 'Cert:\LocalMachine\My' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Subject -eq "CN=$($settings.CertSubject)" })
+            $remaining.Count -eq 0
+        }.GetNewClosure()
+
+        UnregisterTask = {
+            # The finalizer's own task. It is still running this code, and
+            # unregistering a running task is permitted -- what would not be is
+            # leaving it in the image, where it would name a script that no
+            # longer exists and run as SYSTEM at every boot.
+            Unregister-ScheduledTask -TaskName $settings.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+            $null -eq (Get-ScheduledTask -TaskName $settings.TaskName -ErrorAction SilentlyContinue)
+        }.GetNewClosure()
+
+        RemoveWorkspace = {
+            # Scripts, contracts, retrieved evidence, and the finalization log.
+            # None of it belongs in an image, and the log is the last thing to
+            # go because everything before this point may need to write to it.
+            Remove-Item -LiteralPath $settings.WorkspaceRoot -Recurse -Force -ErrorAction SilentlyContinue
+            -not (Test-Path -LiteralPath $settings.WorkspaceRoot)
+        }.GetNewClosure()
+
         Verify = {
             # The whole state, re-read once more. Each step confirmed itself;
             # this asks whether they are all still true together, which is the
             # claim the attestation makes.
-            Import-Module (Join-Path $settings.ToolsPath 'AnswerFile.psm1') -Force
-            $residue = @(Get-SetupResidue -SystemDrive $settings.SystemDrive).Count -eq 0
+            #
+            # Nothing here reads from the workspace: it has just been removed,
+            # and a verification that needed it could never run. The residue
+            # paths are the ones Windows Setup writes, which is why they can
+            # still be checked.
+            $residuePaths = @(
+                '$Windows.~BT/Sources/Panther/unattend.xml'
+                'Windows/Panther/unattend.xml'
+                'Windows/Panther/unattend.orig.xml'
+                'Windows/System32/Sysprep/unattend.xml'
+                'Windows/Panther/Unattend/unattend.xml'
+            )
+            $residue = @($residuePaths |
+                ForEach-Object { Join-Path $settings.SystemDrive $_ } |
+                Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count -eq 0
+
             $listeners = @(Get-ChildItem -Path 'WSMan:\localhost\Listener' -ErrorAction SilentlyContinue).Count -eq 0
+            $service = Get-Service -Name WinRM -ErrorAction SilentlyContinue
+            $winrmStopped = $null -eq $service -or
+                ($service.Status -ne 'Running' -and $service.StartType -eq 'Disabled')
+
+            $firewall = $null -eq (Get-NetFirewallRule -DisplayName $settings.FirewallRule -ErrorAction SilentlyContinue)
+
+            $certificate = @(Get-ChildItem -Path 'Cert:\LocalMachine\My' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Subject -eq "CN=$($settings.CertSubject)" }).Count -eq 0
+
+            $task = $null -eq (Get-ScheduledTask -TaskName $settings.TaskName -ErrorAction SilentlyContinue)
+            $workspace = -not (Test-Path -LiteralPath $settings.WorkspaceRoot)
+
             $account = Get-CimInstance -ClassName Win32_UserAccount -Filter "Name='$($settings.BuildUsername)'" -ErrorAction SilentlyContinue
             $disabled = $null -ne $account -and $account.Disabled
 
-            $residue -and $listeners -and $disabled
+            $residue -and $listeners -and $winrmStopped -and $firewall -and
+                $certificate -and $task -and $workspace -and $disabled
         }.GetNewClosure()
 
         PublishAttestation = {

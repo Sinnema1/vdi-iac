@@ -50,7 +50,8 @@ Describe 'the Windows guest adapter' {
         # A missing member is a runtime failure on a machine that is about to
         # generalize itself, which is the worst possible place to discover it.
         foreach ($operation in 'ConfirmResidueAbsent', 'DisableAccount', 'RemoveListener',
-                               'RemoveFirewallRule', 'Verify', 'PublishAttestation', 'InvokeSysprep') {
+                               'RemoveFirewallRule', 'RemoveCertificate', 'UnregisterTask',
+                               'RemoveWorkspace', 'Verify', 'PublishAttestation', 'InvokeSysprep') {
             $script:AdapterCode | Should -Match "$operation\s*=" -Because "the finalizer calls $operation"
         }
     }
@@ -91,6 +92,45 @@ Describe 'the Windows guest adapter' {
         $script:AdapterCode | Should -Match 'Win32_UserAccount'
     }
 
+    It 'removes the build access Sysprep leaves behind' {
+        # Sysprep removes none of these. A generalized image carrying the
+        # private key of a listener it used to run ships with the means to
+        # impersonate one; the finalizer's own task would run as SYSTEM at every
+        # boot naming a script that no longer exists; and the workspace holds
+        # the scripts, contracts, evidence, and log.
+        $script:AdapterCode | Should -Match 'DeleteKey'
+        $script:AdapterCode | Should -Match 'Unregister-ScheduledTask'
+        $script:AdapterCode | Should -Match 'Remove-Item -LiteralPath \$settings\.WorkspaceRoot'
+    }
+
+    It 'verifies the whole teardown, not the parts it removed last' {
+        # Each step confirmed itself; this asks whether they are all still true
+        # together, which is the claim the attestation makes.
+        foreach ($condition in 'winrmStopped', 'firewall', 'certificate', 'task', 'workspace', 'disabled') {
+            $script:AdapterCode | Should -Match "\`$$condition\s*=" -Because "verification must cover $condition"
+        }
+    }
+
+    It 'reads nothing from the workspace during verification' {
+        # The workspace has just been removed. A verification that needed it
+        # could never run.
+        $verify = [regex]::Match($script:AdapterCode, '(?s)Verify\s*=\s*\{.*?\}\.GetNewClosure\(\)')
+        $verify.Success | Should -BeTrue
+        $verify.Value | Should -Not -Match 'ToolsPath'
+        $verify.Value | Should -Not -Match 'Import-Module'
+    }
+
+    It 'never queries Win32_Product' {
+        # Querying it makes Windows Installer walk every installed MSI and can
+        # trigger a reconfiguration of products it finds inconsistent -- a
+        # repair pass nobody asked for, during a prerequisite check.
+        $script:AdapterCode | Should -Not -Match 'Win32_Product'
+    }
+
+    It 'reads the Tools version from one defined source' {
+        $script:AdapterCode | Should -Match 'VersionInfo\.FileVersion'
+    }
+
     It 'commits no vendor binary' {
         # The tool is located where Tools installs it; its absence is reported
         # rather than worked around.
@@ -117,16 +157,29 @@ Describe 'the detached launcher' {
         $script:Launcher | Should -Match 'ExecutionTimeLimit \(\[TimeSpan\]::Zero\)'
     }
 
-    It 'starts the task and does not wait for it' {
-        $script:Launcher | Should -Match 'Start-ScheduledTask'
+    It 'schedules the task instead of starting it' {
+        # Starting it here races this script: the finalizer removes the WinRM
+        # listener, and this script is still talking to Packer over it, so a
+        # fast teardown makes a correct build look like a transport failure.
+        $script:Launcher | Should -Match 'New-ScheduledTaskTrigger -Once -At'
+        $script:Launcher | Should -Not -Match 'Start-ScheduledTask'
+    }
+
+    It 'gives the handoff a delay this session can finish inside' {
+        $script:Launcher | Should -Match '\$HandoffSeconds = 120'
+        $script:Launcher | Should -Match 'AddSeconds\(\$HandoffSeconds\)'
+    }
+
+    It 'does not wait for the finalizer' {
         $script:Launcher | Should -Not -Match 'Wait-Job|Wait-Process|while \('
     }
 
-    It 'fails when the task did not start' {
-        # Registered but not running means it either finished instantly or never
-        # started, and neither is what launching it should look like.
-        $script:Launcher | Should -Match "if \(\`$state -eq 'Ready'\)"
-        $script:Launcher | Should -Match 'throw'
+    It 'fails when the task was registered without a trigger' {
+        # A task with no trigger is registered and would never run, which looks
+        # like success and produces a build that waits for a shutdown nothing
+        # will perform.
+        $script:Launcher | Should -Match '\$scheduled = @\(\$task\.Triggers\)\.Count -gt 0'
+        $script:Launcher | Should -Match 'would never run'
     }
 
     It 'carries no credential into the task arguments' {
@@ -277,5 +330,42 @@ Describe 'the run annotation the builder writes and the resolver expects' {
         # would have to survive an exact comparison, and would be published on
         # the artifact.
         $script:BuilderNote | Should -Match '^[a-z-]+:\$\{var\.run_id\}$'
+    }
+}
+
+Describe 'removable media does not travel into the image' {
+
+    It 'detaches the CD before the artifact is accepted' {
+        # The OEMDRV volume carries the rendered answer file, which holds a
+        # working credential. Neither it nor the installation media belongs
+        # attached to a machine about to become an image.
+        $build = CodeOf -Path (Join-Path $script:RepoRoot 'packer' 'builds' 'windows-image.pkr.hcl')
+        $build | Should -Match 'remove_cdrom\s*=\s*true'
+    }
+}
+
+Describe 'the attestation contract version' {
+
+    It 'leaves version 1 byte-stable' {
+        # A published contract version is never edited in place, so version 2 is
+        # a new file and version 1 keeps validating what it always validated.
+        (Get-FileHash -LiteralPath (Join-Path $script:RepoRoot 'contracts' 'finalization-attestation-1.schema.json') `
+            -Algorithm SHA256).Hash.ToLowerInvariant() |
+            Should -Be '53d5d4b7ae01dae102fc3786fd2887ae2d0c08b53605ca18054bcab64b496f29'
+    }
+
+    It 'version 2 knows the steps version 1 did not' {
+        $v1 = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'contracts' 'finalization-attestation-1.schema.json') -Raw | ConvertFrom-Json
+        $v2 = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'contracts' 'finalization-attestation-2.schema.json') -Raw | ConvertFrom-Json
+
+        foreach ($step in 'certificate-removed', 'task-unregistered', 'workspace-removed') {
+            $v2.properties.steps.items.properties.name.enum | Should -Contain $step
+            $v1.properties.steps.items.properties.name.enum | Should -Not -Contain $step
+        }
+    }
+
+    It 'version 2 declares its own version' {
+        $v2 = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'contracts' 'finalization-attestation-2.schema.json') -Raw | ConvertFrom-Json
+        $v2.properties.attestationSchemaVersion.const | Should -Be 2
     }
 }

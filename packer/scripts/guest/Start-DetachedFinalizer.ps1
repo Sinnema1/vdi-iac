@@ -16,6 +16,12 @@
     This does not wait for the finalizer, and deliberately reports nothing about
     its outcome. The outcome reaches the host through the guest RPC channel and
     the machine's power state, both read from the platform.
+
+    The task is scheduled rather than started. Starting it here races this
+    script: the finalizer removes the WinRM listener, and this script is still
+    talking to Packer over that listener, so a fast teardown makes a correct
+    build look like a transport failure. The delay is the handoff -- registered
+    here, fired after this session has ended.
 #>
 
 [CmdletBinding()]
@@ -25,7 +31,9 @@ param(
     [Parameter(Mandatory)] [string] $BuildUsername,
     [Parameter(Mandatory)] [string] $ToolsPath,
     [Parameter(Mandatory)] [string] $GuestScriptsPath,
-    [Parameter()] [string] $TaskName = 'vdi-iac-finalize'
+    [Parameter(Mandatory)] [string] $WorkspaceRoot,
+    [Parameter()] [string] $TaskName = 'vdi-iac-finalize',
+    [Parameter()] [int] $HandoffSeconds = 120
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,7 +53,8 @@ $arguments = @(
     '-RunId', $RunId,
     '-Nonce', $Nonce,
     '-BuildUsername', $BuildUsername,
-    '-ToolsPath', "`"$ToolsPath`""
+    '-ToolsPath', "`"$ToolsPath`"",
+    '-WorkspaceRoot', "`"$WorkspaceRoot`""
 ) -join ' '
 
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
@@ -61,20 +70,31 @@ $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccou
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
 
+# A delayed trigger, not an immediate start.
+#
+# Starting the task here is a race: it removes the WinRM listener, and this
+# script is still talking to Packer over that listener. If teardown wins, Packer
+# sees the connection drop during a command that had not returned, and reports a
+# transport failure for a build that was working correctly.
+#
+# The delay is the handoff. This script registers the task, confirms it is
+# scheduled, and exits; the trigger fires afterwards, by which time Packer has
+# collected this provisioner's result and closed the session it no longer needs.
+$startAt = (Get-Date).AddSeconds($HandoffSeconds)
+$trigger = New-ScheduledTaskTrigger -Once -At $startAt
+
 Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal `
-    -Settings $settings -Force | Out-Null
+    -Settings $settings -Trigger $trigger -Force | Out-Null
 
-Start-ScheduledTask -TaskName $TaskName
+# Registered and scheduled, which is the whole of this script's job. It does not
+# start the task, does not wait for it, and reports nothing about its outcome --
+# that reaches the host through the guest RPC channel and the machine's power
+# state, both read from the platform.
+$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+if (-not $task) { throw "The finalizer task was not registered." }
 
-# Confirmed as started, not as finished. Waiting for completion would mean
-# waiting for a machine that powers itself off, and this session dies with the
-# listener long before that.
-$state = (Get-ScheduledTask -TaskName $TaskName).State
-Write-Output "finalizer task '$TaskName' state: $state"
+$scheduled = @($task.Triggers).Count -gt 0
+if (-not $scheduled) { throw "The finalizer task has no trigger and would never run." }
 
-if ($state -eq 'Ready') {
-    # Ready means it is registered and not running: it either finished
-    # instantly or never started, and neither is what launching it should look
-    # like.
-    throw "The finalizer task did not start; it is '$state'."
-}
+Write-Output ("finalizer task '{0}' registered; it begins at {1:o} and this session ends first" -f
+    $TaskName, $startAt)

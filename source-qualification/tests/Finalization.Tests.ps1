@@ -35,6 +35,9 @@ BeforeAll {
         @{
             State                = $state
             ConfirmResidueAbsent = { & $step $state 'ConfirmResidueAbsent' }.GetNewClosure()
+            RemoveCertificate    = { & $step $state 'RemoveCertificate' }.GetNewClosure()
+            UnregisterTask       = { & $step $state 'UnregisterTask' }.GetNewClosure()
+            RemoveWorkspace      = { & $step $state 'RemoveWorkspace' }.GetNewClosure()
             DisableAccount       = { & $step $state 'DisableAccount' }.GetNewClosure()
             RemoveListener       = { & $step $state 'RemoveListener' }.GetNewClosure()
             RemoveFirewallRule   = { & $step $state 'RemoveFirewallRule' }.GetNewClosure()
@@ -68,8 +71,9 @@ Describe 'the terminal transition' {
         $result.Outcome | Should -Be 'passed'
         $result.SysprepInvoked | Should -BeTrue
         @($adapter.State.Log) | Should -Be @(
-            'ConfirmResidueAbsent', 'DisableAccount', 'RemoveListener',
-            'RemoveFirewallRule', 'Verify', 'PublishAttestation', 'InvokeSysprep')
+            'ConfirmResidueAbsent', 'DisableAccount', 'RemoveListener', 'RemoveFirewallRule',
+            'RemoveCertificate', 'UnregisterTask', 'RemoveWorkspace', 'Verify',
+            'PublishAttestation', 'InvokeSysprep')
     }
 
     It 'publishes before it shuts down' {
@@ -96,7 +100,8 @@ Describe 'the terminal transition' {
     It 'does not invoke Sysprep when <step> fails' -ForEach @(
         @{ step = 'ConfirmResidueAbsent' }, @{ step = 'DisableAccount' }
         @{ step = 'RemoveListener' },       @{ step = 'RemoveFirewallRule' }
-        @{ step = 'Verify' }
+        @{ step = 'RemoveCertificate' },    @{ step = 'UnregisterTask' }
+        @{ step = 'RemoveWorkspace' },      @{ step = 'Verify' }
     ) {
         # The whole fail-closed property. A failed finalizer leaves the machine
         # running, which the build observes as a shutdown that never came.
@@ -159,7 +164,7 @@ Describe 'the attestation is bounded and boring' {
         $null = Finalize -Adapter $adapter -RunId (Get-RunIdentifier) -Nonce (Get-FinalizationNonce)
 
         Test-Json -Json $adapter.State.Published `
-            -SchemaFile (Join-Path $script:RepoRoot 'contracts' 'finalization-attestation-1.schema.json') `
+            -SchemaFile (Join-Path $script:RepoRoot 'contracts' 'finalization-attestation-2.schema.json') `
             -ErrorAction SilentlyContinue | Should -BeTrue
     }
 
@@ -305,9 +310,9 @@ Describe 'the step sequence is exact' {
         $steps = @($document.steps)
 
         $document.steps = switch ($action) {
-            'remove'    { @($steps[0], $steps[1], $steps[3], $steps[4]) }
-            'duplicate' { @($steps[0], $steps[1], $steps[1], $steps[2], $steps[3], $steps[4]) }
-            'reorder'   { @($steps[0], $steps[2], $steps[1], $steps[3], $steps[4]) }
+            'remove'    { @($steps[0..2] + $steps[4..($steps.Count - 1)]) }
+            'duplicate' { @($steps[0], $steps[1]) + @($steps[1..($steps.Count - 1)]) }
+            'reorder'   { @($steps[0], $steps[2], $steps[1]) + @($steps[3..($steps.Count - 1)]) }
             'extra'     { @($steps) + @([PSCustomObject]@{ name = 'verified'; outcome = 'passed' }) }
         }
 

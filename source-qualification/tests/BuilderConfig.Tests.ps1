@@ -289,6 +289,12 @@ Describe 'the build seals what it constructed' {
         $tools | Should -BeLessThan $launch
     }
 
+    It 'passes the workspace the finalizer must remove' {
+        # Without it the finalizer cannot name what to delete, and the build
+        # scripts, contracts, evidence, and log travel into the image.
+        $script:Configuration | Should -Match '-WorkspaceRoot'
+    }
+
     It 'launches the finalizer detached, as the last WinRM operation' {
         # Everything after this happens in a session that survives the removal
         # of the listener the command arrived on.

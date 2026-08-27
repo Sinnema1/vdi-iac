@@ -25,9 +25,15 @@ param(
     [Parameter(Mandatory)] [string] $Nonce,
     [Parameter(Mandatory)] [string] $BuildUsername,
     [Parameter(Mandatory)] [string] $ToolsPath,
+    [Parameter(Mandatory)] [string] $WorkspaceRoot,
     [Parameter()] [string] $SystemDrive = 'C:/',
-    [Parameter()] [string] $LogPath = 'C:/vdi-iac-build/finalization.log'
+    [Parameter()] [string] $LogPath
 )
+
+# The log lives in the workspace the finalizer removes. Everything before that
+# step can write to it; nothing after can, which is why removal is second to
+# last and verification reads nothing from disk.
+if (-not $LogPath) { $LogPath = Join-Path $WorkspaceRoot 'finalization.log' }
 
 $ErrorActionPreference = 'Stop'
 
@@ -57,7 +63,7 @@ try {
     Write-FinalizationLog -Path $LogPath -Message 'finalization: starting'
 
     $adapter = Get-WindowsFinalizationAdapter -BuildUsername $BuildUsername `
-        -SystemDrive $SystemDrive -ToolsPath $ToolsPath
+        -SystemDrive $SystemDrive -ToolsPath $ToolsPath -WorkspaceRoot $WorkspaceRoot
 
     $result = Invoke-GuestFinalization -RunId $RunId -Nonce $Nonce -Adapter $adapter
 

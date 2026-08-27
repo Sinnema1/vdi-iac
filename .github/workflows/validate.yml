@@ -277,6 +277,7 @@ jobs:
           Set-Content -LiteralPath (Join-Path $work 'autounattend.xml') -Value '<x/>' -NoNewline
           Set-Content -LiteralPath (Join-Path $work 'bootstrap.ps1') -Value '# bootstrap' -NoNewline
           Set-Content -LiteralPath (Join-Path $work 'media.iso') -Value 'media' -NoNewline
+          Set-Content -LiteralPath (Join-Path $work 'qualification.json') -Value '{}' -NoNewline
 
           $varFile = Join-Path $work 'vars.pkrvars.hcl'
           @"
@@ -296,6 +297,7 @@ jobs:
           answer_file_path            = "$((Join-Path $work 'autounattend.xml') -replace '\\', '/')"
           winrm_bootstrap_path        = "$((Join-Path $work 'bootstrap.ps1') -replace '\\', '/')"
           bundle_path                 = "$((Join-Path $work 'bundle') -replace '\\', '/')"
+          media_qualification_record_path = "$((Join-Path $work 'qualification.json') -replace '\\', '/')"
           descriptor_sha256           = "$('a' * 64)"
           tools_source_dir            = "$((Join-Path $PWD 'source-qualification' 'scripts') -replace '\\', '/')"
           guest_scripts_dir           = "$((Join-Path $PWD 'packer' 'scripts' 'guest') -replace '\\', '/')"

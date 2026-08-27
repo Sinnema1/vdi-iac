@@ -1124,17 +1124,21 @@ surface is as small as possible when a target finally exists.
    before generalization is host- or guest-side and testable against fixtures;
    everything from generalization onward needs a lab.
 
-   1. transfer the verified package bundle and invoke guest provisioning;
-   2. collect installation and validation evidence;
-   3. run the pre-generalization checks;
-   4. remove answer-file residue;
-   5. disable or rotate the build account;
-   6. remove the WinRM listener and its firewall exception -- the listener
-      exists so the build can reach the guest, and an image that ships with one
-      reachable is an image that ships with a way in;
-   7. generalize Windows and observe the shutdown rather than assuming it;
-   8. enable template conversion **only after** every gate above has passed;
-   9. emit provenance bound to the resulting artifact.
+   | Step | State |
+   | --- | --- |
+   | 1. transfer and invoke the verified bundle | implemented; wired into the build |
+   | 2. collect install and validation evidence, and gate on it | implemented; wired into the build |
+   | 3. pre-generalization checks | **logic implemented and CI-proven; builder integration pending** |
+   | 4. answer-file and credential residue removal | **logic implemented and CI-proven; builder integration pending** |
+   | 5-7. the terminal transition | orchestration implemented against injected adapters; production adapter absent, lab-pending |
+   | 8. conversion | moved out of the build entirely, per ADR 8 |
+   | 9. provenance bound to the artifact | sealing coordinator implemented against injected adapters; lab-pending |
+
+   Steps 5 to 7 are one terminal transition: disable the build account, remove
+   the WinRM listener and its firewall exception -- the listener exists so the
+   build can reach the guest, and an image that ships with one reachable ships
+   with a way in -- then generalize and shut down, with the shutdown observed
+   rather than assumed.
 
    The ordering is the safety property. Removing the listener before evidence is
    collected loses the evidence; generalizing before the credential is disabled

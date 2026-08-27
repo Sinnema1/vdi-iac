@@ -36,6 +36,7 @@ BeforeAll {
         Set-Content -LiteralPath (Join-Path $work 'bootstrap.ps1') -Value '# bootstrap' -NoNewline
         Set-Content -LiteralPath (Join-Path $work 'media.iso') -Value 'media' -NoNewline
         $null = New-Item -ItemType Directory -Path (Join-Path $work 'bundle') -Force
+        Set-Content -LiteralPath (Join-Path $work 'qualification.json') -Value '{}' -NoNewline
 
         $values = [ordered]@{
             vcenter_server              = '"vcenter.example"'
@@ -54,6 +55,7 @@ BeforeAll {
             answer_file_path            = '"' + (($work + '/autounattend.xml') -replace '\\', '/') + '"'
             winrm_bootstrap_path        = '"' + (($work + '/bootstrap.ps1') -replace '\\', '/') + '"'
             bundle_path                 = '"' + (($work + '/bundle') -replace '\\', '/') + '"'
+            media_qualification_record_path = '"' + (($work + '/qualification.json') -replace '\\', '/') + '"'
             descriptor_sha256           = '"' + ('a' * 64) + '"'
             tools_source_dir            = '"' + ((Join-Path $script:RepoRoot 'source-qualification' 'scripts') -replace '\\', '/') + '"'
             guest_scripts_dir           = '"' + ((Join-Path $script:RepoRoot 'packer' 'scripts' 'guest') -replace '\\', '/') + '"'
@@ -238,6 +240,56 @@ Describe 'the build seals what it constructed' {
         # Supporting a separately created account is a contract revision.
         $schema = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'contracts' 'answer-file-template-1.schema.json') -Raw | ConvertFrom-Json
         $schema.properties.buildSettings.properties.buildUsername.const | Should -Be 'Administrator'
+    }
+
+    It 'reconciles the installed Windows against the record it uploaded' {
+        # The check reads a qualification record, so the build has to put one
+        # there. An earlier draft downloaded evidence nothing created; this is
+        # the same defect in the other direction.
+        $script:Configuration | Should -Match 'media_qualification_record_path'
+        $script:Configuration | Should -Match 'Test-PreGeneralizationReadiness'
+    }
+
+    It 'runs the pre-generalization checks only after provisioning is accepted' {
+        $gate = $script:Configuration.IndexOf('Test-ProvisioningComplete')
+        $checks = $script:Configuration.IndexOf('Test-PreGeneralizationReadiness')
+        $gate | Should -BeGreaterThan 0
+        $gate | Should -BeLessThan $checks
+    }
+
+    It 'removes residue after the checks that examine the machine' {
+        # The checks look at a machine that still has everything on it. Removing
+        # first would hide what they exist to observe.
+        $checks = $script:Configuration.IndexOf('Test-PreGeneralizationReadiness')
+        $removal = $script:Configuration.IndexOf('Invoke-AnswerFileResidueRemoval')
+        $checks | Should -BeLessThan $removal
+    }
+
+    It 'retrieves the evidence for both phases' {
+        foreach ($phase in 'pre-generalization', 'credential-residue') {
+            $script:Configuration | Should -Match ([regex]::Escape("$phase-`${local.evidence_name}"))
+        }
+    }
+
+    It 'refuses to continue when either phase did not pass' {
+        # Fails closed on both, so nothing downstream runs against a machine
+        # whose state was never established.
+        ([regex]::Matches($script:Configuration, "if \(\`$result\.Outcome -ne 'passed'\) \{ throw")).Count |
+            Should -Be 2
+    }
+
+    It 'stops before the terminal finalizer, loudly' {
+        # A build reaching this would otherwise wait at disable_shutdown for a
+        # shutdown nothing performs, and fail an hour later with a timeout that
+        # explains nothing.
+        $script:Configuration | Should -Match 'Stage 5 stops after residue removal'
+    }
+
+    It 'schedules nothing after the finalizer, because there is no finalizer' {
+        # When one is added, nothing may follow it: it removes the listener
+        # Packer reached the guest through.
+        $script:Configuration | Should -Not -Match 'Invoke-GuestFinalization'
+        $script:Configuration | Should -Not -Match 'Invoke-CandidateSealing'
     }
 
     It 'configures nothing beyond the steps it implements' {
@@ -479,6 +531,7 @@ Describe 'the handoff from verified media to the build' {
             candidate_name = 'windows-candidate'; build_password = 'placeholder'
             winrm_bootstrap_path = (Join-Path $qualified.Root 'bootstrap.ps1')
             bundle_path = $bundleDir
+            media_qualification_record_path = (Join-Path $qualified.Root 'qualification.json')
             descriptor_sha256 = ('a' * 64)
             tools_source_dir = (Join-Path $script:RepoRoot 'source-qualification' 'scripts')
             guest_scripts_dir = (Join-Path $script:RepoRoot 'packer' 'scripts' 'guest')

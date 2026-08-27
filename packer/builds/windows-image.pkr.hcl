@@ -122,6 +122,11 @@ variable "winrm_bootstrap_path" {
   description = "The script the answer file's first-logon command runs to create the WinRM listener. Carries no credential."
 }
 
+variable "media_qualification_record_path" {
+  type        = string
+  description = "The qualification record, uploaded so the pre-generalization checks can reconcile the installed Windows against the declared media intent. Qualification never opened the media, so this is where that intent is finally checked."
+}
+
 variable "bundle_path" {
   type        = string
   description = "The verified-only transfer bundle from Increment 2. Only content that passed host verification is in it."
@@ -408,6 +413,11 @@ build {
     destination = "${local.bundle_target}/"
   }
 
+  provisioner "file" {
+    source      = var.media_qualification_record_path
+    destination = "${local.guest_root}/media-qualification.json"
+  }
+
   # 2. Install. The expected descriptor digest arrives through the environment,
   #    out of band from the bundle it authenticates -- a digest carried inside
   #    the bundle would be rewritten by whoever rewrote the bundle. The
@@ -514,5 +524,73 @@ build {
     ]
   }
 
-  # STOP. The next provisioner belongs to step 3 and is not written.
+  # 9. Pre-generalization checks, on a machine about to lose its identity. This
+  #    is the last point at which anything can be observed and the last at which
+  #    anything can be fixed, so it runs before any of it is torn down.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/PreGeneralization.psm1' -Force",
+      "$gate = @{ InstallEvidencePath = '${local.guest_root}/install-${local.evidence_name}'; ValidateEvidencePath = '${local.guest_root}/validate-${local.evidence_name}'; RunId = '${var.run_id}'; SchemaPath = '${local.contracts_target}/evidence-envelope-2.schema.json' }",
+      "$record = Get-Content -LiteralPath '${local.guest_root}/media-qualification.json' -Raw | ConvertFrom-Json",
+      "$result = Test-PreGeneralizationReadiness -Gate $gate -MediaRecord $record -StagingRoot '${local.guest_root}' -RunId '${var.run_id}' -FactProvider (Get-SystemFactProvider)",
+      "ConvertTo-ImageBuildPhase -PhaseResult $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath '${local.guest_root}/pre-generalization-${local.evidence_name}' -Encoding utf8",
+      "if ($result.Outcome -ne 'passed') { throw \"Pre-generalization refused: $($result.ReasonCode).\" }",
+      "Write-Host 'gate: pre-generalization checks passed'"
+    ]
+  }
+
+  provisioner "file" {
+    direction   = "download"
+    source      = "${local.guest_root}/pre-generalization-${local.evidence_name}"
+    destination = "${var.evidence_output_dir}/pre-generalization-${local.evidence_name}"
+  }
+
+  # 10. Remove what setup left behind. Each copy holds the administrator
+  #     password in plain text, so this happens before anything generalizes the
+  #     machine and long before anything seals it.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/PreGeneralization.psm1' -Force",
+      "$gate = @{ InstallEvidencePath = '${local.guest_root}/install-${local.evidence_name}'; ValidateEvidencePath = '${local.guest_root}/validate-${local.evidence_name}'; RunId = '${var.run_id}'; SchemaPath = '${local.contracts_target}/evidence-envelope-2.schema.json' }",
+      "$result = Invoke-AnswerFileResidueRemoval -Gate $gate -SystemDrive 'C:/' -Confirm:$false",
+      "ConvertTo-ImageBuildPhase -PhaseResult $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath '${local.guest_root}/credential-residue-${local.evidence_name}' -Encoding utf8",
+      "if ($result.Outcome -ne 'passed') { throw \"Residue removal refused: $($result.ReasonCode).\" }",
+      "Write-Host 'gate: credential residue cleared'"
+    ]
+  }
+
+  provisioner "file" {
+    direction   = "download"
+    source      = "${local.guest_root}/credential-residue-${local.evidence_name}"
+    destination = "${var.evidence_output_dir}/credential-residue-${local.evidence_name}"
+  }
+
+  # 11. The build stops here, deliberately and loudly.
+  #
+  #     What would come next is the VMware Tools prerequisite check and then the
+  #     detached finalizer. Neither has a production adapter, so a build that
+  #     ran to this point would otherwise wait at disable_shutdown for a
+  #     shutdown nothing is going to perform, and fail an hour later with a
+  #     timeout that explains nothing.
+  #
+  #     This is not a placeholder to delete when convenient: it is removed by
+  #     the commit that adds the finalizer, and not before.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "throw 'Stage 5 stops after residue removal. The VMware Tools check and the terminal finalizer have no production adapter, and sealing happens on the host after Packer exits.'"
+    ]
+  }
+
+  # STOP. Nothing beyond this point exists.
+  #
+  # The next provisioner would launch the detached SYSTEM finalizer, and after
+  # that nothing may be scheduled that requires WinRM: the finalizer removes the
+  # listener Packer reached the guest through. Sealing happens on the host after
+  # Packer exits, not here.
 }

@@ -256,6 +256,99 @@ function Invoke-GuestCleanup {
     }
 }
 
+function Test-ProvisioningComplete {
+    <#
+    .SYNOPSIS
+        Decides whether provisioning succeeded well enough to continue the build.
+
+    .DESCRIPTION
+        Increment 3 stage 5, step 2. The gate between provisioning and everything
+        that turns a build VM into an image. Nothing after this point is
+        reversible: pre-generalization checks examine a machine that is about to
+        lose its identity, and generalization and sealing follow. A build that
+        reaches them on a package that did not install produces an image missing
+        software nobody will notice is missing until it is deployed.
+
+        Both phases are required and both are read from disk. An install-only
+        record is not accepted here whatever it says: the validate phase is what
+        establishes that the software is actually present after the restart, and
+        the deliberate pre-restart halt that makes an install-only record
+        legitimate is a build that stopped, not one that may continue.
+
+        Authorization is positive. Missing, malformed, self-contradictory,
+        wrong-kind, and wrong-run evidence are all refusals, and so is evidence
+        whose two phases describe different packages.
+
+    .OUTPUTS
+        Authorized, plus a bounded reason code when it is not.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $InstallEvidencePath,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ValidateEvidencePath,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RunId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SchemaPath
+    )
+
+    function Refuse([string] $Code) { [PSCustomObject]@{ Authorized = $false; ReasonCode = $Code } }
+
+    $expectedRunId = Assert-RunIdentifier -RunId $RunId
+    $documents = @{}
+
+    foreach ($phase in @(
+            @{ Name = 'install';  Path = $InstallEvidencePath }
+            @{ Name = 'validate'; Path = $ValidateEvidencePath })) {
+
+        if (-not (Test-Path -LiteralPath $phase.Path -PathType Leaf)) { return Refuse 'evidence_missing' }
+
+        $raw = Get-Content -LiteralPath $phase.Path -Raw -Encoding utf8
+        if (-not (Test-Json -Json $raw -SchemaFile $SchemaPath -ErrorAction SilentlyContinue)) {
+            return Refuse 'evidence_malformed'
+        }
+
+        try { $evidence = $raw | ConvertFrom-Json } catch { return Refuse 'evidence_malformed' }
+
+        if ($evidence.resultKind -ne 'guest-provisioning') { return Refuse 'evidence_wrong_kind' }
+        if (-not [string]::Equals($evidence.runId, $expectedRunId, [System.StringComparison]::Ordinal)) {
+            return Refuse 'evidence_run_id_mismatch'
+        }
+        # The file name does not establish the phase. A validate document written
+        # to the install path would otherwise satisfy both reads.
+        if ($evidence.payload.phase -ne $phase.Name) { return Refuse 'evidence_wrong_phase' }
+
+        $inconsistency = Test-GuestEvidenceConsistency -Evidence $evidence
+        if ($inconsistency) { return Refuse $inconsistency }
+
+        $documents[$phase.Name] = $evidence
+    }
+
+    $pairReason = Test-GuestEvidencePairConsistency `
+        -InstallEvidence $documents['install'] -ValidateEvidence $documents['validate']
+    if ($pairReason) { return Refuse $pairReason }
+
+    foreach ($phase in 'install', 'validate') {
+        $evidence = $documents[$phase]
+
+        if ($evidence.outcome -ne 'passed') { return Refuse "${phase}_not_passed" }
+
+        # A required package that did not pass is refused, but not here:
+        # Test-GuestEvidenceConsistency already rejects a passed result carrying
+        # one, and a result that is not passed was refused above. Mutation
+        # testing confirmed a rule here could not fire, so it is stated rather
+        # than written -- a check that cannot fail reads as a control while
+        # doing nothing, and invites the reader to stop looking for the one that
+        # works.
+    }
+
+    # A restart still outstanding means the machine is not in the state the
+    # validation observed, and generalizing it would seal that half-applied
+    # state into the image.
+    if ($documents['validate'].payload.restartRequired) { return Refuse 'restart_still_required' }
+
+    [PSCustomObject]@{ Authorized = $true; ReasonCode = $null }
+}
+
 function Remove-GuestBundle {
     <#
     .SYNOPSIS
@@ -768,4 +861,4 @@ function Invoke-GuestProvisioning {
         })
 }
 
-Export-ModuleMember -Function Test-RestartAuthorization, Test-CleanupAuthorization, Invoke-GuestCleanup, Get-NormalizedInstallerResult, Get-InstallerInvocation, Invoke-PackageValidation, Invoke-GuestProvisioning, Remove-GuestBundle
+Export-ModuleMember -Function Test-RestartAuthorization, Test-CleanupAuthorization, Test-ProvisioningComplete, Invoke-GuestCleanup, Get-NormalizedInstallerResult, Get-InstallerInvocation, Invoke-PackageValidation, Invoke-GuestProvisioning, Remove-GuestBundle

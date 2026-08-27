@@ -253,12 +253,12 @@ Describe 'the host orchestration entry point' {
     It 'invokes packer and captures the exit code itself' {
         # A script that accepts "the build succeeded" as a parameter will
         # eventually be handed that value by something that did not check.
-        # The exit code is the callback's return value now, because the build
-        # runs inside the answer-file rendering scope: $LASTEXITCODE is emitted
-        # from the scriptblock and lands in $packerExitCode.
-        $script:Entry | Should -Match '& packer @arguments'
-        $script:Entry | Should -Match '\$packerExitCode = Invoke-WithRenderedAnswerFile'
-        $script:Entry | Should -Match '(?m)^\s*\$LASTEXITCODE\s*$'
+        # The build runs inside the answer-file rendering scope, and the exit
+        # code is the callback's return value. Invoke-PackerBuild keeps the
+        # output and the code apart, so what comes back is one integer.
+        $script:Entry | Should -Match 'Invoke-PackerBuild -Arguments \$arguments'
+        $script:Entry | Should -Match '\[int\] \$packerExitCode = Invoke-WithRenderedAnswerFile'
+        $script:Entry | Should -Match '\[int\] \$build\.ExitCode'
     }
 
     It 'accepts no build result, provenance, or identity from its caller' {
@@ -306,16 +306,21 @@ Describe 'the host orchestration entry point' {
         $script:Entry | Should -Match '-PackerSucceeded \(\$packerExitCode -eq 0\)'
     }
 
-    It 'takes the password from the environment, never a parameter' {
+    It 'takes both passwords from the environment, never a parameter' {
         # A parameter is visible to anything enumerating processes and lands in
         # shell history.
-        $script:Entry | Should -Match '\$env:VDIIAC_VCENTER_PASSWORD'
-        $script:Entry | Should -Not -Match '\$VCenterPassword'
+        $parameters = [regex]::Match($script:Entry, '(?s)^param\((?<p>.*?)^\)', 'Multiline')
+        foreach ($secret in 'VDIIAC_VCENTER_PASSWORD', 'VDIIAC_BUILD_PASSWORD') {
+            $script:Entry | Should -Match $secret
+        }
+        $parameters.Groups['p'].Value | Should -Not -Match 'Password'
     }
 
-    It 'clears the secret from the process and the environment' {
-        $script:Entry | Should -Match 'Remove-Variable -Name secret'
-        $script:Entry | Should -Match '\$env:VDIIAC_VCENTER_PASSWORD = \$null'
+    It 'clears each environment variable as it reads it' {
+        # One helper reads and clears, so neither secret can be read without
+        # being cleared -- and anything this process starts inherits nothing.
+        $script:Entry | Should -Match 'function ProtectSecret'
+        $script:Entry | Should -Match '\[System\.Environment\]::SetEnvironmentVariable\(\$Name, \$null\)'
     }
 
     It 'checks the platform module before attempting anything' {
@@ -448,7 +453,7 @@ Describe 'the answer file is rendered, not uploaded as a template' {
     }
 
     It 'takes the build password from the environment' {
-        $script:EntryCode | Should -Match '\$env:VDIIAC_BUILD_PASSWORD'
+        $script:EntryCode | Should -Match 'VDIIAC_BUILD_PASSWORD'
         $parameters = [regex]::Match($script:EntryCode, '(?s)^param\((?<p>.*?)^\)', 'Multiline')
         $parameters.Groups['p'].Value | Should -Not -Match 'Password'
     }
@@ -549,5 +554,106 @@ Describe 'a failed build leaves its machine for reconciliation' {
         # unconfirmed-artifact record exists to point at.
         $script:EntryCode | Should -Match "'-on-error=abort'"
         $script:EntryCode | Should -Not -Match "'-on-error=cleanup'"
+    }
+}
+
+Describe 'the Packer exit code is a scalar' {
+
+    BeforeAll {
+        Import-Module (Join-Path $script:CiScripts 'LabEvidence.psm1') -Force
+
+        function FakePacker {
+            # A real build writes a great deal to stdout and stderr. The fake
+            # does the same, because the defect being guarded against only
+            # appears when output and the exit code share a pipeline.
+            param([int] $ExitCode)
+            @(
+                '-NoProfile', '-NonInteractive', '-Command',
+                "Write-Output 'building'; Write-Output 'still building'; " +
+                "[Console]::Error.WriteLine('a warning'); exit $ExitCode"
+            )
+        }
+    }
+
+    It 'returns an integer when the build succeeds, despite the output' {
+        # Letting packer write to the success pipeline makes the callback return
+        # a build log with an exit code on the end, and $packerExitCode becomes
+        # an array that compares equal to nothing.
+        $result = Invoke-PackerBuild -Arguments (FakePacker -ExitCode 0) -Executable 'pwsh'
+
+        ([int] $result.ExitCode) | Should -BeOfType [int]
+        [int] $result.ExitCode | Should -Be 0
+        @($result.Output).Count | Should -BeGreaterThan 1
+    }
+
+    It 'returns an integer when the build fails' {
+        $result = Invoke-PackerBuild -Arguments (FakePacker -ExitCode 7) -Executable 'pwsh'
+
+        [int] $result.ExitCode | Should -Be 7
+        @($result.Output) | Should -Not -BeNullOrEmpty
+    }
+
+    It 'keeps the output out of the exit code' {
+        # The property the entry point depends on: one scalar, whatever the
+        # build printed.
+        foreach ($code in 0, 1, 7) {
+            $result = Invoke-PackerBuild -Arguments (FakePacker -ExitCode $code) -Executable 'pwsh'
+            @([int] $result.ExitCode).Count | Should -Be 1
+            [int] $result.ExitCode | Should -Be $code
+        }
+    }
+
+    It 'the entry point routes output away from its result' {
+        $script:EntryCode | Should -Match 'Invoke-PackerBuild -Arguments \$arguments'
+        $script:EntryCode | Should -Match '\$build\.Output \| ForEach-Object \{ Write-Information'
+        $script:EntryCode | Should -Match '\[int\] \$build\.ExitCode'
+        $script:EntryCode | Should -Not -Match '(?m)^\s*& packer @arguments\s*$'
+    }
+}
+
+Describe 'both secrets are read before the build, and reach it the same way' {
+
+    It 'reads both before Packer runs' {
+        # Packer needs the vCenter password to create the machine. Reading it
+        # only after the build exits left a real run two options: fail, or put
+        # the password in the var file.
+        $buildIndex = $script:EntryCode.IndexOf('Invoke-WithRenderedAnswerFile')
+        foreach ($secret in 'VDIIAC_BUILD_PASSWORD', 'VDIIAC_VCENTER_PASSWORD') {
+            $read = $script:EntryCode.IndexOf($secret)
+            $read | Should -BeGreaterThan 0 -Because "$secret must be read"
+            $read | Should -BeLessThan $buildIndex -Because "$secret must be read before the build"
+        }
+    }
+
+    It 'clears each environment variable as soon as it is read' {
+        # Anything this process starts afterwards inherits nothing.
+        $script:EntryCode | Should -Match '\[System\.Environment\]::SetEnvironmentVariable\(\$Name, \$null\)'
+    }
+
+    It 'passes both to Packer through PKR_VAR_ and clears both afterwards' {
+        foreach ($variable in 'PKR_VAR_build_password', 'PKR_VAR_vcenter_password') {
+            $script:EntryCode | Should -Match ('[$]env:' + $variable + ' =')
+            $script:EntryCode | Should -Match ('[$]env:' + $variable + ' =')
+        }
+    }
+
+    It 'gives Packer the platform the seal will connect to' {
+        # Left to the var file, construction and sealing could target different
+        # vCenters, and the seal would look for a machine on a server the build
+        # never touched.
+        foreach ($name in 'vcenter_server', 'vcenter_username', 'vcenter_insecure_connection') {
+            $script:EntryCode | Should -Match ('-var., .' + $name + '=')
+        }
+    }
+
+    It 'refuses a variable file that assigns either secret' {
+        # A file setting one would silently win or lose against the environment
+        # depending on precedence, and it lives on disk.
+        $script:EntryCode | Should -Match "foreach \(\`$forbidden in 'build_password', 'vcenter_password'\)"
+        $script:EntryCode | Should -Match 'Secrets are supplied through the environment only'
+    }
+
+    It 'seals with the credential the build authenticated with' {
+        $script:EntryCode | Should -Match '\[pscredential\]::new\(\$VCenterUsername, \$vcenterPassword\)'
     }
 }

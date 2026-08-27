@@ -905,3 +905,69 @@ Describe 'no phase passes for want of a file' {
             Should -Not -Be 'sealed'
     }
 }
+
+Describe 'a bounded phase document belongs to its slot' {
+
+    It 'refuses a passed document for a different phase' {
+        # A passed pre-generalization document copied over the credential-residue
+        # file satisfied both slots, so one phase's evidence stood in for
+        # another's and the seal counted it twice.
+        $runId = Get-RunIdentifier
+        $root = NewEvidenceRoot -RunId $runId -Override @{
+            'credential-residue-guest-evidence.json' =
+                (@{ name = 'pre-generalization'; outcome = 'passed'; reasonCode = $null } | ConvertTo-Json)
+        }
+
+        (Phases -Root $root -RunId $runId | Where-Object name -EQ 'credential-residue').outcome |
+            Should -Be 'failed'
+    }
+
+    It 'refuses a document carrying an unexpected field' {
+        # It was written by something other than ConvertTo-ImageBuildPhase, and
+        # what else it carries is unknown.
+        $runId = Get-RunIdentifier
+        $root = NewEvidenceRoot -RunId $runId -Override @{
+            'pre-generalization-guest-evidence.json' =
+                (@{ name = 'pre-generalization'; outcome = 'passed'; reasonCode = $null; extra = 'x' } | ConvertTo-Json)
+        }
+
+        (Phases -Root $root -RunId $runId | Where-Object name -EQ 'pre-generalization').outcome |
+            Should -Be 'failed'
+    }
+
+    It 'refuses a document missing a required field' {
+        $runId = Get-RunIdentifier
+        $root = NewEvidenceRoot -RunId $runId -Override @{
+            'pre-generalization-guest-evidence.json' = (@{ name = 'pre-generalization'; outcome = 'passed' } | ConvertTo-Json)
+        }
+
+        (Phases -Root $root -RunId $runId | Where-Object name -EQ 'pre-generalization').outcome |
+            Should -Be 'failed'
+    }
+
+    It 'refuses a passed document that also names a failure' {
+        # The same coupling every other bounded result carries.
+        $runId = Get-RunIdentifier
+        $root = NewEvidenceRoot -RunId $runId -Override @{
+            'pre-generalization-guest-evidence.json' =
+                (@{ name = 'pre-generalization'; outcome = 'passed'; reasonCode = 'pre_generalization_failed' } | ConvertTo-Json)
+        }
+
+        (Phases -Root $root -RunId $runId | Where-Object name -EQ 'pre-generalization').outcome |
+            Should -Be 'failed'
+    }
+
+    It 'accepts the document the pre-seal step actually writes' {
+        # The positive case, through the real reducer, so the rules above are
+        # not passing for want of a document that could ever succeed.
+        Import-Module (Join-Path $script:RepoRoot 'source-qualification' 'scripts' 'PreGeneralization.psm1') -Force
+
+        $phaseResult = [PSCustomObject]@{
+            Phase = 'pre-generalization'; Outcome = 'passed'; ReasonCode = $null; Checks = @()
+        }
+        $document = ConvertTo-ImageBuildPhase -PhaseResult $phaseResult
+
+        Test-BuildPhaseDocument -Document ([PSCustomObject] $document) -ExpectedPhase 'pre-generalization' |
+            Should -BeNullOrEmpty
+    }
+}

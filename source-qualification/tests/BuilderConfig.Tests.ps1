@@ -323,7 +323,11 @@ Describe 'the build seals what it constructed' {
         # provisioned VM into an image is absent and unimplemented.
         $script:Configuration | Should -Not -Match 'Sysprep\.exe'
         $script:Configuration | Should -Not -Match 'Remove-SetupResidue'
-        $script:Build | Should -Match 'STAGE 5 STEPS 1 AND 2 ONLY'
+        $script:Build | Should -Match 'THE COMPLETE GUEST PATH'
+        # The comment has to keep saying what the file does. A marker naming
+        # steps the build has since grown past is worse than none, because it
+        # tells the next reader the wrong boundary.
+        $script:Build | Should -Not -Match 'STEPS 1 AND 2 ONLY'
     }
 
     It 'reuses the Increment 2 entry point rather than a parallel format' {

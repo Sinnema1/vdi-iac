@@ -51,6 +51,7 @@ foreach ($module in 'RunIdentity', 'PackageManifest', 'MediaQualification', 'Ans
     Import-Module (Join-Path $scripts "$module.psm1") -Force
 }
 Import-Module (Join-Path $PSScriptRoot 'Sealing.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'LabEvidence.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'VSpherePlatform.psm1') -Force
 
 # ---------------------------------------------------------------------------
@@ -127,19 +128,43 @@ if ($bundle.Outcome -ne 'passed') {
 Write-Information "bundle $($bundle.DescriptorSha256)" -InformationAction Continue
 
 # ---------------------------------------------------------------------------
-# The build password, from the environment. Never a parameter, never in the var
-# file, never on a command line: all three are readable by anything that can
-# list processes or read the working tree.
+# Both runtime secrets, read before anything launches. Packer needs the vCenter
+# password to create the machine, so reading it only after the build exits would
+# leave a real run with two options: fail, or put the password in the var file.
+# Neither is acceptable, and both were possible before.
+#
+# Never a parameter, never in the var file, never on a command line: all three
+# are readable by anything that can list processes or read the working tree.
 # ---------------------------------------------------------------------------
-$buildSecret = $env:VDIIAC_BUILD_PASSWORD
-if ([string]::IsNullOrEmpty($buildSecret)) {
-    Write-Error 'VDIIAC_BUILD_PASSWORD is not set. The build password is never accepted as an argument.'
-    exit 2
+function ProtectSecret {
+    param([string] $Name)
+    $value = [System.Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrEmpty($value)) {
+        Write-Error "$Name is not set. Secrets are never accepted as arguments."
+        exit 2
+    }
+    # Appended character by character rather than converted from plaintext, and
+    # the environment variable is cleared as soon as it has been read: anything
+    # this process starts afterwards inherits nothing.
+    $protected = [securestring]::new()
+    foreach ($character in $value.ToCharArray()) { $protected.AppendChar($character) }
+    $protected.MakeReadOnly()
+    [System.Environment]::SetEnvironmentVariable($Name, $null)
+    $protected
 }
-$buildPassword = [securestring]::new()
-foreach ($character in $buildSecret.ToCharArray()) { $buildPassword.AppendChar($character) }
-$buildPassword.MakeReadOnly()
-Remove-Variable -Name buildSecret -ErrorAction SilentlyContinue
+
+$buildPassword = ProtectSecret -Name 'VDIIAC_BUILD_PASSWORD'
+$vcenterPassword = ProtectSecret -Name 'VDIIAC_VCENTER_PASSWORD'
+
+# The var file must not carry either. A file that set one would silently win or
+# lose against the environment depending on precedence, and it lives on disk.
+$varFileText = Get-Content -LiteralPath $VarFile -Raw -ErrorAction SilentlyContinue
+foreach ($forbidden in 'build_password', 'vcenter_password') {
+    if ($varFileText -match "(?m)^\s*$forbidden\s*=") {
+        Write-Error "The variable file assigns $forbidden. Secrets are supplied through the environment only."
+        exit 2
+    }
+}
 
 $variables = ConvertTo-BuildVariableSet -QualifiedMedia $qualified -Declaration $declaration `
     -Hardware $Hardware -AnswerFilePath 'rendered-at-build-time' -RunId $runId
@@ -163,14 +188,22 @@ $invocation = @{
     MediaRecord    = $mediaRecordPath
     EvidenceRoot   = $evidenceRoot
     BuildDirectory = (Join-Path $PSScriptRoot '..' '..' 'packer' 'builds')
-    Password       = $buildPassword
+    BuildPassword  = $buildPassword
+    VCenter        = @{
+        Server   = $VCenterServer
+        Username = $VCenterUsername
+        Insecure = $InsecureConnection
+        Password = $vcenterPassword
+    }
 }
 
-$packerExitCode = 1
+[int] $packerExitCode = 1
 $answerFileRendered = $false
 
 if ($PSCmdlet.ShouldProcess($CandidateName, 'Build and seal a candidate image')) {
-    $packerExitCode = Invoke-WithRenderedAnswerFile -Declaration $declaration `
+    # Explicitly an integer. The callback returns everything its body emits, so
+    # a scalar is asserted here rather than assumed.
+    [int] $packerExitCode = Invoke-WithRenderedAnswerFile -Declaration $declaration `
         -Secrets @{ ADMINISTRATOR_PASSWORD = $buildPassword } -ScriptBlock {
         param($RenderedPath)
 
@@ -192,26 +225,33 @@ if ($PSCmdlet.ShouldProcess($CandidateName, 'Build and seal a candidate image'))
             '-var', "descriptor_sha256=$($invocation.DescriptorHash)"
             '-var', "media_qualification_record_path=$($invocation.MediaRecord)"
             '-var', "evidence_output_dir=$($invocation.EvidenceRoot)"
+            # The same platform the seal will connect to. Left to the var file,
+            # construction and sealing could target different vCenters, and the
+            # seal would look for a machine on a server the build never touched.
+            '-var', "vcenter_server=$($invocation.VCenter.Server)"
+            '-var', "vcenter_username=$($invocation.VCenter.Username)"
+            '-var', "vcenter_insecure_connection=$($invocation.VCenter.Insecure.ToString().ToLowerInvariant())"
             $invocation.BuildDirectory
         )
 
-        # The password reaches Packer through PKR_VAR_, not an argument. A -var
-        # on the command line is visible to anything enumerating processes, and
-        # the var file is on disk.
-        $env:PKR_VAR_build_password = [System.Net.NetworkCredential]::new('', $invocation.Password).Password
+        # Both passwords reach Packer through PKR_VAR_, not arguments, and both
+        # are cleared in the finally whatever happens. A -var on the command
+        # line is visible to anything enumerating processes.
+        $env:PKR_VAR_build_password = [System.Net.NetworkCredential]::new('', $invocation.BuildPassword).Password
+        $env:PKR_VAR_vcenter_password = [System.Net.NetworkCredential]::new('', $invocation.VCenter.Password).Password
         try {
-            # ErrorActionPreference is lowered deliberately: a native command's
-            # stderr becomes a terminating error under Stop, and packer writes
-            # progress there.
-            $previous = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
-            try {
-                & packer @arguments
-                $LASTEXITCODE
-            }
-            finally { $ErrorActionPreference = $previous }
+            # Output goes to the host, not into this scriptblock's result. The
+            # callback returns whatever its body emits, so letting packer write
+            # to the success pipeline would make the exit code an array with a
+            # build log in front of it.
+            $build = Invoke-PackerBuild -Arguments $arguments
+            $build.Output | ForEach-Object { Write-Information $_ -InformationAction Continue }
+            [int] $build.ExitCode
         }
-        finally { $env:PKR_VAR_build_password = $null }
+        finally {
+            $env:PKR_VAR_build_password = $null
+            $env:PKR_VAR_vcenter_password = $null
+        }
     }
 
     $answerFileRendered = $true
@@ -232,17 +272,9 @@ $phases = Read-BuildPhaseEvidence -EvidenceRoot $evidenceRoot -RunId $runId `
 # ---------------------------------------------------------------------------
 # Sealing.
 # ---------------------------------------------------------------------------
-$secret = $env:VDIIAC_VCENTER_PASSWORD
-if ([string]::IsNullOrEmpty($secret)) {
-    Write-Error 'VDIIAC_VCENTER_PASSWORD is not set. The vCenter password is never accepted as an argument.'
-    exit 2
-}
-$protected = [securestring]::new()
-foreach ($character in $secret.ToCharArray()) { $protected.AppendChar($character) }
-$protected.MakeReadOnly()
-$credential = [pscredential]::new($VCenterUsername, $protected)
-Remove-Variable -Name secret -ErrorAction SilentlyContinue
-$env:VDIIAC_VCENTER_PASSWORD = $null
+# Read and protected before the build ran, so the same value the build
+# authenticated with is the one the seal uses.
+$credential = [pscredential]::new($VCenterUsername, $vcenterPassword)
 
 $prerequisite = Test-VSpherePrerequisite
 if (-not $prerequisite.Satisfied) {

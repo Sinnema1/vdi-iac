@@ -60,6 +60,61 @@ $script:PhasesBeforeGeneralization = @(
     'provisioning', 'pre-generalization', 'credential-residue'
 )
 
+function Test-BuildPhaseDocument {
+    <#
+    .SYNOPSIS
+        Returns a reason a bounded phase result is unusable, or null.
+
+    .DESCRIPTION
+        A bounded phase result was accepted on its outcome alone, so a passed
+        pre-generalization document copied over the credential-residue file
+        satisfied both slots -- and one phase's evidence stood in for another's.
+        The name has to match the slot it was read from.
+
+        The shape is closed for the same reason the payloads are: a document
+        carrying extra fields was written by something other than
+        ConvertTo-ImageBuildPhase, and what else it carries is unknown.
+
+    .OUTPUTS
+        A reason, or null when the document is a valid result for that phase.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] $Document,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ExpectedPhase
+    )
+
+    $fields = @($Document.PSObject.Properties.Name)
+    $expected = @('name', 'outcome', 'reasonCode')
+
+    foreach ($field in $expected) {
+        if ($fields -notcontains $field) { return "the document has no '$field'" }
+    }
+    foreach ($field in $fields) {
+        if ($expected -notcontains $field) { return "the document carries an unexpected field '$field'" }
+    }
+
+    if ($Document.name -ne $ExpectedPhase) {
+        return "the document reports phase '$($Document.name)' in the slot for '$ExpectedPhase'"
+    }
+    if ($Document.outcome -notin @('passed', 'failed')) {
+        return "the document reports an unknown outcome '$($Document.outcome)'"
+    }
+
+    # Outcome and reason must agree, the same coupling every other bounded
+    # result in this repository carries.
+    if ($Document.outcome -eq 'passed' -and $Document.reasonCode) {
+        return 'a passed phase carries a reason code'
+    }
+    if ($Document.outcome -eq 'failed' -and -not $Document.reasonCode) {
+        return 'a failed phase carries no reason code'
+    }
+    if ($Document.outcome -ne 'passed') { return "the phase reported '$($Document.outcome)'" }
+
+    $null
+}
+
 function Read-BuildPhaseEvidence {
     <#
     .SYNOPSIS
@@ -129,17 +184,15 @@ function Read-BuildPhaseEvidence {
 
         # A guest-provisioning envelope is validated against its contract. The
         # bounded phase results the pre-seal steps write are a smaller shape and
-        # carry their own outcome.
+        # are checked by the rules below.
         $outcome = if ($document.PSObject.Properties.Name -contains 'resultKind') {
             if (-not (Test-Json -Json $raw -SchemaFile $SchemaPath -ErrorAction SilentlyContinue)) { 'failed' }
             elseif (-not [string]::Equals([string]$document.runId, $expectedRunId, [System.StringComparison]::Ordinal)) { 'failed' }
             elseif ($document.outcome -ne 'passed') { 'failed' }
             else { 'passed' }
         }
-        elseif ($document.PSObject.Properties.Name -contains 'outcome') {
-            if ($document.outcome -eq 'passed') { 'passed' } else { 'failed' }
-        }
-        else { 'failed' }
+        elseif (Test-BuildPhaseDocument -Document $document -ExpectedPhase $phase) { 'failed' }
+        else { 'passed' }
 
         [PSCustomObject]@{ name = $phase; outcome = $outcome }
     })
@@ -544,4 +597,4 @@ function Unconfirmed {
     }
 }
 
-Export-ModuleMember -Function Read-BuildPhaseEvidence, Invoke-CandidateSealing
+Export-ModuleMember -Function Test-BuildPhaseDocument, Read-BuildPhaseEvidence, Invoke-CandidateSealing

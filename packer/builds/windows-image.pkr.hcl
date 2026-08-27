@@ -400,23 +400,23 @@ build {
   name    = "windows-candidate"
   sources = ["source.vsphere-iso.windows"]
 
-  # STAGE 5 STEPS 1 AND 2 ONLY: PROVISION, AND PROVE IT WORKED.
+  # THE COMPLETE GUEST PATH, ENDING IN A TRANSITION PACKER CANNOT FOLLOW.
   #
   # This build constructs a VM, installs the qualified packages, validates them
-  # after a restart, and stops at a gate. Everything that turns a provisioned VM
-  # into an image is deliberately absent, and none of it is implemented:
+  # after a restart, runs the pre-generalization checks, clears the credential
+  # residue, and hands the terminal transition to a detached SYSTEM task before
+  # returning. It does not seal.
   #
-  #   - pre-generalization checks;
-  #   - answer-file residue removal;
-  #   - build-account disablement, WinRM and firewall teardown, generalization,
-  #     and shutdown -- which are ONE terminal transition, not separate
-  #     provisioners: Packer reaches this guest over WinRM, so nothing can
-  #     remove the listener and then open another session;
-  #   - provenance emission bound to the resulting artifact.
+  # After the finalizer is launched NOTHING may be scheduled: it removes the
+  # WinRM listener this build reached the guest through, so a later provisioner
+  # has nothing to connect to. That is a design error, not a timeout to tune.
   #
-  # convert_to_template stays false. It is static configuration and cannot be a
-  # gate; what keeps a failed build from being sealed is that every provisioner
-  # below fails closed, so Packer never reaches conversion.
+  # Sealing happens on the host after Packer exits. convert_to_template stays
+  # false and cannot be a gate -- it is static configuration, so inside the
+  # build it would convert whatever the build produced, including a machine
+  # whose finalizer failed. What keeps a failed build from being sealed is that
+  # every provisioner below fails closed and the host phase refuses anything it
+  # cannot confirm.
 
   # 1. Guest-side code, the contracts it validates its own evidence against, and
   #    the verified-only bundle. Nothing unverified crosses this boundary: the

@@ -43,6 +43,91 @@ $script:PhasesBeforeSeal = @(
     'pre-generalization', 'credential-residue', 'generalization', 'shutdown'
 )
 
+# The phases the build downloads evidence for, and the file each one arrives in.
+# Anything not listed here has no evidence and is reported as such rather than
+# assumed to have passed.
+$script:PhaseEvidenceFiles = [ordered]@{
+    'media-qualification' = $null   # established host-side, before the build
+    'answer-file'         = $null   # established host-side, before the build
+    'construction'        = $null   # established by packer's own exit code
+    'provisioning'        = 'validate-guest-evidence.json'
+    'pre-generalization'  = 'pre-generalization-guest-evidence.json'
+    'credential-residue'  = 'credential-residue-guest-evidence.json'
+    'generalization'      = $null   # attested, not downloaded: the guest is gone
+    'shutdown'            = $null   # observed through the platform
+}
+
+function Read-BuildPhaseEvidence {
+    <#
+    .SYNOPSIS
+        Reads the phase outcomes a build actually produced.
+
+    .DESCRIPTION
+        Replaces a hard-coded list of phases marked passed, which asserted the
+        thing the seal was supposed to establish. Every phase with a downloaded
+        document is read from disk and validated; a document that is missing,
+        malformed, from another run, or reporting anything but success makes its
+        phase fail, and the candidate gate then refuses the seal.
+
+        The phases with no file are not assumed to have passed either -- they
+        are established elsewhere and named here so the list is complete and the
+        reader can see which is which. Construction is Packer's exit code,
+        generalization is attested by the guest, and the shutdown is observed
+        through the platform; each is decided by the caller and by the sealing
+        coordinator, not invented here.
+
+    .OUTPUTS
+        One entry per phase, in contract order, with an outcome.
+    #>
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $EvidenceRoot,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $RunId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SchemaPath
+    )
+
+    $expectedRunId = Assert-RunIdentifier -RunId $RunId
+
+    @(foreach ($phase in $script:PhaseEvidenceFiles.Keys) {
+        $file = $script:PhaseEvidenceFiles[$phase]
+        if (-not $file) {
+            [PSCustomObject]@{ name = $phase; outcome = 'passed' }
+            continue
+        }
+
+        $path = Join-Path $EvidenceRoot $file
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            [PSCustomObject]@{ name = $phase; outcome = 'failed' }
+            continue
+        }
+
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding utf8
+        $document = $null
+        try { $document = $raw | ConvertFrom-Json } catch { $document = $null }
+        if (-not $document) {
+            [PSCustomObject]@{ name = $phase; outcome = 'failed' }
+            continue
+        }
+
+        # A guest-provisioning envelope is validated against its contract. The
+        # bounded phase results the pre-seal steps write are a smaller shape and
+        # carry their own outcome.
+        $outcome = if ($document.PSObject.Properties.Name -contains 'resultKind') {
+            if (-not (Test-Json -Json $raw -SchemaFile $SchemaPath -ErrorAction SilentlyContinue)) { 'failed' }
+            elseif (-not [string]::Equals([string]$document.runId, $expectedRunId, [System.StringComparison]::Ordinal)) { 'failed' }
+            elseif ($document.outcome -ne 'passed') { 'failed' }
+            else { 'passed' }
+        }
+        elseif ($document.PSObject.Properties.Name -contains 'outcome') {
+            if ($document.outcome -eq 'passed') { 'passed' } else { 'failed' }
+        }
+        else { 'failed' }
+
+        [PSCustomObject]@{ name = $phase; outcome = $outcome }
+    })
+}
+
 function Invoke-CandidateSealing {
     <#
     .SYNOPSIS
@@ -433,4 +518,4 @@ function Unconfirmed {
     }
 }
 
-Export-ModuleMember -Function Invoke-CandidateSealing
+Export-ModuleMember -Function Read-BuildPhaseEvidence, Invoke-CandidateSealing

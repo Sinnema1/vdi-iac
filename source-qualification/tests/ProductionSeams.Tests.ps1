@@ -31,7 +31,7 @@ Describe 'the production files parse' {
         @{ file = 'packer/scripts/guest/Invoke-Finalization.ps1' }
         @{ file = 'packer/scripts/guest/Start-DetachedFinalizer.ps1' }
         @{ file = 'scripts/ci/VSpherePlatform.psm1' }
-        @{ file = 'scripts/ci/Invoke-Sealing.ps1' }
+        @{ file = 'scripts/ci/Invoke-ImageBuild.ps1' }
     ) {
         # These cannot be executed here, so parsing is the only check that they
         # are code at all rather than plausible-looking text.
@@ -237,17 +237,62 @@ Describe 'the vSphere platform adapter' {
     }
 }
 
-Describe 'the sealing entry point' {
+Describe 'the host orchestration entry point' {
 
     BeforeAll {
-        $script:Entry = CodeOf -Path (Join-Path $script:CiScripts 'Invoke-Sealing.ps1')
+        $script:Entry = CodeOf -Path (Join-Path $script:CiScripts 'Invoke-ImageBuild.ps1')
     }
 
-    It 'derives success from the Packer exit code' {
-        # A wrapper passing a flag would let a failed build be sealed by a
-        # script that forgot to check.
-        $script:Entry | Should -Match '\$packerSucceeded = \(\$PackerExitCode -eq 0\)'
-        $script:Entry | Should -Not -Match '\[bool\] \$PackerSucceeded'
+    It 'invokes packer and captures the exit code itself' {
+        # A script that accepts "the build succeeded" as a parameter will
+        # eventually be handed that value by something that did not check.
+        $script:Entry | Should -Match '& packer @arguments'
+        $script:Entry | Should -Match '\$packerExitCode = \$LASTEXITCODE'
+    }
+
+    It 'accepts no build result, provenance, or identity from its caller' {
+        # The previous seam let a caller assert every fact the seal reports.
+        foreach ($forbidden in 'PackerExitCode', 'PackerSucceeded', 'RecipeDigest',
+                               'RecipeInputVersion', 'ManifestSchemaVersion', 'MediaId',
+                               'StartedUtc', '\$RunId', '\$Nonce') {
+            $parameters = [regex]::Match($script:Entry, '(?s)^param\((?<p>.*?)^\)', 'Multiline')
+            $parameters.Groups['p'].Value | Should -Not -Match $forbidden `
+                -Because "$forbidden must be derived, not supplied"
+        }
+    }
+
+    It 'generates and records the run identity before anything runs' {
+        # A run that crashes before its first provisioner still leaves a record
+        # of what it was.
+        $script:Entry | Should -Match '\$runId = Get-RunIdentifier'
+        $script:Entry | Should -Match '\$nonce = Get-FinalizationNonce'
+        $script:Entry | Should -Match "Set-Content -LiteralPath \(Join-Path \`$runRoot 'run.json'\)"
+    }
+
+    It 'computes the recipe digest rather than accepting one' {
+        # A supplied digest is a claim about inputs nobody re-read.
+        $script:Entry | Should -Match 'ConvertTo-RecipeInput'
+        $script:Entry | Should -Match 'Get-RecipeDigest -RecipeInput \$recipe'
+    }
+
+    It 'qualifies and re-verifies the media itself' {
+        $script:Entry | Should -Match 'Invoke-MediaQualification'
+        $script:Entry | Should -Match 'Assert-QualifiedMedia'
+    }
+
+    It 'checks the tooling version agrees before building' {
+        $script:Entry | Should -Match 'Test-ToolsVersionAgreement'
+    }
+
+    It 'reads the phase evidence the build downloaded' {
+        # A hard-coded list of passed phases asserted the thing the seal exists
+        # to establish.
+        $script:Entry | Should -Match 'Read-BuildPhaseEvidence'
+        $script:Entry | Should -Not -Match "outcome = 'passed' \}"
+    }
+
+    It 'derives success from the exit code it captured' {
+        $script:Entry | Should -Match '-PackerSucceeded \(\$packerExitCode -eq 0\)'
     }
 
     It 'takes the password from the environment, never a parameter' {

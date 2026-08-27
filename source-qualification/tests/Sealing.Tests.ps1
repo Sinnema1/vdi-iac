@@ -743,3 +743,112 @@ Describe 'persistence is never reported from the writer alone' {
         $result.Provenance | Should -BeNullOrEmpty
     }
 }
+
+Describe 'phase outcomes are read, not asserted' {
+
+    BeforeAll {
+        $script:PhaseSchema = Join-Path $script:RepoRoot 'contracts' 'evidence-envelope-2.schema.json'
+
+        function NewEvidenceRoot {
+            param([string] $RunId, [hashtable] $Override = @{})
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+            $null = New-Item -ItemType Directory -Path $root -Force
+
+            $guest = @{
+                resultSchemaVersion = 2; resultKind = 'guest-provisioning'
+                runId = $RunId; manifestSchemaVersion = 2
+                startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+                outcome = 'passed'
+                payload = @{
+                    phase = 'validate'; restartRequired = $false
+                    packageCount = 1; passedCount = 1; failedRequiredCount = 0
+                    installerAttemptCount = 1; cleanupOutcome = 'removed'
+                    packages = @(@{ id = 'a'; version = '1.0.0'; order = 1; required = $true
+                                    outcome = 'passed'; reasonCode = $null
+                                    restartRequired = $false; installerAttempted = $true })
+                }
+            }
+            $guest | ConvertTo-Json -Depth 12 |
+                Set-Content -LiteralPath (Join-Path $root 'validate-guest-evidence.json') -Encoding utf8
+
+            foreach ($phase in 'pre-generalization', 'credential-residue') {
+                @{ name = $phase; outcome = 'passed'; reasonCode = $null } | ConvertTo-Json |
+                    Set-Content -LiteralPath (Join-Path $root "$phase-guest-evidence.json") -Encoding utf8
+            }
+
+            foreach ($key in $Override.Keys) {
+                $path = Join-Path $root $key
+                if ($null -eq $Override[$key]) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+                else { $Override[$key] | Set-Content -LiteralPath $path -Encoding utf8 }
+            }
+            $root
+        }
+
+        function Phases {
+            param([string] $Root, [string] $RunId)
+            Read-BuildPhaseEvidence -EvidenceRoot $Root -RunId $RunId -SchemaPath $script:PhaseSchema
+        }
+    }
+
+    It 'reports every contract phase, in order' {
+        $runId = Get-RunIdentifier
+        @(Phases -Root (NewEvidenceRoot -RunId $runId) -RunId $runId | ForEach-Object { $_.name }) |
+            Should -Be @('media-qualification', 'answer-file', 'construction', 'provisioning',
+                         'pre-generalization', 'credential-residue', 'generalization', 'shutdown')
+    }
+
+    It 'passes when every downloaded document reports success' {
+        $runId = Get-RunIdentifier
+        @(Phases -Root (NewEvidenceRoot -RunId $runId) -RunId $runId | Where-Object outcome -NE 'passed') |
+            Should -BeNullOrEmpty
+    }
+
+    It 'fails a phase whose evidence is missing' {
+        # A hard-coded list of passed phases asserted the thing the seal was
+        # supposed to establish. An absent document is not a pass.
+        $runId = Get-RunIdentifier
+        $root = NewEvidenceRoot -RunId $runId -Override @{ 'pre-generalization-guest-evidence.json' = $null }
+
+        (Phases -Root $root -RunId $runId | Where-Object name -EQ 'pre-generalization').outcome |
+            Should -Be 'failed'
+    }
+
+    It 'fails a phase whose evidence is malformed' {
+        $runId = Get-RunIdentifier
+        $root = NewEvidenceRoot -RunId $runId -Override @{ 'validate-guest-evidence.json' = '{ not json' }
+
+        (Phases -Root $root -RunId $runId | Where-Object name -EQ 'provisioning').outcome | Should -Be 'failed'
+    }
+
+    It 'fails a phase whose evidence belongs to another run' {
+        # It would attach one execution's provisioning to another's image.
+        $runId = Get-RunIdentifier
+        $root = NewEvidenceRoot -RunId (Get-RunIdentifier)
+
+        (Phases -Root $root -RunId $runId | Where-Object name -EQ 'provisioning').outcome | Should -Be 'failed'
+    }
+
+    It 'fails a phase whose evidence reports failure' {
+        $runId = Get-RunIdentifier
+        $root = NewEvidenceRoot -RunId $runId -Override @{
+            'credential-residue-guest-evidence.json' =
+                (@{ name = 'credential-residue'; outcome = 'failed'; reasonCode = 'residue_present' } | ConvertTo-Json)
+        }
+
+        (Phases -Root $root -RunId $runId | Where-Object name -EQ 'credential-residue').outcome |
+            Should -Be 'failed'
+    }
+
+    It 'a failed phase stops the seal' {
+        # The end of the chain: unread evidence becomes a failed phase, and the
+        # candidate gate refuses the document that carries it.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $root = NewEvidenceRoot -RunId $runId -Override @{ 'pre-generalization-guest-evidence.json' = $null }
+        $phases = Phases -Root $root -RunId $runId
+
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce -Phases $phases
+
+        $result.BuildState | Should -Not -Be 'sealed'
+    }
+}

@@ -319,10 +319,28 @@ source "vsphere-iso" "windows" {
 
   # Packer owns the shutdown, exactly as it owns the restart boundary. A guest
   # script that shut itself down would race the sealing step.
-  shutdown_command = "shutdown /s /t 10 /f /d p:4:1 /c \"packer build shutdown\""
-  shutdown_timeout = "30m"
+  # The guest shuts itself down, and Packer waits. disable_shutdown rather than
+  # an empty command: an absent command lets the builder ask VMware Tools for a
+  # graceful shutdown, which would power off a VM whose finalizer had failed and
+  # remove the one signal the fail-closed design rests on. A failed finalizer
+  # must leave the machine running.
+  #
+  # The finalizer that performs that shutdown is stage 5 step 5 and is not
+  # launched from here yet, so a build run today reaches this and waits until
+  # the timeout. That is the correct behaviour for a configuration whose
+  # terminal transition is not implemented.
+  disable_shutdown = true
+  shutdown_timeout = "60m"
 
-  # Template conversion is OFF, deliberately, and stays off until stage 5.
+  # Template conversion is OFF permanently. Sealing is a host-side phase that
+  # runs after Packer exits, per ADR 8.
+  #
+  # It cannot live here: convert_to_template is static configuration and cannot
+  # be conditional, so it would convert whatever the build produced -- including
+  # a VM whose finalizer failed but which powered off for some other reason. The
+  # host-side phase confirms the power state, validates the attestation against
+  # this run and a host-generated nonce, clears the transient key so a clone
+  # cannot inherit stale build evidence, and only then converts.
   #
   # Converting makes an artifact immutable, which is exactly why it must not
   # happen here. At this point in the build the VM still holds an enabled build
@@ -332,10 +350,6 @@ source "vsphere-iso" "windows" {
   # produces an immutable artifact nobody can fix and which a later stage might
   # find and treat as a candidate.
   #
-  # Stage 5 turns this on only behind the gates that make it safe: the build
-  # credential disabled or rotated, residue removed, generalization complete, a
-  # shutdown observed rather than assumed, and positive sealing evidence. Those
-  # gates are implemented in BuildEvidence.psm1 and are not invoked from here.
   convert_to_template = false
 }
 

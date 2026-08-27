@@ -172,10 +172,13 @@ Describe 'the build seals what it constructed' {
         $script:Configuration | Should -Not -Match 'convert_to_template\s*=\s*true'
     }
 
-    It 'owns the shutdown rather than letting the guest take it' {
-        # A guest script shutting itself down would race the sealing step.
-        $script:Build | Should -Match 'shutdown_command\s*='
-        $script:Build | Should -Match 'shutdown_timeout\s*='
+    It 'waits for a shutdown it does not perform' {
+        # An absent shutdown command lets the builder ask VMware Tools for a
+        # graceful shutdown, which would power off a VM whose finalizer had
+        # failed -- removing the one signal the fail-closed design rests on.
+        $script:Configuration | Should -Match 'disable_shutdown\s*=\s*true'
+        $script:Configuration | Should -Match 'shutdown_timeout\s*='
+        $script:Configuration | Should -Not -Match 'shutdown_command\s*='
     }
 
     It 'delivers the answer file and its bootstrap as removable media' {

@@ -1141,6 +1141,41 @@ surface is as small as possible when a target finally exists.
    seals it in; converting before any of it produces an immutable artifact
    carrying all of them.
 
+   **Steps 5 to 7 are one terminal transition, not three provisioners.** The
+   numbering above describes the order the gates must hold in, not a sequence of
+   separately invoked steps. Packer reaches the guest over WinRM, so a
+   provisioner cannot remove the listener and a later provisioner then open
+   another session to run Sysprep. Any design that reads as three ordinary steps
+   is wrong at the mechanism level whatever its ordering.
+
+   The constraints that follow, to be settled before step 5 is implemented and
+   deliberately not solved during steps 1 and 2:
+
+   - every ordinary guest command runs, and every retrievable piece of evidence
+     is retrieved, **before** transport teardown begins. Nothing that needs a
+     connection may be scheduled after it;
+   - account disablement, listener and firewall teardown, final verification,
+     and Sysprep with shutdown are coordinated as **one terminal finalization
+     operation** -- a single invocation that performs them in order and does not
+     return, or a detached SYSTEM-context finalizer the last WinRM command
+     launches and then stops waiting on;
+   - once that transition begins, Packer must not expect another guest
+     connection. A provisioner scheduled after it is a design error, not a
+     timeout to tune;
+   - how cleanup success becomes bounded evidence **without reconnecting** has
+     to be stated explicitly. Evidence written after the last retrieval is
+     unreachable by definition, so either the finalizer's outcome is observable
+     from outside the guest, or it is written before teardown and the teardown
+     itself is what the absence of a later contradiction attests to. Whichever
+     is chosen, an unverifiable claim is not evidence;
+   - Packer observes the VM **powering off through vSphere**, not a guest
+     command reporting that it will. A shutdown that was asked for is not a
+     shutdown that happened;
+   - `convert_to_template` is static configuration and cannot itself be a gate.
+     Safety comes from every preceding provisioner failing closed, so a failed
+     gate stops the build before Packer reaches conversion at all. The switch
+     records the intent; the provisioners are what enforce it.
+
    **Lab-only from step 7 onward**; nothing there is CI-provable.
 
    Sealing is a positive gate, not the absence of a failure. An artifact may be

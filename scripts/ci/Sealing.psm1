@@ -96,7 +96,9 @@ function Invoke-CandidateSealing {
 
     # 1. Packer must have finished. A build that failed produced a machine in
     #    whatever state it failed in, and sealing it would make that permanent.
-    if (-not $PackerSucceeded) { return Refused -State 'pre-seal' -Reason 'construction_failed' }
+    if (-not $PackerSucceeded) {
+        return Refused -State 'pre-seal' -Reason 'construction_failed' -Context $context -Adapter $Adapter
+    }
 
     # 2. Resolve the VM by run identity, not by name alone. A name is mutable
     #    and can be reused, so sealing the object that merely answers to it is
@@ -104,13 +106,17 @@ function Invoke-CandidateSealing {
     $machine = $null
     try { $machine = & $Adapter['ResolveVirtualMachine'] $validatedRunId $CandidateName }
     catch { $machine = $null }
-    if (-not $machine) { return Refused -State 'pre-seal' -Reason 'vm_not_resolved' }
+    if (-not $machine) {
+        return Refused -State 'pre-seal' -Reason 'vm_not_resolved' -Context $context -Adapter $Adapter
+    }
 
     # 3. Powered off, observed through the platform. A guest command that says
     #    it will shut down is not a shutdown that happened.
     $power = $null
     try { $power = [string](& $Adapter['GetPowerState'] $machine) } catch { $power = $null }
-    if ($power -ne 'poweredOff') { return Refused -State 'pre-seal' -Reason 'vm_not_powered_off' }
+    if ($power -ne 'poweredOff') {
+        return Refused -State 'pre-seal' -Reason 'vm_not_powered_off' -Context $context -Adapter $Adapter
+    }
 
     # 4. The attestation, validated against this run and this run's nonce.
     $raw = $null
@@ -118,13 +124,16 @@ function Invoke-CandidateSealing {
     catch { $raw = $null }
 
     $attestationReason = Test-FinalizationAttestation -Json ([string]$raw) -RunId $validatedRunId -Nonce $Nonce
-    if ($attestationReason) { return Refused -State 'pre-seal' -Reason $attestationReason -Attestation $raw }
+    if ($attestationReason) {
+        return Refused -State 'pre-seal' -Reason $attestationReason -Attestation $raw -Context $context -Adapter $Adapter
+    }
 
     # 5. Cleared, and the clearing verified by re-reading. A template inheriting
     #    a previous build's attestation hands every clone evidence about a
     #    machine it is not, which is worse than carrying none.
     if (-not $PSCmdlet.ShouldProcess($CandidateName, 'Clear the attestation and seal the candidate')) {
-        return Refused -State 'pre-seal' -Reason 'not_attempted' -Attestation $raw
+        return Refused -State 'pre-seal' -Reason 'not_attempted' -Attestation $raw `
+            -Context $context -Adapter $Adapter -SkipPersistence
     }
 
     # 5. Persist the attestation before clearing it. Clearing destroys the only
@@ -134,7 +143,9 @@ function Invoke-CandidateSealing {
     $persisted = $false
     try { $persisted = [bool](& $Adapter['WriteHostEvidence'] 'finalization-attestation.json' $raw) }
     catch { $persisted = $false }
-    if (-not $persisted) { return Refused -State 'pre-seal' -Reason 'attestation_not_persisted' -Attestation $raw }
+    if (-not $persisted) {
+        return Refused -State 'pre-seal' -Reason 'attestation_not_persisted' -Attestation $raw -Context $context -Adapter $Adapter
+    }
 
     # Read back rather than trusting the write. A writer that reported success
     # without producing a readable document is the case this guards.
@@ -142,12 +153,16 @@ function Invoke-CandidateSealing {
     try { $readBack = [string](& $Adapter['ReadHostEvidence'] 'finalization-attestation.json') }
     catch { $readBack = $null }
     if (-not [string]::Equals($readBack, $raw, [System.StringComparison]::Ordinal)) {
-        return Refused -State 'pre-seal' -Reason 'attestation_not_persisted' -Attestation $raw
+        return Refused -State 'pre-seal' -Reason 'attestation_not_persisted' -Attestation $raw `
+            -Context $context -Adapter $Adapter
     }
 
     # 6. Only now clear it.
     try { $null = & $Adapter['ClearGuestInfo'] $machine (Get-FinalizationAttestationKey) }
-    catch { return Refused -State 'pre-seal' -Reason 'attestation_not_cleared' -Attestation $raw }
+    catch {
+        return Refused -State 'pre-seal' -Reason 'attestation_not_cleared' -Attestation $raw `
+            -Context $context -Adapter $Adapter
+    }
 
     $residual = $null
     try { $residual = [string](& $Adapter['ReadGuestInfo'] $machine (Get-FinalizationAttestationKey)) }
@@ -155,7 +170,8 @@ function Invoke-CandidateSealing {
     if (-not [string]::IsNullOrWhiteSpace($residual)) {
         # Blocks conversion. The artifact is not made immutable while it still
         # carries evidence that would outlive the machine it describes.
-        return Refused -State 'pre-seal' -Reason 'attestation_not_cleared' -Attestation $raw
+        return Refused -State 'pre-seal' -Reason 'attestation_not_cleared' -Attestation $raw `
+            -Context $context -Adapter $Adapter
     }
 
     # 7. Convert. Everything after this point may have produced an artifact, so
@@ -203,28 +219,16 @@ function Invoke-CandidateSealing {
             -Context $context -Adapter $Adapter
     }
 
-    $written = $false
-    try { $written = [bool](& $Adapter['WriteHostEvidence'] 'image-build-evidence.json' $json) }
-    catch { $written = $false }
-    if (-not $written) {
+    # 10. Write, then judge the bytes that survived rather than the ones handed
+    #     to the writer. A sealed state claims a durable document exists, and
+    #     the only way to know is to retrieve it.
+    if (-not (WriteAndConfirm -Adapter $Adapter -Name 'image-build-evidence.json' -Json $json)) {
         return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity `
             -Context $context -Adapter $Adapter
     }
 
-    # 10. Read the record back and judge the bytes that survived, not the ones
-    #     handed to the writer. A sealed state claims a durable document exists;
-    #     the only way to know is to retrieve it. A writer that reported success
-    #     and left a truncated file would otherwise produce a candidate whose
-    #     evidence nobody can read.
-    $retrieved = $null
-    try { $retrieved = [string](& $Adapter['ReadHostEvidence'] 'image-build-evidence.json') }
-    catch { $retrieved = $null }
-
-    if ([string]::IsNullOrWhiteSpace($retrieved) -or
-        (Test-EvidenceEnvelopeDocument -Json $retrieved) -or
-        (Test-ImageBuildResult -Evidence ($retrieved | ConvertFrom-Json)) -or
-        (-not (Test-SealedCandidate -Json $retrieved))) {
-
+    $retrieved = [string](& $Adapter['ReadHostEvidence'] 'image-build-evidence.json')
+    if (-not (Test-SealedCandidate -Json $retrieved)) {
         return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity `
             -Context $context -Adapter $Adapter
     }
@@ -250,19 +254,22 @@ function NewProvenanceDocument {
     param(
         [string] $RunId, [int] $ManifestSchemaVersion, [string] $StartedUtc,
         [string] $RecipeDigest, [int] $RecipeInputVersion, [string] $MediaId,
-        $CompletedPhases, $Identity, [bool] $Sealed, [string] $Reason
+        $CompletedPhases, $Identity, [bool] $Sealed, [string] $Reason, [switch] $PreSeal
     )
 
     $phases = [System.Collections.Generic.List[object]]::new()
     foreach ($phase in @($CompletedPhases)) {
         $phases.Add([ordered]@{ name = $phase.name; outcome = $phase.outcome; reasonCode = $null })
     }
-    $sealOutcome = if ($Sealed) { 'passed' } else { 'incomplete' }
-    $phases.Add([ordered]@{ name = 'seal'; outcome = $sealOutcome; reasonCode = $(if ($Sealed) { $null } else { $Reason }) })
-    $phases.Add([ordered]@{ name = 'provenance'; outcome = $sealOutcome; reasonCode = $(if ($Sealed) { $null } else { $Reason }) })
+    # A pre-seal refusal never reached the seal, so it reports those phases as
+    # skipped rather than as something that was attempted and did not finish.
+    $sealOutcome = if ($Sealed) { 'passed' } elseif ($PreSeal) { 'skipped' } else { 'incomplete' }
+    $phaseReason = if ($Sealed -or $PreSeal) { $null } else { $Reason }
+    $phases.Add([ordered]@{ name = 'seal'; outcome = $sealOutcome; reasonCode = $phaseReason })
+    $phases.Add([ordered]@{ name = 'provenance'; outcome = $sealOutcome; reasonCode = $phaseReason })
 
     $payload = [ordered]@{
-        buildState         = $(if ($Sealed) { 'sealed' } else { 'seal-unconfirmed' })
+        buildState         = $(if ($Sealed) { 'sealed' } elseif ($PreSeal) { 'pre-seal' } else { 'seal-unconfirmed' })
         recipeInputVersion = $RecipeInputVersion
         recipeDigest       = $RecipeDigest
         mediaId            = $MediaId
@@ -308,7 +315,41 @@ function TryIdentity {
 }
 
 function Refused {
-    param([string] $State, [string] $Reason, [string] $Attestation)
+    <#
+        A pre-seal refusal is still a result someone has to act on, so it is
+        written down like any other. Reporting EvidencePersisted true without
+        writing anything was a claim about a document that did not exist.
+
+        -SkipPersistence is for the preview path only, where nothing was
+        attempted and nothing should be recorded as though it had been.
+    #>
+    param(
+        [string] $State, [string] $Reason, [string] $Attestation,
+        [hashtable] $Context, [hashtable] $Adapter, [switch] $SkipPersistence
+    )
+
+    if ($SkipPersistence) {
+        return [PSCustomObject]@{
+            BuildState          = $State
+            Outcome             = 'incomplete'
+            ReasonCode          = $Reason
+            ArtifactIdentity    = $null
+            UnconfirmedArtifact = $null
+            Attestation         = $Attestation
+            Provenance          = $null
+            EvidencePersisted   = $false
+        }
+    }
+
+    $document = NewProvenanceDocument -RunId $Context.RunId `
+        -ManifestSchemaVersion $Context.ManifestSchemaVersion -StartedUtc $Context.StartedUtc `
+        -RecipeDigest $Context.RecipeDigest -RecipeInputVersion $Context.RecipeInputVersion `
+        -MediaId $Context.MediaId -CompletedPhases $Context.CompletedPhases `
+        -Identity $null -Sealed $false -Reason $Reason -PreSeal
+
+    $json = $document | ConvertTo-Json -Depth 20
+    $persisted = WriteAndConfirm -Adapter $Adapter -Name 'pre-seal-evidence.json' -Json $json
+
     [PSCustomObject]@{
         BuildState          = $State
         Outcome             = $(if ($Reason -eq 'not_attempted') { 'incomplete' } else { 'failed' })
@@ -316,9 +357,34 @@ function Refused {
         ArtifactIdentity    = $null
         UnconfirmedArtifact = $null
         Attestation         = $Attestation
-        Provenance          = $null
-        EvidencePersisted   = $true
+        Provenance          = $(if ($persisted) { $json } else { $null })
+        EvidencePersisted   = $persisted
     }
+}
+
+function WriteAndConfirm {
+    <#
+        Writes a record and reads it back. Persistence is never reported from
+        the writer's own Boolean: a writer that returned success while leaving
+        nothing readable would produce a result claiming a durable document that
+        does not exist, which is the failure every other read-back here guards.
+    #>
+    param([hashtable] $Adapter, [string] $Name, [string] $Json)
+
+    $written = $false
+    try { $written = [bool](& $Adapter['WriteHostEvidence'] $Name $Json) }
+    catch { $written = $false }
+    if (-not $written) { return $false }
+
+    $retrieved = $null
+    try { $retrieved = [string](& $Adapter['ReadHostEvidence'] $Name) }
+    catch { $retrieved = $null }
+
+    if ([string]::IsNullOrWhiteSpace($retrieved)) { return $false }
+    if (Test-EvidenceEnvelopeDocument -Json $retrieved) { return $false }
+    if (Test-ImageBuildResult -Evidence ($retrieved | ConvertFrom-Json)) { return $false }
+
+    $true
 }
 
 function Unconfirmed {
@@ -350,9 +416,10 @@ function Unconfirmed {
         $json = $document | ConvertTo-Json -Depth 20
     }
 
-    $persisted = $false
-    try { $persisted = [bool](& $Adapter['WriteHostEvidence'] 'seal-unconfirmed-evidence.json' $json) }
-    catch { $persisted = $false }
+    # Read back and validated, exactly as the successful record is. A
+    # reconciliation record nobody can read is an artifact nobody will find,
+    # which is the situation this record exists to prevent.
+    $persisted = WriteAndConfirm -Adapter $Adapter -Name 'seal-unconfirmed-evidence.json' -Json $json
 
     [PSCustomObject]@{
         BuildState          = 'seal-unconfirmed'

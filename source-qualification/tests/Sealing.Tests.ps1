@@ -661,3 +661,82 @@ Describe 'uncertainty after conversion is written down' {
         (Seal -Platform $platform -RunId $runId -Nonce $nonce).EvidencePersisted | Should -BeTrue
     }
 }
+
+Describe 'a refusal before the seal is recorded too' {
+
+    It 'writes a pre-seal record when <case>' -ForEach @(
+        @{ case = 'the build failed';        seal = { Seal -Platform $args[0] -RunId $args[1] -Nonce $args[2] -PackerSucceeded $false } }
+        @{ case = 'the machine is still on'; seal = { Seal -Platform $args[0] -RunId $args[1] -Nonce $args[2] } }
+    ) {
+        # A pre-seal refusal is still a result someone has to act on. Reporting
+        # persistence without writing anything was a claim about a document that
+        # did not exist.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $attestation = PassedAttestationJson -RunId $runId -Nonce $nonce
+        $platform = if ($case -like '*still on*') {
+            NewPlatform -Attestation $attestation -PowerState 'poweredOn'
+        }
+        else { NewPlatform -Attestation $attestation }
+
+        $result = & $seal $platform $runId $nonce
+        $result.BuildState | Should -Be 'pre-seal'
+        $result.EvidencePersisted | Should -BeTrue
+        $platform.State.HostEvidence['pre-seal-evidence.json'] | Should -Not -BeNullOrEmpty
+    }
+
+    It 'writes a pre-seal record the contract accepts' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -PowerState 'poweredOn'
+        $null = Seal -Platform $platform -RunId $runId -Nonce $nonce
+
+        $record = $platform.State.HostEvidence['pre-seal-evidence.json']
+        Test-EvidenceEnvelopeDocument -Json $record | Should -BeNullOrEmpty
+        Test-ImageBuildResult -Evidence ($record | ConvertFrom-Json) | Should -BeNullOrEmpty
+        Test-SealedCandidate -Json $record | Should -BeFalse
+        ($record | ConvertFrom-Json).payload.buildState | Should -Be 'pre-seal'
+    }
+
+    It 'reports no persistence when the pre-seal record cannot be written' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) `
+            -PowerState 'poweredOn' -FailWritesFor @('pre-seal-evidence.json')
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+        $result.EvidencePersisted | Should -BeFalse
+        $result.Provenance | Should -BeNullOrEmpty
+    }
+
+    It 'records nothing under -WhatIf, and says so' {
+        # Nothing was attempted, so nothing is written down as though it had
+        # been.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+
+        $result = Invoke-CandidateSealing -RunId $runId -Nonce $nonce -CandidateName 'windows-candidate' `
+            -PackerSucceeded $true -CompletedPhases (CompletedPhases) `
+            -RecipeDigest ('a' * 64) -RecipeInputVersion 3 -ManifestSchemaVersion 2 `
+            -MediaId 'windows-baseline' -StartedUtc '2026-01-01T00:00:00.0000000Z' `
+            -Adapter $platform -WhatIf
+
+        $result.EvidencePersisted | Should -BeFalse
+        $platform.State.HostEvidence.ContainsKey('pre-seal-evidence.json') | Should -BeFalse
+    }
+}
+
+Describe 'persistence is never reported from the writer alone' {
+
+    It 'refuses to report a persisted <record> that does not read back' -ForEach @(
+        @{ record = 'pre-seal record';        name = 'pre-seal-evidence.json';        state = 'poweredOn'; convert = $true }
+        @{ record = 'reconciliation record';  name = 'seal-unconfirmed-evidence.json'; state = 'poweredOff'; convert = $false }
+    ) {
+        # A writer returning success while leaving nothing readable would
+        # produce a result claiming a durable document that does not exist.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) `
+            -PowerState $state -ConvertWorks $convert -CorruptWritesFor @($name)
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+        $result.EvidencePersisted | Should -BeFalse
+        $result.Provenance | Should -BeNullOrEmpty
+    }
+}

@@ -1058,13 +1058,9 @@ surface is as small as possible when a target finally exists.
    rotating the build credential is defined here and **implemented in stage 5**,
    before sealing, so that a sealed image never carries a working one. The table
    above is authoritative on what exists today;
-3. image identity and the provenance record -- **implementation complete and
-   locally verified; remote CI confirmation pending**. Acceptance is distinct
-   from progress: this stage is not described as CI-proven until a workflow run
-   reports success, with the run's head SHA checked before the result is
-   accepted.
+3. image identity and the provenance record -- **complete and CI-proven**.
 
-   How that run is obtained matters, because waiting alone will not produce one.
+   How a run is obtained matters, because waiting alone will not produce one.
    The workflow triggers on pushes to `main` and on pull requests, not on
    ordinary feature-branch pushes, so a branch can sit indefinitely with no run
    against it. Validation comes from opening a pull request. A green run on a
@@ -1126,13 +1122,16 @@ surface is as small as possible when a target finally exists.
 
    | Step | State |
    | --- | --- |
-   | 1. transfer and invoke the verified bundle | implemented; wired into the build |
-   | 2. collect install and validation evidence, and gate on it | implemented; wired into the build |
-   | 3. pre-generalization checks | **logic implemented and CI-proven; builder integration pending** |
-   | 4. answer-file and credential residue removal | **logic implemented and CI-proven; builder integration pending** |
-   | 5-7. the terminal transition | orchestration implemented against injected adapters; production adapter absent, lab-pending |
-   | 8. conversion | moved out of the build entirely, per ADR 8 |
-   | 9. provenance bound to the artifact | sealing coordinator implemented against injected adapters; lab-pending |
+   | 1. transfer and invoke the verified bundle | implemented, wired, CI-proven; real build pending |
+   | 2. collect install and validation evidence, and gate on it | implemented, wired, CI-proven; real build pending |
+   | 3. pre-generalization checks | implemented, wired, CI-proven; real build pending |
+   | 4. answer-file and credential residue removal | implemented, wired, CI-proven; real build pending |
+   | 5-7. the terminal transition | orchestration CI-proven against injected adapters; **production guest adapter and detached-task launcher absent** |
+   | 8. conversion | host coordinator logic implemented; **production platform adapter absent**. Moved out of the build entirely, per ADR 8 |
+   | 9. provenance bound to the artifact | complete only when the validated document is durably emitted, which the coordinator does; unexercised against a real artifact |
+
+   No vSphere behaviour is proven. Nothing in steps 5 to 9 has run against a
+   platform, and the adapters those steps are written against are test doubles.
 
    Steps 5 to 7 are one terminal transition: disable the build account, remove
    the WinRM listener and its firewall exception -- the listener exists so the

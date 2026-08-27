@@ -4,6 +4,7 @@ BeforeAll {
     $script:RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     Import-Module (Join-Path $script:RepoRoot 'source-qualification' 'scripts' 'RunIdentity.psm1') -Force
     Import-Module (Join-Path $script:RepoRoot 'source-qualification' 'scripts' 'Finalization.psm1') -Force
+    Import-Module (Join-Path $script:RepoRoot 'source-qualification' 'scripts' 'BuildEvidence.psm1') -Force
     Import-Module (Join-Path $script:RepoRoot 'scripts' 'ci' 'Sealing.psm1') -Force
 
     function PassedAttestationJson {
@@ -45,6 +46,8 @@ BeforeAll {
             [bool] $Resolves = $true,
             [bool] $ClearWorks = $true,
             [bool] $ConvertWorks = $true,
+            [bool] $WriteWorks = $true,
+            [bool] $WriteCorrupts = $false,
             $Identity = $null,
             [switch] $IdentityMissing
         )
@@ -59,6 +62,7 @@ BeforeAll {
             ClearWorks = $ClearWorks; ConvertWorks = $ConvertWorks
             Identity = $Identity; Converted = $false; Cleared = $false
             Log = [System.Collections.Generic.List[string]]::new()
+            HostEvidence = @{}; WriteWorks = $WriteWorks; WriteCorrupts = $WriteCorrupts
             ResolvedRun = $null; ReadKeys = [System.Collections.Generic.List[string]]::new()
             ClearedKeys = [System.Collections.Generic.List[string]]::new()
             MachinesSeen = [System.Collections.Generic.List[string]]::new()
@@ -102,6 +106,20 @@ BeforeAll {
                 $state.Converted = $true
                 $true
             }.GetNewClosure()
+            WriteHostEvidence = {
+                param($Name, $Content)
+                $state.Log.Add("Write:$Name")
+                if (-not $state.WriteWorks) { return $false }
+                # A writer that reports success without producing a readable
+                # document is the case the read-back guards.
+                $state.HostEvidence[$Name] = if ($state.WriteCorrupts) { 'truncated' } else { $Content }
+                $true
+            }.GetNewClosure()
+            ReadHostEvidence = {
+                param($Name)
+                $state.Log.Add("ReadHost:$Name")
+                if ($state.HostEvidence.ContainsKey($Name)) { $state.HostEvidence[$Name] } else { $null }
+            }.GetNewClosure()
             GetArtifactIdentity = {
                 param($Machine)
                 $state.Log.Add('Identity')
@@ -111,10 +129,20 @@ BeforeAll {
         }
     }
 
+    function CompletedPhases {
+        @('media-qualification', 'answer-file', 'construction', 'provisioning',
+          'pre-generalization', 'credential-residue', 'generalization', 'shutdown') |
+            ForEach-Object { [PSCustomObject]@{ name = $_; outcome = 'passed' } }
+    }
+
     function Seal {
-        param($Platform, [string] $RunId, [string] $Nonce, [bool] $PackerSucceeded = $true)
+        param($Platform, [string] $RunId, [string] $Nonce, [bool] $PackerSucceeded = $true, $Phases = $null)
+        if ($null -eq $Phases) { $Phases = CompletedPhases }
         Invoke-CandidateSealing -RunId $RunId -Nonce $Nonce -CandidateName 'windows-candidate' `
-            -PackerSucceeded $PackerSucceeded -Adapter $Platform -Confirm:$false
+            -PackerSucceeded $PackerSucceeded -CompletedPhases $Phases `
+            -RecipeDigest ('a' * 64) -RecipeInputVersion 3 -ManifestSchemaVersion 2 `
+            -MediaId 'windows-baseline' -StartedUtc '2026-01-01T00:00:00.0000000Z' `
+            -Adapter $Platform -Confirm:$false
     }
 }
 
@@ -257,7 +285,10 @@ Describe 'nothing is sealed before it is certain' {
         $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
 
         $result = Invoke-CandidateSealing -RunId $runId -Nonce $nonce -CandidateName 'windows-candidate' `
-            -PackerSucceeded $true -Adapter $platform -WhatIf
+            -PackerSucceeded $true -CompletedPhases (CompletedPhases) `
+            -RecipeDigest ('a' * 64) -RecipeInputVersion 3 -ManifestSchemaVersion 2 `
+            -MediaId 'windows-baseline' -StartedUtc '2026-01-01T00:00:00.0000000Z' `
+            -Adapter $platform -WhatIf
 
         $result.ReasonCode | Should -Be 'not_attempted'
         $platform.State.Converted | Should -BeFalse
@@ -320,6 +351,195 @@ Describe 'ambiguity after conversion is never a candidate' {
             }
             else {
                 $result.ArtifactIdentity | Should -BeNullOrEmpty
+            }
+        }
+    }
+}
+
+Describe 'the attestation is preserved before it is destroyed' {
+
+    It 'writes the attestation to host evidence before clearing GuestInfo' {
+        # Clearing destroys the only copy outside this process. An interruption
+        # between the clear and a later write would leave the evidence nowhere,
+        # and returning it in a result object is not preservation.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+        $null = Seal -Platform $platform -RunId $runId -Nonce $nonce
+
+        $log = @($platform.State.Log)
+        $log.IndexOf('Write:finalization-attestation.json') | Should -BeGreaterThan -1
+        $log.IndexOf('Write:finalization-attestation.json') | Should -BeLessThan $log.IndexOf('Clear')
+    }
+
+    It 'confirms the persisted copy by reading it back' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+        $null = Seal -Platform $platform -RunId $runId -Nonce $nonce
+
+        $log = @($platform.State.Log)
+        $log.IndexOf('ReadHost:finalization-attestation.json') | Should -BeLessThan $log.IndexOf('Clear')
+        $platform.State.HostEvidence['finalization-attestation.json'] | Should -Not -BeNullOrEmpty
+    }
+
+    It 'leaves GuestInfo intact and never converts when persistence fails' {
+        # The property that matters: a failed write must not cost the evidence.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -WriteWorks $false
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+        $result.ReasonCode | Should -Be 'attestation_not_persisted'
+        $result.BuildState | Should -Be 'pre-seal'
+        @($platform.State.Log) | Should -Not -Contain 'Clear'
+        @($platform.State.Log) | Should -Not -Contain 'Convert'
+        $platform.State.Cleared | Should -BeFalse
+        $platform.State.Converted | Should -BeFalse
+    }
+
+    It 'refuses when the persisted copy does not read back intact' {
+        # A writer reporting success without producing a readable document.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -WriteCorrupts $true
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+        $result.ReasonCode | Should -Be 'attestation_not_persisted'
+        @($platform.State.Log) | Should -Not -Contain 'Clear'
+        $platform.State.Converted | Should -BeFalse
+    }
+}
+
+Describe 'provenance is emitted, validated, and written' {
+
+    It 'emits a document the contract accepts' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+        $result.Provenance | Should -Not -BeNullOrEmpty
+        Test-EvidenceEnvelopeDocument -Json $result.Provenance | Should -BeNullOrEmpty
+    }
+
+    It 'emits a document the candidate gate accepts' {
+        # The same gate every downstream consumer uses, applied to the
+        # serialized document rather than to the object this function held.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+
+        Test-SealedCandidate -Json (Seal -Platform $platform -RunId $runId -Nonce $nonce).Provenance |
+            Should -BeTrue
+    }
+
+    It 'writes the provenance to host evidence' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+        $null = Seal -Platform $platform -RunId $runId -Nonce $nonce
+
+        $platform.State.HostEvidence['image-build-evidence.json'] | Should -Not -BeNullOrEmpty
+    }
+
+    It 'carries the full phase sequence a candidate requires' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+
+        $document = (Seal -Platform $platform -RunId $runId -Nonce $nonce).Provenance | ConvertFrom-Json
+        @($document.payload.phases | ForEach-Object { $_.name }) | Should -Be @(
+            'media-qualification', 'answer-file', 'construction', 'provisioning',
+            'pre-generalization', 'credential-residue', 'generalization',
+            'shutdown', 'seal', 'provenance')
+    }
+
+    It 'refuses to report sealed when a build phase did not pass' {
+        # The candidate gate decides, not this function's own bookkeeping.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+        $phases = @(CompletedPhases)
+        $phases[4].outcome = 'failed'
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce -Phases $phases
+        $result.BuildState | Should -Be 'seal-unconfirmed'
+        $result.ReasonCode | Should -Be 'provenance_incomplete'
+        $result.UnconfirmedArtifact | Should -Not -BeNullOrEmpty
+    }
+
+    It 'refuses a <field> the schema knows is malformed' -ForEach @(
+        @{ field = 'managed object reference'; property = 'managedObjectReference'; value = 'NOT-A-MOREF!' }
+        @{ field = 'instance UUID';            property = 'instanceUuid';           value = 'not-a-uuid' }
+        @{ field = 'vCenter instance';         property = 'vCenterInstanceId';       value = '' }
+    ) {
+        # Checking that three fields are non-empty accepts a managed object
+        # reference that is not one and a UUID that is not a UUID. The schema
+        # knows the shapes.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $identity = NewIdentity
+        $identity.$property = $value
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -Identity $identity
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+        $result.BuildState | Should -Be 'seal-unconfirmed'
+        $result.ArtifactIdentity | Should -BeNullOrEmpty
+    }
+
+    It 'recovers the identity into unconfirmedArtifact when provenance cannot be confirmed' {
+        # Something exists and can be named, so it is named -- as what may
+        # exist, never as an accepted candidate.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $identity = NewIdentity
+        $identity.instanceUuid = 'not-a-uuid'
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -Identity $identity
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+        $result.UnconfirmedArtifact.managedObjectReference | Should -Be 'vm-1234'
+    }
+
+    It 'refuses a manifest version the recipe path cannot process' {
+        # Only the candidate gate checks this: the schema permits manifest
+        # version 1 because other result kinds carry it, and the consistency
+        # validator does not look. Without that call this document would be
+        # emitted as a sealed candidate describing a contract the recipe path
+        # cannot read.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+
+        $result = Invoke-CandidateSealing -RunId $runId -Nonce $nonce -CandidateName 'windows-candidate' `
+            -PackerSucceeded $true -CompletedPhases (CompletedPhases) `
+            -RecipeDigest ('a' * 64) -RecipeInputVersion 3 -ManifestSchemaVersion 1 `
+            -MediaId 'windows-baseline' -StartedUtc '2026-01-01T00:00:00.0000000Z' `
+            -Adapter $platform -Confirm:$false
+
+        $result.BuildState | Should -Be 'seal-unconfirmed'
+        $result.ReasonCode | Should -Be 'provenance_incomplete'
+    }
+
+    It 'refuses a recipe-input version this code does not implement' {
+        # Same reasoning. A digest is only comparable within a version this code
+        # implements, and nothing but the candidate gate enforces that here.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+
+        $result = Invoke-CandidateSealing -RunId $runId -Nonce $nonce -CandidateName 'windows-candidate' `
+            -PackerSucceeded $true -CompletedPhases (CompletedPhases) `
+            -RecipeDigest ('a' * 64) -RecipeInputVersion 2 -ManifestSchemaVersion 2 `
+            -MediaId 'windows-baseline' -StartedUtc '2026-01-01T00:00:00.0000000Z' `
+            -Adapter $platform -Confirm:$false
+
+        $result.BuildState | Should -Be 'seal-unconfirmed'
+        $result.ReasonCode | Should -Be 'provenance_incomplete'
+    }
+
+    It 'never reports sealed without an emitted, validated document' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        foreach ($platform in @(
+                (NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -ConvertWorks $false)
+                (NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -IdentityMissing)
+                (NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -WriteWorks $false)
+                (NewPlatform -Attestation ''))) {
+
+            $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+            if ($result.BuildState -eq 'sealed') {
+                $result.Provenance | Should -Not -BeNullOrEmpty
+                Test-SealedCandidate -Json $result.Provenance | Should -BeTrue
+            }
+            else {
+                $result.Provenance | Should -BeNullOrEmpty
             }
         }
     }

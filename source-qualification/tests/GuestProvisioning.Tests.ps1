@@ -1046,3 +1046,203 @@ Describe 'Invoke-GuestCleanup' {
         $result.RootRemoved | Should -BeTrue
     }
 }
+
+Describe 'Test-ProvisioningComplete' {
+
+    BeforeAll {
+        $script:Schema = Join-Path $script:RepoRoot 'contracts' 'evidence-envelope-2.schema.json'
+
+        function WritePhaseEvidence {
+            <#
+                A phase document, self-consistent by construction so a case fails
+                for the rule it is about rather than an unrelated contradiction.
+            #>
+            param(
+                [string] $Path, [string] $RunId, [string] $Phase,
+                [string] $Outcome = 'passed',
+                [string] $PackageOutcome = 'passed',
+                [bool] $Required = $true,
+                [bool] $RestartRequired = $false,
+                [string] $PackageId = 'example-agent',
+                [string] $PackageVersion = '1.2.3',
+                [string] $Kind = 'guest-provisioning',
+                [int] $ManifestSchemaVersion = 2,
+                [string] $TerminalReason
+            )
+            $failedRequired = if ($PackageOutcome -ne 'passed' -and $Required) { 1 } else { 0 }
+            $document = @{
+                resultSchemaVersion = 2; resultKind = $Kind
+                runId = $RunId; manifestSchemaVersion = $ManifestSchemaVersion
+                startedUtc = '2026-01-01T00:00:00.0000000Z'; completedUtc = '2026-01-01T00:00:01.0000000Z'
+                outcome = $Outcome
+                payload = @{
+                    phase = $Phase; restartRequired = $RestartRequired
+                    packageCount = 1
+                    passedCount = $(if ($PackageOutcome -eq 'passed') { 1 } else { 0 })
+                    failedRequiredCount = $failedRequired
+                    installerAttemptCount = 1
+                    terminalReasonCode = $(if ([string]::IsNullOrEmpty($TerminalReason)) { $null } else { $TerminalReason })
+                    cleanupOutcome = 'not-attempted'
+                    packages = @(@{
+                        id = $PackageId; version = $PackageVersion; order = 10; required = $Required
+                        outcome = $PackageOutcome
+                        reasonCode = $(if ($PackageOutcome -eq 'passed') { $null } else { 'installer_failed' })
+                        restartRequired = $false; installerAttempted = $true })
+                }
+            }
+            $document | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $Path -Encoding utf8
+        }
+
+        function NewEvidencePair {
+            # The locals are named ...Path deliberately. PowerShell variables are
+            # case-insensitive, so $install and the [hashtable] $Install
+            # parameter are one variable, and assigning a path to it fails the
+            # parameter's type rather than shadowing it.
+            param([string] $RunId, [hashtable] $Install = @{}, [hashtable] $Validate = @{})
+            $dir = NewTempDir
+            $installPath = Join-Path $dir 'install-guest-evidence.json'
+            $validatePath = Join-Path $dir 'validate-guest-evidence.json'
+            WritePhaseEvidence -Path $installPath -RunId $RunId -Phase 'install' @Install
+            WritePhaseEvidence -Path $validatePath -RunId $RunId -Phase 'validate' @Validate
+            [PSCustomObject]@{ Directory = $dir; Install = $installPath; Validate = $validatePath }
+        }
+
+        function Gate {
+            param($Pair, [string] $RunId)
+            Test-ProvisioningComplete -InstallEvidencePath $Pair.Install `
+                -ValidateEvidencePath $Pair.Validate -RunId $RunId -SchemaPath $script:Schema
+        }
+    }
+
+    It 'authorizes a run whose phases both passed' {
+        $runId = Get-RunIdentifier
+        (Gate -Pair (NewEvidencePair -RunId $runId) -RunId $runId).Authorized | Should -BeTrue
+    }
+
+    It 'refuses when the <phase> evidence is missing' -ForEach @(
+        @{ phase = 'install' }, @{ phase = 'validate' }
+    ) {
+        # An absent document is not an implicit pass, and nothing downstream can
+        # tell an absent file from a stage that never ran.
+        $runId = Get-RunIdentifier
+        $pair = NewEvidencePair -RunId $runId
+        Remove-Item -LiteralPath (Join-Path $pair.Directory "$phase-guest-evidence.json") -Force
+
+        (Gate -Pair $pair -RunId $runId).ReasonCode | Should -Be 'evidence_missing'
+    }
+
+    It 'refuses malformed evidence' {
+        $runId = Get-RunIdentifier
+        $pair = NewEvidencePair -RunId $runId
+        '{ not json' | Set-Content -LiteralPath $pair.Validate -Encoding utf8
+
+        (Gate -Pair $pair -RunId $runId).ReasonCode | Should -Be 'evidence_malformed'
+    }
+
+    It 'refuses evidence belonging to another run' {
+        # It would attach one execution's provisioning to another's image.
+        $pair = NewEvidencePair -RunId (Get-RunIdentifier)
+        (Gate -Pair $pair -RunId (Get-RunIdentifier)).ReasonCode | Should -Be 'evidence_run_id_mismatch'
+    }
+
+    It 'refuses a validate document written to the install path' {
+        # The file name does not establish the phase. Without this check a single
+        # document copied twice satisfies both reads.
+        $runId = Get-RunIdentifier
+        $pair = NewEvidencePair -RunId $runId
+        Copy-Item -LiteralPath $pair.Validate -Destination $pair.Install -Force
+
+        (Gate -Pair $pair -RunId $runId).ReasonCode | Should -Be 'evidence_wrong_phase'
+    }
+
+    It 'refuses evidence from another stage' {
+        $runId = Get-RunIdentifier
+        $dir = NewTempDir
+        $installPath = Join-Path $dir 'install-guest-evidence.json'
+        $validatePath = Join-Path $dir 'validate-guest-evidence.json'
+        WritePhaseEvidence -Path $installPath -RunId $runId -Phase 'install'
+        WritePhaseEvidence -Path $validatePath -RunId $runId -Phase 'validate' -Kind 'build-orchestration'
+
+        (Test-ProvisioningComplete -InstallEvidencePath $installPath -ValidateEvidencePath $validatePath `
+            -RunId $runId -SchemaPath $script:Schema).ReasonCode |
+            Should -BeIn @('evidence_wrong_kind', 'evidence_malformed')
+    }
+
+    It 'refuses two phases describing different packages' {
+        # An install of one package validated against another is the
+        # substitution neither document can detect alone.
+        $runId = Get-RunIdentifier
+        $pair = NewEvidencePair -RunId $runId -Validate @{ PackageId = 'example-tool' }
+
+        (Gate -Pair $pair -RunId $runId).ReasonCode | Should -Be 'evidence_inconsistent'
+    }
+
+    It 'refuses two phases describing different versions' {
+        $runId = Get-RunIdentifier
+        $pair = NewEvidencePair -RunId $runId -Validate @{ PackageVersion = '9.9.9' }
+
+        (Gate -Pair $pair -RunId $runId).ReasonCode | Should -Be 'evidence_inconsistent'
+    }
+
+    It 'refuses when the <phase> phase did not pass' -ForEach @(
+        @{ phase = 'install' }, @{ phase = 'validate' }
+    ) {
+        # Nothing after this gate is reversible, so a phase that did not pass
+        # stops the build rather than being carried into generalization.
+        $runId = Get-RunIdentifier
+        $overrides = @{ Outcome = 'failed'; PackageOutcome = 'failed'; TerminalReason = 'installer_failed' }
+        $pair = if ($phase -eq 'install') { NewEvidencePair -RunId $runId -Install $overrides }
+                else { NewEvidencePair -RunId $runId -Validate $overrides }
+
+        # The phase outcome is checked before the package list, so this reports
+        # the phase rather than the package. Both refuse; the more general fact
+        # is the one reported first.
+        (Gate -Pair $pair -RunId $runId).ReasonCode | Should -Be "${phase}_not_passed"
+    }
+
+    It 'refuses a phase claiming success over a package that failed' {
+        # The contradiction that must not be resolved in favour of continuing.
+        # Which rule catches it is not asserted, and deliberately so: under a
+        # passed outcome any failed package also breaks the counter rules, so
+        # several refuse it and no single one can be isolated. What matters is
+        # that the gate does not authorize.
+        $runId = Get-RunIdentifier
+        $pair = NewEvidencePair -RunId $runId
+        $document = Get-Content -LiteralPath $pair.Validate -Raw | ConvertFrom-Json
+        $document.payload.packages[0].outcome = 'failed'
+        $document.payload.packages[0].reasonCode = 'validation_failed'
+        $document | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $pair.Validate -Encoding utf8
+
+        (Gate -Pair $pair -RunId $runId).Authorized | Should -BeFalse
+    }
+
+    It 'permits an optional package to have failed' {
+        # Only required packages stop the build. An optional one that did not
+        # install is recorded and does not make the image unusable.
+        $runId = Get-RunIdentifier
+        $pair = NewEvidencePair -RunId $runId `
+            -Install @{ Outcome = 'failed'; PackageOutcome = 'failed'; Required = $false; TerminalReason = 'installer_failed' } `
+            -Validate @{ Outcome = 'failed'; PackageOutcome = 'failed'; Required = $false; TerminalReason = 'installer_failed' }
+
+        (Gate -Pair $pair -RunId $runId).ReasonCode | Should -Be 'install_not_passed'
+    }
+
+    It 'refuses a run with a restart still outstanding' {
+        # The machine is not in the state the validation observed, and
+        # generalizing would seal that half-applied state into the image.
+        $runId = Get-RunIdentifier
+        $pair = NewEvidencePair -RunId $runId -Validate @{ RestartRequired = $true }
+
+        (Gate -Pair $pair -RunId $runId).ReasonCode | Should -Be 'restart_still_required'
+    }
+
+    It 'refuses an install-only record however complete it looks' {
+        # The deliberate pre-restart halt that makes an install-only record
+        # legitimate is a build that stopped, not one that may continue.
+        $runId = Get-RunIdentifier
+        $pair = NewEvidencePair -RunId $runId
+        Remove-Item -LiteralPath $pair.Validate -Force
+
+        (Gate -Pair $pair -RunId $runId).Authorized | Should -BeFalse
+    }
+}

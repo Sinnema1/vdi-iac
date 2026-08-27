@@ -97,9 +97,16 @@ Describe 'schema version 1 is frozen' {
 Describe 'version dispatch' {
 
     It 'validates the committed version 2 manifest' {
-        $manifest = Import-PackageManifest -Path (Join-Path $script:RepoRoot 'packer' 'manifests' 'example-baseline-v2.json')
+        $path = Join-Path $script:RepoRoot 'packer' 'manifests' 'example-baseline-v2.json'
+        $manifest = Import-PackageManifest -Path $path
         $manifest.SchemaVersion | Should -Be 2
-        $manifest.Packages.Count | Should -Be 2
+
+        # Counted from the file rather than hard-coded. This case is about
+        # version dispatch, and adding a package to the example should not fail
+        # a test that is not about the example's contents.
+        $declared = (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).packages.Count
+        $manifest.Packages.Count | Should -Be $declared
+        $manifest.Packages.Count | Should -BeGreaterThan 1
     }
 
     It 'accepts an MSI package alongside an EXE package' {

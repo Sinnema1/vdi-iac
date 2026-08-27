@@ -55,7 +55,7 @@ BeforeAll {
 
         $payload = [ordered]@{
             buildState         = $BuildState
-            recipeInputVersion = 2
+            recipeInputVersion = 3
             recipeDigest       = 'a' * 64
             mediaId            = 'windows-baseline'
             phases             = @($Phases)

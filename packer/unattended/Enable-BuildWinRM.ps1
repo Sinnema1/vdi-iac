@@ -44,8 +44,10 @@ Set-Item -Path 'WSMan:\localhost\Service\Auth\Basic' -Value $false
 Set-Item -Path 'WSMan:\localhost\Service\Auth\Negotiate' -Value $true
 Set-Item -Path 'WSMan:\localhost\Service\AllowUnencrypted' -Value $false
 
-netsh advfirewall firewall add rule name="WinRM HTTPS (build)" `
-    dir=in action=allow protocol=TCP localport=5986 | Out-Null
+# Object-based, so the rule can be found and removed by name later without
+# parsing localized command output.
+New-NetFirewallRule -DisplayName 'WinRM HTTPS (build)' -Direction Inbound `
+    -Action Allow -Protocol TCP -LocalPort 5986 | Out-Null
 
 Set-Service -Name WinRM -StartupType Automatic
 Restart-Service -Name WinRM

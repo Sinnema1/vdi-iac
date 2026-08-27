@@ -35,6 +35,8 @@ BeforeAll {
         Set-Content -LiteralPath (Join-Path $work 'autounattend.xml') -Value '<x/>' -NoNewline
         Set-Content -LiteralPath (Join-Path $work 'bootstrap.ps1') -Value '# bootstrap' -NoNewline
         Set-Content -LiteralPath (Join-Path $work 'media.iso') -Value 'media' -NoNewline
+        $null = New-Item -ItemType Directory -Path (Join-Path $work 'bundle') -Force
+        Set-Content -LiteralPath (Join-Path $work 'qualification.json') -Value '{}' -NoNewline
 
         $values = [ordered]@{
             vcenter_server              = '"vcenter.example"'
@@ -52,6 +54,15 @@ BeforeAll {
             media_checksum              = '"sha256:' + ('0' * 64) + '"'
             answer_file_path            = '"' + (($work + '/autounattend.xml') -replace '\\', '/') + '"'
             winrm_bootstrap_path        = '"' + (($work + '/bootstrap.ps1') -replace '\\', '/') + '"'
+            bundle_path                 = '"' + (($work + '/bundle') -replace '\\', '/') + '"'
+            media_qualification_record_path = '"' + (($work + '/qualification.json') -replace '\\', '/') + '"'
+            vmware_tools_version        = '"12.5.0"'
+            finalization_nonce          = '"' + ('0123456789abcdef' * 2) + '"'
+            descriptor_sha256           = '"' + ('a' * 64) + '"'
+            tools_source_dir            = '"' + ((Join-Path $script:RepoRoot 'source-qualification' 'scripts') -replace '\\', '/') + '"'
+            guest_scripts_dir           = '"' + ((Join-Path $script:RepoRoot 'packer' 'scripts' 'guest') -replace '\\', '/') + '"'
+            contracts_source_dir        = '"' + ((Join-Path $script:RepoRoot 'contracts') -replace '\\', '/') + '"'
+            evidence_output_dir         = '"' + (($work + '/evidence') -replace '\\', '/') + '"'
             hardware_version            = '21'
             firmware                    = '"efi-secure"'
             virtual_tpm                 = 'true'
@@ -165,10 +176,13 @@ Describe 'the build seals what it constructed' {
         $script:Configuration | Should -Not -Match 'convert_to_template\s*=\s*true'
     }
 
-    It 'owns the shutdown rather than letting the guest take it' {
-        # A guest script shutting itself down would race the sealing step.
-        $script:Build | Should -Match 'shutdown_command\s*='
-        $script:Build | Should -Match 'shutdown_timeout\s*='
+    It 'waits for a shutdown it does not perform' {
+        # An absent shutdown command lets the builder ask VMware Tools for a
+        # graceful shutdown, which would power off a VM whose finalizer had
+        # failed -- removing the one signal the fail-closed design rests on.
+        $script:Configuration | Should -Match 'disable_shutdown\s*=\s*true'
+        $script:Configuration | Should -Match 'shutdown_timeout\s*='
+        $script:Configuration | Should -Not -Match 'shutdown_command\s*='
     }
 
     It 'delivers the answer file and its bootstrap as removable media' {
@@ -230,14 +244,153 @@ Describe 'the build seals what it constructed' {
         $schema.properties.buildSettings.properties.buildUsername.const | Should -Be 'Administrator'
     }
 
-    It 'configures no provisioning it has not implemented' {
-        # Stage 4 is construction only. An earlier draft downloaded an evidence
-        # file nothing creates and generalized a guest it never provisioned, so
-        # it could not have succeeded.
+    It 'reconciles the installed Windows against the record it uploaded' {
+        # The check reads a qualification record, so the build has to put one
+        # there. An earlier draft downloaded evidence nothing created; this is
+        # the same defect in the other direction.
+        $script:Configuration | Should -Match 'media_qualification_record_path'
+        $script:Configuration | Should -Match 'Test-PreGeneralizationReadiness'
+    }
+
+    It 'runs the pre-generalization checks only after provisioning is accepted' {
+        $gate = $script:Configuration.IndexOf('Test-ProvisioningComplete')
+        $checks = $script:Configuration.IndexOf('Test-PreGeneralizationReadiness')
+        $gate | Should -BeGreaterThan 0
+        $gate | Should -BeLessThan $checks
+    }
+
+    It 'removes residue after the checks that examine the machine' {
+        # The checks look at a machine that still has everything on it. Removing
+        # first would hide what they exist to observe.
+        $checks = $script:Configuration.IndexOf('Test-PreGeneralizationReadiness')
+        $removal = $script:Configuration.IndexOf('Invoke-AnswerFileResidueRemoval')
+        $checks | Should -BeLessThan $removal
+    }
+
+    It 'retrieves the evidence for both phases' {
+        foreach ($phase in 'pre-generalization', 'credential-residue') {
+            $script:Configuration | Should -Match ([regex]::Escape("$phase-`${local.evidence_name}"))
+        }
+    }
+
+    It 'refuses to continue when either phase did not pass' {
+        # Fails closed on both, so nothing downstream runs against a machine
+        # whose state was never established.
+        ([regex]::Matches($script:Configuration, "if \(\`$result\.Outcome -ne 'passed'\) \{ throw")).Count |
+            Should -Be 2
+    }
+
+    It 'checks VMware Tools before launching the finalizer' {
+        # A finalizer discovering this would refuse to shut down, correctly, but
+        # only after disabling the account and removing the listener.
+        $tools = $script:Configuration.IndexOf('Test-VMwareToolsPrerequisite')
+        $launch = $script:Configuration.IndexOf('Start-DetachedFinalizer.ps1')
+        $tools | Should -BeGreaterThan 0
+        $tools | Should -BeLessThan $launch
+    }
+
+    It 'passes the workspace the finalizer must remove' {
+        # Without it the finalizer cannot name what to delete, and the build
+        # scripts, contracts, evidence, and log travel into the image.
+        $script:Configuration | Should -Match '-WorkspaceRoot'
+    }
+
+    It 'launches the finalizer detached, as the last WinRM operation' {
+        # Everything after this happens in a session that survives the removal
+        # of the listener the command arrived on.
+        $script:Configuration | Should -Match 'Start-DetachedFinalizer\.ps1'
+    }
+
+    It 'schedules nothing after the finalizer launch' {
+        # The finalizer removes the listener, so a later provisioner has nothing
+        # to connect to. This is the invariant the whole design rests on.
+        $launch = $script:Configuration.IndexOf('Start-DetachedFinalizer.ps1')
+        $remainder = $script:Configuration.Substring($launch)
+
+        $remainder | Should -Not -Match 'provisioner "file"'
+        ([regex]::Matches($remainder, 'provisioner "')).Count | Should -Be 0
+    }
+
+    It 'seals nowhere inside the build' {
+        # Conversion is static configuration and cannot be a gate, so it happens
+        # on the host after Packer exits.
+        $script:Configuration | Should -Not -Match 'Invoke-CandidateSealing'
+        $script:Configuration | Should -Match 'convert_to_template\s*=\s*false'
+    }
+
+    It 'configures nothing beyond the steps it implements' {
+        # Steps 1 and 2 provision and prove it worked. Everything that turns a
+        # provisioned VM into an image is absent and unimplemented.
         $script:Configuration | Should -Not -Match 'Sysprep\.exe'
         $script:Configuration | Should -Not -Match 'Remove-SetupResidue'
-        $script:Configuration | Should -Not -Match 'direction   = "download"'
-        $script:Build | Should -Match 'STAGE 4 IS SOURCE AND BUILD CONFIGURATION ONLY'
+        $script:Build | Should -Match 'THE COMPLETE GUEST PATH'
+        # The comment has to keep saying what the file does. A marker naming
+        # steps the build has since grown past is worse than none, because it
+        # tells the next reader the wrong boundary.
+        $script:Build | Should -Not -Match 'STEPS 1 AND 2 ONLY'
+    }
+
+    It 'reuses the Increment 2 entry point rather than a parallel format' {
+        # A second package-transfer path would need its own verification, its
+        # own evidence, and its own reasons to be trusted.
+        $script:Configuration | Should -Match 'Invoke-GuestPhase\.ps1'
+        $script:Configuration | Should -Match '-Phase install'
+        $script:Configuration | Should -Match '-Phase validate'
+    }
+
+    It 'delivers the descriptor digest out of band' {
+        # A digest carried inside the bundle would be rewritten by whoever
+        # rewrote the bundle.
+        $script:Configuration | Should -Match 'VDIIAC_DESCRIPTOR_SHA256=\$\{var\.descriptor_sha256\}'
+        $script:Configuration | Should -Not -Match 'descriptor_sha256.*bundle_path'
+    }
+
+    It 'accepts the logical-failure exit code on the guest phases' {
+        # 200 means the phase decided not to proceed and wrote bounded evidence
+        # saying why. That is a result to retrieve, not a transport failure.
+        ([regex]::Matches($script:Configuration, 'valid_exit_codes = \[0, 200\]')).Count | Should -Be 2
+    }
+
+    It 'runs install before validate, with a restart between them' {
+        $install = $script:Configuration.IndexOf('-Phase install')
+        $restart = $script:Configuration.IndexOf('windows-restart')
+        $validate = $script:Configuration.IndexOf('-Phase validate')
+
+        $install | Should -BeGreaterThan 0
+        $install | Should -BeLessThan $restart
+        $restart | Should -BeLessThan $validate
+    }
+
+    It 'retrieves install evidence before the restart gate' {
+        # A failing provisioner stops the ones after it, so evidence collected
+        # later than the gate would never be collected at all.
+        $download = $script:Configuration.IndexOf('install-${local.evidence_name}"')
+        $gate = $script:Configuration.IndexOf('Test-RestartAuthorization')
+        $download | Should -BeGreaterThan 0
+        $download | Should -BeLessThan $gate
+    }
+
+    It 'verifies both evidence documents before deleting the bundle' {
+        # Deleting first would destroy the packages the evidence describes while
+        # the evidence was still unverified.
+        $gate = $script:Configuration.IndexOf('Test-ProvisioningComplete')
+        $cleanup = $script:Configuration.IndexOf('Remove-GuestBundle')
+        $gate | Should -BeGreaterThan 0
+        $gate | Should -BeLessThan $cleanup
+    }
+
+    It 'stops the build when the provisioning gate refuses' {
+        # Fails closed. Nothing after this point is reversible, and
+        # convert_to_template cannot be a gate because it is static
+        # configuration -- what keeps a failed build from being sealed is that
+        # this throws.
+        $script:Configuration | Should -Match 'if \(-not \$decision\.Authorized\) \{ throw'
+    }
+
+    It 'derives what it deletes from the staging root, not the descriptor' {
+        # Cleanup has to work after descriptor tampering, so what gets deleted
+        # must not depend on a document an attacker may have rewritten.
+        $script:Configuration | Should -Match "Remove-GuestBundle -StagingRoot '\$\{local\.guest_root\}' -RunId '\$\{var\.run_id\}'"
     }
 
     It 'finds the bootstrap by volume label, not a drive letter' {
@@ -391,6 +544,9 @@ Describe 'the handoff from verified media to the build' {
         $declaration = Import-AnswerFileTemplate -Path (Join-Path $script:RepoRoot 'packer' 'unattended' 'autounattend.template.json')
         Set-Content -LiteralPath (Join-Path $qualified.Root 'rendered.xml') -Value '<x/>' -NoNewline
         Set-Content -LiteralPath (Join-Path $qualified.Root 'bootstrap.ps1') -Value '# bootstrap' -NoNewline
+        $bundleDir = Join-Path $qualified.Root 'bundle'
+        $evidenceDir = Join-Path $qualified.Root 'evidence'
+        $null = New-Item -ItemType Directory -Path $bundleDir, $evidenceDir -Force
 
         $variables = ConvertTo-BuildVariableSet -QualifiedMedia $qualified.Verified -Declaration $declaration `
             -Hardware (BuildHardware) -AnswerFilePath (Join-Path $qualified.Root 'rendered.xml') -RunId $qualified.RunId
@@ -404,6 +560,15 @@ Describe 'the handoff from verified media to the build' {
             datastore = 'example-datastore'; network = 'example-network'; folder = 'example-folder'
             candidate_name = 'windows-candidate'; build_password = 'placeholder'
             winrm_bootstrap_path = (Join-Path $qualified.Root 'bootstrap.ps1')
+            bundle_path = $bundleDir
+            media_qualification_record_path = (Join-Path $qualified.Root 'qualification.json')
+            vmware_tools_version = '12.5.0'
+            finalization_nonce = ('0123456789abcdef' * 2)
+            descriptor_sha256 = ('a' * 64)
+            tools_source_dir = (Join-Path $script:RepoRoot 'source-qualification' 'scripts')
+            guest_scripts_dir = (Join-Path $script:RepoRoot 'packer' 'scripts' 'guest')
+            contracts_source_dir = (Join-Path $script:RepoRoot 'contracts')
+            evidence_output_dir = $evidenceDir
         }
 
         $lines = foreach ($pair in ($variables.GetEnumerator() + $platform.GetEnumerator())) {
@@ -420,5 +585,80 @@ Describe 'the handoff from verified media to the build' {
         $result = PackerValidate -VarFile $varFile
         $result.Output | Should -Match 'The configuration is valid'
         $result.ExitCode | Should -Be 0
+    }
+}
+
+Describe 'the VMware Tools version is one value everywhere' {
+
+    BeforeAll {
+        Import-Module (Join-Path $script:RepoRoot 'source-qualification' 'scripts' 'PackageManifest.psm1') -Force
+        $script:RealManifest = Import-PackageManifest -Path (Join-Path $script:RepoRoot 'packer' 'manifests' 'example-baseline-v2.json')
+
+        function Tooling { param([string] $Version = '12.5.0')
+            @{ PackerVersion = '1.15.4'; PluginVersions = @{ vsphere = '1.4.2' }; VMwareToolsVersion = $Version } }
+    }
+
+    It 'the committed manifest installs the tooling the channel needs' {
+        # Without it the prerequisite gate checks for software nothing installs,
+        # and the build fails at the gate having done everything right.
+        @($script:RealManifest.Packages | Where-Object id -EQ 'vmware-tools').Count | Should -Be 1
+    }
+
+    It 'installs it before anything that might need it' {
+        $tools = @($script:RealManifest.Packages | Where-Object id -EQ 'vmware-tools')[0]
+        $others = @($script:RealManifest.Packages | Where-Object id -NE 'vmware-tools')
+        foreach ($package in $others) { [int] $tools.order | Should -BeLessThan ([int] $package.order) }
+    }
+
+    It 'qualifies it like any other package' {
+        # A fingerprinted build input, not something assumed present: it has an
+        # expected hash, an install contract, and a validation check.
+        $tools = @($script:RealManifest.Packages | Where-Object id -EQ 'vmware-tools')[0]
+        $tools.sha256 | Should -Match '^[a-f0-9]{64}$'
+        $tools.required | Should -BeTrue
+        @($tools.validation).Count | Should -BeGreaterThan 0
+    }
+
+    It 'accepts a manifest, builder, and recipe that agree' {
+        Test-ToolsVersionAgreement -Manifest $script:RealManifest -BuilderVersion '12.5.0' -Tooling (Tooling) |
+            Should -BeNullOrEmpty
+    }
+
+    It 'refuses a builder checking for a version the manifest does not install' {
+        # The gate would refuse a correct build, having installed exactly what
+        # it was told to.
+        Test-ToolsVersionAgreement -Manifest $script:RealManifest -BuilderVersion '12.4.9' -Tooling (Tooling) |
+            Should -Match 'installs 12.5.0 and the build checks for 12.4.9'
+    }
+
+    It 'refuses a recipe recording a version the manifest does not install' {
+        # The digest would name a machine that was never constructed.
+        Test-ToolsVersionAgreement -Manifest $script:RealManifest -BuilderVersion '12.5.0' -Tooling (Tooling -Version '13.0.0') |
+            Should -Match 'records 13.0.0'
+    }
+
+    It 'refuses a manifest with no tooling package' {
+        $manifest = [PSCustomObject]@{ SchemaVersion = 2; Packages = @() }
+        Test-ToolsVersionAgreement -Manifest $manifest -BuilderVersion '12.5.0' -Tooling (Tooling) |
+            Should -Match 'no .vmware-tools. package'
+    }
+
+    It 'refuses a recipe with no tooling version at all' {
+        Test-ToolsVersionAgreement -Manifest $script:RealManifest -BuilderVersion '12.5.0' `
+            -Tooling @{ PackerVersion = '1.15.4'; PluginVersions = @{} } |
+            Should -Match 'does not record a VMware Tools version'
+    }
+
+    It 'agrees with the version the build configuration checks for' {
+        # The end of the chain: the value in the committed variable example and
+        # the value in the committed manifest are the same string.
+        $tools = @($script:RealManifest.Packages | Where-Object id -EQ 'vmware-tools')[0]
+        $configured = ([regex]::Match($script:Configuration,
+            'vmware_tools_version[^\n]*\n[^\n]*ExpectedVersion ''(?<v>[^'']+)''')).Groups['v'].Value
+        if (-not $configured) {
+            $configured = ([regex]::Match($script:Configuration, "ExpectedVersion '\`$\{var\.vmware_tools_version\}'")).Value
+            $configured | Should -Not -BeNullOrEmpty -Because 'the build must compare against the declared version'
+        }
+        $tools.version | Should -Be '12.5.0'
     }
 }

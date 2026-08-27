@@ -985,6 +985,12 @@ Acceptance criteria:
   the increment closes as **implementation complete; lab validation pending**,
   and landing lab-test definitions does not substitute for running them.
 
+Known follow-up, not blocking: `relativePath` in manifest version 2 is
+`^[A-Za-z0-9][A-Za-z0-9._/-]*$`, which cannot express a path containing a space.
+Any package installing under a directory like `VMware Tools` therefore cannot be
+validated by file path and must use a service check instead. Widening the
+pattern is a manifest version 3, not an edit.
+
 Known follow-up, not blocking: a top-level `failed` result containing an
 `incomplete` package should normalize to `incomplete`. Neither value permits
 success or authorizes a restart, so the current behavior is safe and the
@@ -1058,13 +1064,9 @@ surface is as small as possible when a target finally exists.
    rotating the build credential is defined here and **implemented in stage 5**,
    before sealing, so that a sealed image never carries a working one. The table
    above is authoritative on what exists today;
-3. image identity and the provenance record -- **implementation complete and
-   locally verified; remote CI confirmation pending**. Acceptance is distinct
-   from progress: this stage is not described as CI-proven until a workflow run
-   reports success, with the run's head SHA checked before the result is
-   accepted.
+3. image identity and the provenance record -- **complete and CI-proven**.
 
-   How that run is obtained matters, because waiting alone will not produce one.
+   How a run is obtained matters, because waiting alone will not produce one.
    The workflow triggers on pushes to `main` and on pull requests, not on
    ordinary feature-branch pushes, so a branch can sit indefinitely with no run
    against it. Validation comes from opening a pull request. A green run on a
@@ -1116,11 +1118,87 @@ surface is as small as possible when a target finally exists.
    pass satisfies every check here and then hangs a real setup at a prompt. SIM
    validation is a lab obligation and is outstanding.
 
-   Closes as **configuration validated in CI; execution lab pending**: `packer validate` resolves references a syntax check would not,
+   **Complete at the configuration and CI verification level.** Closes as
+   **configuration validated in CI; execution lab pending**: `packer validate` resolves references a syntax check would not,
    and proves nothing about vSphere connectivity, media reachability, boot
    behavior, or whether the build converts to a template;
-5. pre-generalization checks, generalization, shutdown, and sealing, with
-   evidence at each boundary. **Lab-only**; nothing here is CI-provable.
+5. the sealed-candidate path, in the order the gates have to hold. Everything
+   before generalization is host- or guest-side and testable against fixtures;
+   everything from generalization onward needs a lab.
+
+   | Step | State |
+   | --- | --- |
+   | 1. transfer and invoke the verified bundle | implemented, wired, CI-proven; real build pending |
+   | 2. collect install and validation evidence, and gate on it | implemented, wired, CI-proven; real build pending |
+   | 3. pre-generalization checks | implemented, wired, CI-proven; real build pending |
+   | 4. answer-file and credential residue removal | implemented, wired, CI-proven; real build pending |
+   | 5-7. the terminal transition | orchestration CI-proven; production guest adapter and detached launcher written and wired; **never executed** |
+   | 8. conversion | host coordinator and vSphere adapter written; **never executed** |
+   | 9. provenance bound to the artifact | emitted, validated, and confirmed by retrieval; **never produced by a real build** |
+
+   The production seams now exist: the Windows finalization adapter, the
+   detached SYSTEM launcher, the VMware Tools prerequisite and GuestInfo
+   publisher, the vSphere platform adapter, and the sealing entry point. They
+   are written and their shape is asserted; **none of them has run**. Parsing
+   and contract tests establish that they are code with the right seams, not
+   that any of it works.
+
+   **No vSphere or VMware Tools capability is proven.** The disposable-target
+   run is what would establish it, and it has not happened.
+
+   Steps 5 to 7 are one terminal transition: disable the build account, remove
+   the WinRM listener and its firewall exception -- the listener exists so the
+   build can reach the guest, and an image that ships with one reachable ships
+   with a way in -- then generalize and shut down, with the shutdown observed
+   rather than assumed.
+
+   The ordering is the safety property. Removing the listener before evidence is
+   collected loses the evidence; generalizing before the credential is disabled
+   seals it in; converting before any of it produces an immutable artifact
+   carrying all of them.
+
+   Settled by [ADR 8](docs/decisions/0008-terminal-finalization-and-sealing.md):
+   a detached SYSTEM finalizer owns the transition, `disable_shutdown` makes
+   Packer wait for a shutdown it does not perform, and conversion moves out of
+   the build into a host-side sealing phase that consumes and clears the
+   attestation before converting. `convert_to_template` stays false permanently.
+
+   **Steps 5 to 7 are one terminal transition, not three provisioners.** The
+   numbering above describes the order the gates must hold in, not a sequence of
+   separately invoked steps. Packer reaches the guest over WinRM, so a
+   provisioner cannot remove the listener and a later provisioner then open
+   another session to run Sysprep. Any design that reads as three ordinary steps
+   is wrong at the mechanism level whatever its ordering.
+
+   The constraints that follow, to be settled before step 5 is implemented and
+   deliberately not solved during steps 1 and 2:
+
+   - every ordinary guest command runs, and every retrievable piece of evidence
+     is retrieved, **before** transport teardown begins. Nothing that needs a
+     connection may be scheduled after it;
+   - account disablement, listener and firewall teardown, final verification,
+     and Sysprep with shutdown are coordinated as **one terminal finalization
+     operation** -- a single invocation that performs them in order and does not
+     return, or a detached SYSTEM-context finalizer the last WinRM command
+     launches and then stops waiting on;
+   - once that transition begins, Packer must not expect another guest
+     connection. A provisioner scheduled after it is a design error, not a
+     timeout to tune;
+   - how cleanup success becomes bounded evidence **without reconnecting** has
+     to be stated explicitly. Evidence written after the last retrieval is
+     unreachable by definition, so either the finalizer's outcome is observable
+     from outside the guest, or it is written before teardown and the teardown
+     itself is what the absence of a later contradiction attests to. Whichever
+     is chosen, an unverifiable claim is not evidence;
+   - Packer observes the VM **powering off through vSphere**, not a guest
+     command reporting that it will. A shutdown that was asked for is not a
+     shutdown that happened;
+   - `convert_to_template` is static configuration and cannot itself be a gate.
+     Safety comes from every preceding provisioner failing closed, so a failed
+     gate stops the build before Packer reaches conversion at all. The switch
+     records the intent; the provisioners are what enforce it.
+
+   **Lab-only from step 7 onward**; nothing there is CI-provable.
 
    Sealing is a positive gate, not the absence of a failure. An artifact may be
    called a sealed candidate only when every one of these is affirmatively

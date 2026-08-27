@@ -695,7 +695,20 @@
                       "seal_unconfirmed",
                       "credential_residue_present",
                       "provenance_incomplete",
-                      "unexpected_error"
+                      "unexpected_error",
+                      "vm_not_resolved",
+                      "vm_not_powered_off",
+                      "attestation_missing",
+                      "attestation_malformed",
+                      "attestation_oversized",
+                      "attestation_run_id_mismatch",
+                      "attestation_nonce_mismatch",
+                      "attestation_inconsistent",
+                      "finalization_failed",
+                      "finalization_step_did_not_pass",
+                      "finalization_step_sequence_wrong",
+                      "attestation_not_persisted",
+                      "attestation_not_cleared"
                     ]
                   }
                 ]
@@ -722,8 +735,22 @@
                 "seal_unconfirmed",
                 "credential_residue_present",
                 "provenance_incomplete",
-                "unexpected_error"
-              ]
+                "unexpected_error",
+                "vm_not_resolved",
+                "vm_not_powered_off",
+                "attestation_missing",
+                "attestation_malformed",
+                "attestation_oversized",
+                "attestation_run_id_mismatch",
+                "attestation_nonce_mismatch",
+                "attestation_inconsistent",
+                "finalization_failed",
+                "finalization_step_did_not_pass",
+                "finalization_step_sequence_wrong",
+                "attestation_not_persisted",
+                "attestation_not_cleared"
+              ],
+              "description": "Bounded. The sealing phase's own refusals are named here rather than collapsed into unexpected_error: a record saying the machine was still powered on is actionable, and one saying something unexpected happened is not."
             }
           ]
         }

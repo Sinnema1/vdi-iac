@@ -122,6 +122,51 @@ variable "winrm_bootstrap_path" {
   description = "The script the answer file's first-logon command runs to create the WinRM listener. Carries no credential."
 }
 
+variable "vmware_tools_version" {
+  type        = string
+  description = "The VMware Tools version the recipe names. Checked against the installed product before the finalizer launches, because the attestation channel is Tools' RPC interface and the version is a recipe input."
+}
+
+variable "media_qualification_record_path" {
+  type        = string
+  description = "The qualification record, uploaded so the pre-generalization checks can reconcile the installed Windows against the declared media intent. Qualification never opened the media, so this is where that intent is finally checked."
+}
+
+variable "bundle_path" {
+  type        = string
+  description = "The verified-only transfer bundle from Increment 2. Only content that passed host verification is in it."
+}
+
+variable "descriptor_sha256" {
+  type        = string
+  description = "The bundle descriptor's expected digest, delivered out of band. A digest carried inside the bundle would be rewritten by whoever rewrote the bundle."
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.descriptor_sha256))
+    error_message = "The descriptor_sha256 must be a lowercase hexadecimal SHA-256."
+  }
+}
+
+variable "tools_source_dir" {
+  type        = string
+  description = "Guest-side modules uploaded to the build VM."
+}
+
+variable "guest_scripts_dir" {
+  type        = string
+  description = "Guest phase entry scripts."
+}
+
+variable "contracts_source_dir" {
+  type        = string
+  description = "Contracts uploaded so the guest validates its own evidence against the same files the host does."
+}
+
+variable "evidence_output_dir" {
+  type        = string
+  description = "Where retrieved guest evidence is written on the host."
+}
+
 variable "answer_file_path" {
   type        = string
   description = "The rendered answer file. It holds a working credential for as long as it exists and is removed by the renderer on every exit path."
@@ -196,6 +241,16 @@ variable "build_username" {
   description = "Account the answer file configures, supplied by ConvertTo-BuildVariableSet from the answer-file declaration so the two cannot disagree. Disabled or rotated before sealing, which is stage 5 work."
 }
 
+variable "finalization_nonce" {
+  type        = string
+  description = "Host-generated, per run. The host clears the attestation key before this launches, so a value carrying this nonce is one this run wrote. Not a credential: it is published in the attestation."
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{32}$", var.finalization_nonce))
+    error_message = "The finalization_nonce must be 32 lowercase hexadecimal characters."
+  }
+}
+
 variable "build_password" {
   type        = string
   sensitive   = true
@@ -215,6 +270,13 @@ source "vsphere-iso" "windows" {
   folder     = var.folder
 
   vm_name = var.candidate_name
+
+  # The run annotation the host sealing phase resolves on. It is the identity a
+  # name cannot provide: a name is mutable and reusable, and sealing whatever
+  # answers to it is how one build's artifact acquires another build's
+  # provenance. The resolver compares this exactly, so the value written here
+  # and the value it expects are one string with no surrounding text.
+  notes = "vdi-iac-run:${var.run_id}"
 
   # Parameterised, not hard-coded. It was windows9Server64Guest -- a Windows
   # Server identifier -- while the artifact this repository builds is a desktop
@@ -251,6 +313,12 @@ source "vsphere-iso" "windows" {
   cd_files = [var.answer_file_path, var.winrm_bootstrap_path]
   cd_label = "OEMDRV"
 
+  # The answer file and its bootstrap travel on removable media, and that media
+  # holds a rendered credential. Detached before the artifact is accepted, so
+  # neither the installation media nor the OEMDRV volume remains attached to a
+  # machine that is about to become an image.
+  remove_cdrom = true
+
   # WinRM rather than SSH: the guest is Windows, and provisioning runs
   # PowerShell. The listener is created by the answer file's first-logon
   # command; a fresh installation has none, and without it the build completes
@@ -284,10 +352,28 @@ source "vsphere-iso" "windows" {
 
   # Packer owns the shutdown, exactly as it owns the restart boundary. A guest
   # script that shut itself down would race the sealing step.
-  shutdown_command = "shutdown /s /t 10 /f /d p:4:1 /c \"packer build shutdown\""
-  shutdown_timeout = "30m"
+  # The guest shuts itself down, and Packer waits. disable_shutdown rather than
+  # an empty command: an absent command lets the builder ask VMware Tools for a
+  # graceful shutdown, which would power off a VM whose finalizer had failed and
+  # remove the one signal the fail-closed design rests on. A failed finalizer
+  # must leave the machine running.
+  #
+  # The finalizer that performs that shutdown is stage 5 step 5 and is not
+  # launched from here yet, so a build run today reaches this and waits until
+  # the timeout. That is the correct behaviour for a configuration whose
+  # terminal transition is not implemented.
+  disable_shutdown = true
+  shutdown_timeout = "60m"
 
-  # Template conversion is OFF, deliberately, and stays off until stage 5.
+  # Template conversion is OFF permanently. Sealing is a host-side phase that
+  # runs after Packer exits, per ADR 8.
+  #
+  # It cannot live here: convert_to_template is static configuration and cannot
+  # be conditional, so it would convert whatever the build produced -- including
+  # a VM whose finalizer failed but which powered off for some other reason. The
+  # host-side phase confirms the power state, validates the attestation against
+  # this run and a host-generated nonce, clears the transient key so a clone
+  # cannot inherit stale build evidence, and only then converts.
   #
   # Converting makes an artifact immutable, which is exactly why it must not
   # happen here. At this point in the build the VM still holds an enabled build
@@ -297,46 +383,262 @@ source "vsphere-iso" "windows" {
   # produces an immutable artifact nobody can fix and which a later stage might
   # find and treat as a candidate.
   #
-  # Stage 5 turns this on only behind the gates that make it safe: the build
-  # credential disabled or rotated, residue removed, generalization complete, a
-  # shutdown observed rather than assumed, and positive sealing evidence. Those
-  # gates are implemented in BuildEvidence.psm1 and are not invoked from here.
   convert_to_template = false
+}
+
+locals {
+  guest_root       = "C:/vdi-iac-build"
+  tools_target     = "${local.guest_root}/tools"
+  guest_target     = "${local.guest_root}/guest"
+  contracts_target = "${local.guest_root}/contracts"
+  bundle_target    = "${local.guest_root}/bundle"
+  evidence_name    = "guest-evidence.json"
+  halt_path        = "${local.guest_root}/halt.txt"
 }
 
 build {
   name    = "windows-candidate"
   sources = ["source.vsphere-iso.windows"]
 
-  # STAGE 4 IS SOURCE AND BUILD CONFIGURATION ONLY.
+  # THE COMPLETE GUEST PATH, ENDING IN A TRANSITION PACKER CANNOT FOLLOW.
   #
-  # This build constructs a VM from qualified media and an unattended answer
-  # file, and stops there. It deliberately contains no content-changing
-  # provisioners: the one provisioner below writes a line and changes nothing,
-  # which confirms the communicator can reach the guest. Everything that would
-  # follow belongs to later stages and none of it is implemented:
+  # This build constructs a VM, installs the qualified packages, validates them
+  # after a restart, runs the pre-generalization checks, clears the credential
+  # residue, and hands the terminal transition to a detached SYSTEM task before
+  # returning. It does not seal.
   #
-  #   - guest provisioning: the Increment 2 transfer bundle, its verification,
-  #     installation, and evidence, are not wired in here yet. An earlier draft
-  #     downloaded guest-evidence.json, which nothing in this configuration
-  #     creates, so the build could not have reached generalization at all;
-  #   - credential disable or rotation before sealing;
-  #   - setup-residue removal inside the guest;
-  #   - pre-generalization checks, generalization, and an observed shutdown;
-  #   - provenance emission binding recipeDigest, runId, and the artifact.
+  # After the finalizer is launched NOTHING may be scheduled: it removes the
+  # WinRM listener this build reached the guest through, so a later provisioner
+  # has nothing to connect to. That is a design error, not a timeout to tune.
   #
-  # Those are stages 5 and 6. Listing them here rather than leaving the file
-  # silent means the gap is visible to whoever opens it next, and a provisioner
-  # added above this comment is a deliberate act rather than an accident.
+  # Sealing happens on the host after Packer exits. convert_to_template stays
+  # false and cannot be a gate -- it is static configuration, so inside the
+  # build it would convert whatever the build produced, including a machine
+  # whose finalizer failed. What keeps a failed build from being sealed is that
+  # every provisioner below fails closed and the host phase refuses anything it
+  # cannot confirm.
+
+  # 1. Guest-side code, the contracts it validates its own evidence against, and
+  #    the verified-only bundle. Nothing unverified crosses this boundary: the
+  #    bundle contains only content that passed host verification.
+  provisioner "file" {
+    source      = "${var.tools_source_dir}/"
+    destination = "${local.tools_target}/"
+  }
+
+  provisioner "file" {
+    source      = "${var.guest_scripts_dir}/"
+    destination = "${local.guest_target}/"
+  }
+
+  provisioner "file" {
+    source      = "${var.contracts_source_dir}/"
+    destination = "${local.contracts_target}/"
+  }
+
+  provisioner "file" {
+    source      = "${var.bundle_path}/"
+    destination = "${local.bundle_target}/"
+  }
+
+  provisioner "file" {
+    source      = var.media_qualification_record_path
+    destination = "${local.guest_root}/media-qualification.json"
+  }
+
+  # 2. Install. The expected descriptor digest arrives through the environment,
+  #    out of band from the bundle it authenticates -- a digest carried inside
+  #    the bundle would be rewritten by whoever rewrote the bundle. The
+  #    environment is the same channel that delivers this command, so an
+  #    attacker able to rewrite it is already executing code here.
   #
-  # convert_to_template stays on the source: it is what makes the artifact
-  # immutable once a build does complete. Confirming a seal, and refusing to
-  # call anything a candidate without the full phase sequence, is stage 5 work
-  # already implemented in BuildEvidence.psm1 and not invoked from here.
+  #    Exit code 200 is accepted: it means the phase decided not to proceed and
+  #    wrote bounded evidence saying why, which is a result to retrieve rather
+  #    than a transport failure.
   provisioner "powershell" {
-    use_pwsh = false
+    use_pwsh         = true
+    valid_exit_codes = [0, 200]
+    environment_vars = [
+      "VDIIAC_DESCRIPTOR_SHA256=${var.descriptor_sha256}",
+      "VDIIAC_RUN_ID=${var.run_id}",
+      "VDIIAC_HALT_PATH=${local.halt_path}"
+    ]
     inline = [
-      "Write-Host 'stage 4: construction only. No guest provisioning is configured.'"
+      "$ErrorActionPreference = 'Stop'",
+      "& '${local.guest_target}/Invoke-GuestPhase.ps1' -BundlePath '${local.bundle_target}' -ToolsPath '${local.tools_target}' -Phase install -EvidencePath '${local.guest_root}/install-${local.evidence_name}'"
     ]
   }
+
+  # 3. Install evidence is retrieved before the restart, not at the end. A
+  #    failing provisioner stops the ones after it, so evidence collected later
+  #    than the next gate would never be collected at all.
+  provisioner "file" {
+    direction   = "download"
+    source      = "${local.guest_root}/install-${local.evidence_name}"
+    destination = "${var.evidence_output_dir}/install-${local.evidence_name}"
+  }
+
+  # 4. The restart gate. Authorization is positive and comes from the install
+  #    evidence: an installer that may still be writing must never meet a
+  #    reboot. The halt marker is a supplementary signal, because writing it can
+  #    fail and a gate that permits a reboot whenever a file is absent is
+  #    fail-open.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
+      "$decision = Test-RestartAuthorization -EvidencePath '${local.guest_root}/install-${local.evidence_name}' -RunId '${var.run_id}' -SchemaPath '${local.contracts_target}/evidence-envelope-2.schema.json' -HaltMarkerPath '${local.halt_path}'",
+      "if (-not $decision.Authorized) { throw \"Restart refused: $($decision.ReasonCode).\" }",
+      "Write-Host 'gate: install completed, restart may proceed'"
+    ]
+  }
+
+  # 5. Packer owns the restart, as it owns the shutdown. Installation logic
+  #    reports that one is required and never triggers it.
+  provisioner "windows-restart" {
+    restart_timeout = "30m"
+  }
+
+  # 6. Validation, after the restart. This is what establishes that the software
+  #    is actually present rather than that an installer exited zero.
+  provisioner "powershell" {
+    use_pwsh         = true
+    valid_exit_codes = [0, 200]
+    environment_vars = [
+      "VDIIAC_DESCRIPTOR_SHA256=${var.descriptor_sha256}",
+      "VDIIAC_RUN_ID=${var.run_id}",
+      "VDIIAC_HALT_PATH=${local.halt_path}"
+    ]
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "& '${local.guest_target}/Invoke-GuestPhase.ps1' -BundlePath '${local.bundle_target}' -ToolsPath '${local.tools_target}' -Phase validate -EvidencePath '${local.guest_root}/validate-${local.evidence_name}'"
+    ]
+  }
+
+  provisioner "file" {
+    direction   = "download"
+    source      = "${local.guest_root}/validate-${local.evidence_name}"
+    destination = "${var.evidence_output_dir}/validate-${local.evidence_name}"
+  }
+
+  # 7. The provisioning gate, before anything irreversible. Both documents are
+  #    schema-validated and cross-checked here, and this runs BEFORE the bundle
+  #    is removed: deleting it first would destroy the packages the evidence
+  #    describes while the evidence was still unverified.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
+      "$decision = Test-ProvisioningComplete -InstallEvidencePath '${local.guest_root}/install-${local.evidence_name}' -ValidateEvidencePath '${local.guest_root}/validate-${local.evidence_name}' -RunId '${var.run_id}' -SchemaPath '${local.contracts_target}/evidence-envelope-2.schema.json'",
+      "if (-not $decision.Authorized) { throw \"Provisioning gate refused: $($decision.ReasonCode). The build stops here rather than generalizing a machine whose provisioning cannot be accounted for.\" }",
+      "Write-Host 'gate: provisioning complete and accounted for'"
+    ]
+  }
+
+  # 8. Remove the bundle, now that its evidence has been retrieved and verified.
+  #    The target is derived from the host-controlled staging root and the run
+  #    identifier, never read from the descriptor: cleanup has to work after
+  #    descriptor tampering, so what gets deleted must not depend on a document
+  #    an attacker may have rewritten.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/GuestProvisioning.psm1' -Force",
+      "$outcome = Remove-GuestBundle -StagingRoot '${local.guest_root}' -RunId '${var.run_id}'",
+      "Write-Host \"bundle cleanup: $outcome\""
+    ]
+  }
+
+  # 9. Pre-generalization checks, on a machine about to lose its identity. This
+  #    is the last point at which anything can be observed and the last at which
+  #    anything can be fixed, so it runs before any of it is torn down.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/PreGeneralization.psm1' -Force",
+      "$gate = @{ InstallEvidencePath = '${local.guest_root}/install-${local.evidence_name}'; ValidateEvidencePath = '${local.guest_root}/validate-${local.evidence_name}'; RunId = '${var.run_id}'; SchemaPath = '${local.contracts_target}/evidence-envelope-2.schema.json' }",
+      "$record = Get-Content -LiteralPath '${local.guest_root}/media-qualification.json' -Raw | ConvertFrom-Json",
+      "$result = Test-PreGeneralizationReadiness -Gate $gate -MediaRecord $record -StagingRoot '${local.guest_root}' -RunId '${var.run_id}' -FactProvider (Get-SystemFactProvider)",
+      "ConvertTo-ImageBuildPhase -PhaseResult $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath '${local.guest_root}/pre-generalization-${local.evidence_name}' -Encoding utf8",
+      "if ($result.Outcome -ne 'passed') { throw \"Pre-generalization refused: $($result.ReasonCode).\" }",
+      "Write-Host 'gate: pre-generalization checks passed'"
+    ]
+  }
+
+  provisioner "file" {
+    direction   = "download"
+    source      = "${local.guest_root}/pre-generalization-${local.evidence_name}"
+    destination = "${var.evidence_output_dir}/pre-generalization-${local.evidence_name}"
+  }
+
+  # 10. Remove what setup left behind. Each copy holds the administrator
+  #     password in plain text, so this happens before anything generalizes the
+  #     machine and long before anything seals it.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/PreGeneralization.psm1' -Force",
+      "$gate = @{ InstallEvidencePath = '${local.guest_root}/install-${local.evidence_name}'; ValidateEvidencePath = '${local.guest_root}/validate-${local.evidence_name}'; RunId = '${var.run_id}'; SchemaPath = '${local.contracts_target}/evidence-envelope-2.schema.json' }",
+      "$result = Invoke-AnswerFileResidueRemoval -Gate $gate -SystemDrive 'C:/' -Confirm:$false",
+      "ConvertTo-ImageBuildPhase -PhaseResult $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath '${local.guest_root}/credential-residue-${local.evidence_name}' -Encoding utf8",
+      "if ($result.Outcome -ne 'passed') { throw \"Residue removal refused: $($result.ReasonCode).\" }",
+      "Write-Host 'gate: credential residue cleared'"
+    ]
+  }
+
+  provisioner "file" {
+    direction   = "download"
+    source      = "${local.guest_root}/credential-residue-${local.evidence_name}"
+    destination = "${var.evidence_output_dir}/credential-residue-${local.evidence_name}"
+  }
+
+  # 11. VMware Tools, checked before anything depends on it. The attestation
+  #     channel is its RPC interface, and a fresh installation carries none of
+  #     it.
+  #
+  #     Checked here rather than inside the finalizer: a finalizer discovering
+  #     this would have to refuse to shut down, correctly, but only after
+  #     disabling the account and removing the listener -- leaving a machine
+  #     nobody can reach and nothing can finish.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "Import-Module '${local.tools_target}/Finalization.psm1' -Force",
+      "Import-Module '${local.guest_target}/WindowsFinalizationAdapter.psm1' -Force",
+      "$decision = Test-VMwareToolsPrerequisite -ExpectedVersion '${var.vmware_tools_version}' -Adapter (Get-WindowsToolsAdapter)",
+      "if (-not $decision.Satisfied) { throw \"VMware Tools prerequisite refused: $($decision.ReasonCode).\" }",
+      "Write-Host 'gate: VMware Tools present, running, and the expected version'"
+    ]
+  }
+
+  # 12. THE LAST OPERATION OVER WINRM.
+  #
+  #     Hands the terminal transition to a scheduled task running as SYSTEM and
+  #     returns. Everything after this point happens in a session that survives
+  #     the removal of the listener this command arrived on.
+  #
+  #     NOTHING MAY BE SCHEDULED AFTER THIS PROVISIONER. The finalizer removes
+  #     the WinRM listener, so a later one has nothing to connect to -- a design
+  #     error, not a timeout to tune.
+  #
+  #     The build then waits at disable_shutdown for the guest to power itself
+  #     off. A finalizer that refused leaves the machine running, and the build
+  #     fails on that timeout, which is the intended signal.
+  provisioner "powershell" {
+    use_pwsh = true
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "& '${local.guest_target}/Start-DetachedFinalizer.ps1' -RunId '${var.run_id}' -Nonce '${var.finalization_nonce}' -BuildUsername '${var.build_username}' -ToolsPath '${local.tools_target}' -GuestScriptsPath '${local.guest_target}' -WorkspaceRoot '${local.guest_root}'",
+      "Write-Host 'finalizer launched; this build expects no further guest connection'"
+    ]
+  }
+
+  # STOP. Sealing happens on the host after Packer exits, not here: conversion
+  # is static configuration and cannot be conditional, so it cannot be a gate.
 }

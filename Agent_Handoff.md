@@ -1141,6 +1141,12 @@ surface is as small as possible when a target finally exists.
    seals it in; converting before any of it produces an immutable artifact
    carrying all of them.
 
+   Settled by [ADR 8](docs/decisions/0008-terminal-finalization-and-sealing.md):
+   a detached SYSTEM finalizer owns the transition, `disable_shutdown` makes
+   Packer wait for a shutdown it does not perform, and conversion moves out of
+   the build into a host-side sealing phase that consumes and clears the
+   attestation before converting. `convert_to_template` stays false permanently.
+
    **Steps 5 to 7 are one terminal transition, not three provisioners.** The
    numbering above describes the order the gates must hold in, not a sequence of
    separately invoked steps. Packer reaches the guest over WinRM, so a

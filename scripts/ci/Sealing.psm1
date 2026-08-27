@@ -85,6 +85,15 @@ function Invoke-CandidateSealing {
 
     $validatedRunId = Assert-RunIdentifier -RunId $RunId
 
+    # Carried so a reconciliation record can be assembled from any failure point
+    # after conversion, without each of them restating the build's identity.
+    $context = @{
+        RunId = $validatedRunId; ManifestSchemaVersion = $ManifestSchemaVersion
+        StartedUtc = $StartedUtc; RecipeDigest = $RecipeDigest
+        RecipeInputVersion = $RecipeInputVersion; MediaId = $MediaId
+        CompletedPhases = $CompletedPhases
+    }
+
     # 1. Packer must have finished. A build that failed produced a machine in
     #    whatever state it failed in, and sealing it would make that permanent.
     if (-not $PackerSucceeded) { return Refused -State 'pre-seal' -Reason 'construction_failed' }
@@ -153,14 +162,18 @@ function Invoke-CandidateSealing {
     #    every remaining failure is unconfirmed rather than pre-seal.
     try { $null = & $Adapter['ConvertToTemplate'] $machine }
     catch {
-        return Unconfirmed -Reason 'seal_failed' -Attestation $raw -Artifact (TryIdentity -Adapter $Adapter -Machine $machine)
+        return Unconfirmed -Reason 'seal_failed' -Attestation $raw `
+            -Artifact (TryIdentity -Adapter $Adapter -Machine $machine) -Context $context -Adapter $Adapter
     }
 
     # 8. Name it. An artifact whose identity cannot be read is one nothing
     #    downstream can refer to, so it is recorded as possibly existing rather
     #    than as a candidate.
     $identity = TryIdentity -Adapter $Adapter -Machine $machine
-    if (-not $identity) { return Unconfirmed -Reason 'seal_unconfirmed' -Attestation $raw -Artifact $null }
+    if (-not $identity) {
+        return Unconfirmed -Reason 'seal_unconfirmed' -Attestation $raw -Artifact $null `
+            -Context $context -Adapter $Adapter
+    }
 
     # 9. Emit provenance, and let the contract decide. Field-presence checks
     #    were the previous test of identity, which accepts a managed object
@@ -172,21 +185,49 @@ function Invoke-CandidateSealing {
 
     $json = $document | ConvertTo-Json -Depth 20
     $documentReason = Test-EvidenceEnvelopeDocument -Json $json
-    if ($documentReason) { return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity }
+    if ($documentReason) {
+        return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity `
+            -Context $context -Adapter $Adapter
+    }
 
     $consistency = Test-ImageBuildResult -Evidence ($json | ConvertFrom-Json)
-    if ($consistency) { return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity }
+    if ($consistency) {
+        return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity `
+            -Context $context -Adapter $Adapter
+    }
 
     # The same gate every downstream consumer uses, applied to the serialized
     # document rather than to the object this function happens to be holding.
     if (-not (Test-SealedCandidate -Json $json)) {
-        return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity
+        return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity `
+            -Context $context -Adapter $Adapter
     }
 
     $written = $false
     try { $written = [bool](& $Adapter['WriteHostEvidence'] 'image-build-evidence.json' $json) }
     catch { $written = $false }
-    if (-not $written) { return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity }
+    if (-not $written) {
+        return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity `
+            -Context $context -Adapter $Adapter
+    }
+
+    # 10. Read the record back and judge the bytes that survived, not the ones
+    #     handed to the writer. A sealed state claims a durable document exists;
+    #     the only way to know is to retrieve it. A writer that reported success
+    #     and left a truncated file would otherwise produce a candidate whose
+    #     evidence nobody can read.
+    $retrieved = $null
+    try { $retrieved = [string](& $Adapter['ReadHostEvidence'] 'image-build-evidence.json') }
+    catch { $retrieved = $null }
+
+    if ([string]::IsNullOrWhiteSpace($retrieved) -or
+        (Test-EvidenceEnvelopeDocument -Json $retrieved) -or
+        (Test-ImageBuildResult -Evidence ($retrieved | ConvertFrom-Json)) -or
+        (-not (Test-SealedCandidate -Json $retrieved))) {
+
+        return Unconfirmed -Reason 'provenance_incomplete' -Attestation $raw -Artifact $identity `
+            -Context $context -Adapter $Adapter
+    }
 
     [PSCustomObject]@{
         BuildState          = 'sealed'
@@ -195,7 +236,8 @@ function Invoke-CandidateSealing {
         ArtifactIdentity    = $identity
         UnconfirmedArtifact = $null
         Attestation         = $raw
-        Provenance          = $json
+        Provenance          = $retrieved
+        EvidencePersisted   = $true
     }
 }
 
@@ -208,23 +250,25 @@ function NewProvenanceDocument {
     param(
         [string] $RunId, [int] $ManifestSchemaVersion, [string] $StartedUtc,
         [string] $RecipeDigest, [int] $RecipeInputVersion, [string] $MediaId,
-        $CompletedPhases, $Identity, [bool] $Sealed
+        $CompletedPhases, $Identity, [bool] $Sealed, [string] $Reason
     )
 
     $phases = [System.Collections.Generic.List[object]]::new()
     foreach ($phase in @($CompletedPhases)) {
         $phases.Add([ordered]@{ name = $phase.name; outcome = $phase.outcome; reasonCode = $null })
     }
-    $phases.Add([ordered]@{ name = 'seal'; outcome = 'passed'; reasonCode = $null })
-    $phases.Add([ordered]@{ name = 'provenance'; outcome = 'passed'; reasonCode = $null })
+    $sealOutcome = if ($Sealed) { 'passed' } else { 'incomplete' }
+    $phases.Add([ordered]@{ name = 'seal'; outcome = $sealOutcome; reasonCode = $(if ($Sealed) { $null } else { $Reason }) })
+    $phases.Add([ordered]@{ name = 'provenance'; outcome = $sealOutcome; reasonCode = $(if ($Sealed) { $null } else { $Reason }) })
 
     $payload = [ordered]@{
-        buildState         = 'sealed'
+        buildState         = $(if ($Sealed) { 'sealed' } else { 'seal-unconfirmed' })
         recipeInputVersion = $RecipeInputVersion
         recipeDigest       = $RecipeDigest
         mediaId            = $MediaId
         phases             = @($phases)
     }
+    if (-not $Sealed) { $payload.terminalReasonCode = $Reason }
     if ($Sealed -and $Identity) {
         $payload.artifactIdentity = [ordered]@{
             vCenterInstanceId      = [string]$Identity.vCenterInstanceId
@@ -235,6 +279,16 @@ function NewProvenanceDocument {
             $payload.artifactIdentity.recordedName = [string]$Identity.recordedName
         }
     }
+    elseif ($Identity) {
+        $payload.unconfirmedArtifact = [ordered]@{
+            vCenterInstanceId      = [string]$Identity.vCenterInstanceId
+            managedObjectReference = [string]$Identity.managedObjectReference
+            instanceUuid           = [string]$Identity.instanceUuid
+        }
+        if ($Identity.PSObject.Properties.Name -contains 'recordedName' -and $Identity.recordedName) {
+            $payload.unconfirmedArtifact.recordedName = [string]$Identity.recordedName
+        }
+    }
 
     [ordered]@{
         resultSchemaVersion   = 3
@@ -243,7 +297,7 @@ function NewProvenanceDocument {
         manifestSchemaVersion = $ManifestSchemaVersion
         startedUtc            = $StartedUtc
         completedUtc          = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
-        outcome               = 'passed'
+        outcome               = $(if ($Sealed) { 'passed' } else { 'incomplete' })
         payload               = $payload
     }
 }
@@ -263,11 +317,43 @@ function Refused {
         UnconfirmedArtifact = $null
         Attestation         = $Attestation
         Provenance          = $null
+        EvidencePersisted   = $true
     }
 }
 
 function Unconfirmed {
-    param([string] $Reason, [string] $Attestation, $Artifact)
+    <#
+        Every path after conversion was attempted writes a reconciliation
+        record. Something may exist on the platform, and a record nobody wrote
+        is an artifact nobody will find -- the failure mode the unconfirmed
+        state was introduced to prevent.
+
+        If the record itself cannot be written, the result says so. Code whose
+        evidence sink is unavailable cannot claim durable evidence, and the
+        entry point turns that into a failing process status.
+    #>
+    param([string] $Reason, [string] $Attestation, $Artifact, [hashtable] $Context, [hashtable] $Adapter)
+
+    $document = NewProvenanceDocument -RunId $Context.RunId `
+        -ManifestSchemaVersion $Context.ManifestSchemaVersion -StartedUtc $Context.StartedUtc `
+        -RecipeDigest $Context.RecipeDigest -RecipeInputVersion $Context.RecipeInputVersion `
+        -MediaId $Context.MediaId -CompletedPhases $Context.CompletedPhases `
+        -Identity $Artifact -Sealed $false -Reason $Reason
+
+    $json = $document | ConvertTo-Json -Depth 20
+
+    # A recovered identity travels only if it satisfies its contract. A
+    # malformed one would make the whole record unreadable, losing the
+    # reconciliation entirely to describe something that cannot be looked up.
+    if (Test-EvidenceEnvelopeDocument -Json $json) {
+        $document.payload.Remove('unconfirmedArtifact')
+        $json = $document | ConvertTo-Json -Depth 20
+    }
+
+    $persisted = $false
+    try { $persisted = [bool](& $Adapter['WriteHostEvidence'] 'seal-unconfirmed-evidence.json' $json) }
+    catch { $persisted = $false }
+
     [PSCustomObject]@{
         BuildState          = 'seal-unconfirmed'
         Outcome             = 'incomplete'
@@ -275,7 +361,8 @@ function Unconfirmed {
         ArtifactIdentity    = $null
         UnconfirmedArtifact = $Artifact
         Attestation         = $Attestation
-        Provenance          = $null
+        Provenance          = $(if ($persisted) { $json } else { $null })
+        EvidencePersisted   = $persisted
     }
 }
 

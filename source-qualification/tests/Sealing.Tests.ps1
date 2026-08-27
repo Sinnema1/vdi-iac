@@ -48,6 +48,11 @@ BeforeAll {
             [bool] $ConvertWorks = $true,
             [bool] $WriteWorks = $true,
             [bool] $WriteCorrupts = $false,
+            # Per-file, so a case can reach conversion and fail only at the
+            # final write. Failing every write stops the run at the attestation
+            # persist instead, which is a different path entirely.
+            [string[]] $FailWritesFor = @(),
+            [string[]] $CorruptWritesFor = @(),
             $Identity = $null,
             [switch] $IdentityMissing
         )
@@ -63,6 +68,7 @@ BeforeAll {
             Identity = $Identity; Converted = $false; Cleared = $false
             Log = [System.Collections.Generic.List[string]]::new()
             HostEvidence = @{}; WriteWorks = $WriteWorks; WriteCorrupts = $WriteCorrupts
+            FailWritesFor = $FailWritesFor; CorruptWritesFor = $CorruptWritesFor
             ResolvedRun = $null; ReadKeys = [System.Collections.Generic.List[string]]::new()
             ClearedKeys = [System.Collections.Generic.List[string]]::new()
             MachinesSeen = [System.Collections.Generic.List[string]]::new()
@@ -109,10 +115,11 @@ BeforeAll {
             WriteHostEvidence = {
                 param($Name, $Content)
                 $state.Log.Add("Write:$Name")
-                if (-not $state.WriteWorks) { return $false }
+                if (-not $state.WriteWorks -or $state.FailWritesFor -contains $Name) { return $false }
                 # A writer that reports success without producing a readable
                 # document is the case the read-back guards.
-                $state.HostEvidence[$Name] = if ($state.WriteCorrupts) { 'truncated' } else { $Content }
+                $corrupt = $state.WriteCorrupts -or ($state.CorruptWritesFor -contains $Name)
+                $state.HostEvidence[$Name] = if ($corrupt) { 'truncated' } else { $Content }
                 $true
             }.GetNewClosure()
             ReadHostEvidence = {
@@ -539,8 +546,118 @@ Describe 'provenance is emitted, validated, and written' {
                 Test-SealedCandidate -Json $result.Provenance | Should -BeTrue
             }
             else {
-                $result.Provenance | Should -BeNullOrEmpty
+                # A non-sealed result may carry a reconciliation record, which
+                # is a different document: it must never satisfy the candidate
+                # gate.
+                if ($result.Provenance) {
+                    Test-SealedCandidate -Json $result.Provenance | Should -BeFalse
+                }
             }
         }
+    }
+}
+
+Describe 'the final write is confirmed by retrieval' {
+
+    It 'refuses to report sealed when the record does not read back' {
+        # A sealed state claims a durable document exists. A writer reporting
+        # success and leaving a truncated file would otherwise produce a
+        # candidate whose evidence nobody can read.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) `
+            -CorruptWritesFor @('image-build-evidence.json')
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+        $result.BuildState | Should -Not -Be 'sealed'
+        $result.ReasonCode | Should -Be 'provenance_incomplete'
+    }
+
+    It 'judges the retrieved bytes rather than the ones it handed the writer' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+
+        $result.BuildState | Should -Be 'sealed'
+        $result.Provenance | Should -Be $platform.State.HostEvidence['image-build-evidence.json']
+        @($platform.State.Log) | Should -Contain 'ReadHost:image-build-evidence.json'
+    }
+}
+
+Describe 'uncertainty after conversion is written down' {
+
+    BeforeAll {
+        function UnconfirmedRecord {
+            param($Platform)
+            $Platform.State.HostEvidence['seal-unconfirmed-evidence.json']
+        }
+    }
+
+    It 'writes a reconciliation record when <case>' -ForEach @(
+        @{ case = 'conversion threw';            make = { NewPlatform -Attestation $args[0] -ConvertWorks $false } }
+        @{ case = 'the identity is unreadable';  make = { NewPlatform -Attestation $args[0] -IdentityMissing } }
+        @{ case = 'the final write fails';       make = { NewPlatform -Attestation $args[0] -CorruptWritesFor @('image-build-evidence.json') } }
+    ) {
+        # Something may exist on the platform, and a record nobody wrote is an
+        # artifact nobody will find.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = & $make (PassedAttestationJson -RunId $runId -Nonce $nonce)
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+        $result.BuildState | Should -Be 'seal-unconfirmed'
+        UnconfirmedRecord -Platform $platform | Should -Not -BeNullOrEmpty
+    }
+
+    It 'writes a record the contract accepts' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -ConvertWorks $false
+        $null = Seal -Platform $platform -RunId $runId -Nonce $nonce
+
+        $record = UnconfirmedRecord -Platform $platform
+        Test-EvidenceEnvelopeDocument -Json $record | Should -BeNullOrEmpty
+        Test-ImageBuildResult -Evidence ($record | ConvertFrom-Json) | Should -BeNullOrEmpty
+        Test-SealedCandidate -Json $record | Should -BeFalse
+    }
+
+    It 'carries a recovered identity that satisfies its contract' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -ConvertWorks $false
+        $null = Seal -Platform $platform -RunId $runId -Nonce $nonce
+
+        $document = UnconfirmedRecord -Platform $platform | ConvertFrom-Json
+        $document.payload.unconfirmedArtifact.managedObjectReference | Should -Be 'vm-1234'
+        $document.payload.PSObject.Properties.Name | Should -Not -Contain 'artifactIdentity'
+    }
+
+    It 'omits a recovered identity that does not' {
+        # A malformed identity would make the whole record unreadable, losing
+        # the reconciliation entirely in order to describe something that
+        # cannot be looked up anyway.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $identity = NewIdentity
+        $identity.instanceUuid = 'not-a-uuid'
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) -Identity $identity
+        $null = Seal -Platform $platform -RunId $runId -Nonce $nonce
+
+        $record = UnconfirmedRecord -Platform $platform
+        Test-EvidenceEnvelopeDocument -Json $record | Should -BeNullOrEmpty
+        ($record | ConvertFrom-Json).payload.PSObject.Properties.Name | Should -Not -Contain 'unconfirmedArtifact'
+    }
+
+    It 'reports that nothing was persisted when the sink is unavailable' {
+        # Code whose evidence sink is unavailable cannot claim durable evidence.
+        # The entry point turns this into a failing process status.
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce) `
+            -ConvertWorks $false -FailWritesFor @('seal-unconfirmed-evidence.json')
+
+        $result = Seal -Platform $platform -RunId $runId -Nonce $nonce
+        $result.EvidencePersisted | Should -BeFalse
+        $result.Provenance | Should -BeNullOrEmpty
+    }
+
+    It 'reports evidence persisted on the successful path' {
+        $runId = Get-RunIdentifier; $nonce = Get-FinalizationNonce
+        $platform = NewPlatform -Attestation (PassedAttestationJson -RunId $runId -Nonce $nonce)
+        (Seal -Platform $platform -RunId $runId -Nonce $nonce).EvidencePersisted | Should -BeTrue
     }
 }

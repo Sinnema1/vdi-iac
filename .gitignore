@@ -69,3 +69,6 @@ packer/media/*.media.json
 # Lab harness variable files name a machine and carry a credential.
 packer/harness/*.pkrvars.hcl
 !packer/harness/*.pkrvars.hcl.example
+
+# Local Python bytecode for the bounded orchestration experiment.
+__pycache__/

@@ -322,3 +322,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: ShellCheck
         run: shellcheck scripts/ci/*.sh scripts/hooks/* tests/*.sh
+
+  slice001:
+    name: Durable orchestration slice
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Exercise durable tasks with native repository validation
+        run: python3 -m unittest discover -s experiments/slice001 -p 'test_*.py' -v

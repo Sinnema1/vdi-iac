@@ -5,8 +5,9 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from publication import GitHubPublisher, Publication
 from runner import BAD, GOOD, TARGET, LocalRunner, command
 
 REPO = Path(__file__).resolve().parents[2]
@@ -126,11 +127,84 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.runner.approve(self.task['id'], report['packet_sha256'], 'reviewer', 0)
 
+    def prepare_publication(self):
+        report = self.runner.attempt(self.task['id'], self.patch)
+        self.runner.approve(self.task['id'], report['packet_sha256'], 'reviewer')
+        command(self.repo, 'git', 'remote', 'set-url', 'origin', 'https://github.com/example/project.git')
+        command(self.repo, 'git', 'branch', '-f', 'review-base', 'HEAD')
+        command(self.repo, 'git', 'switch', '-c', 'review-implementation')
+        (self.repo / 'review-note.txt').write_text('Bounded implementation change.\n')
+        command(self.repo, 'git', 'add', 'review-note.txt')
+        command(self.repo, 'git', '-c', 'user.name=Test', '-c',
+                'user.email=test@example.com', '-c', 'core.hooksPath=/dev/null',
+                'commit', '-m', 'Prepare reviewed implementation')
+        body = self.root / 'body.md'
+        body.write_text('Review the bounded implementation.')
+        publication = Publication(self.runner)
+        prepared = publication.prepare(self.task['id'], 'Review implementation', body, 'review-base')
+        return publication, prepared
+
+    def test_publication_requires_approval_and_resumes_after_restart(self):
+        publication, prepared = self.prepare_publication()
+        publisher = Mock()
+        publisher.publish.return_value = 'https://github.com/example/project/pull/1'
+        with self.assertRaises(ValueError):
+            publication.resume(self.task['id'], publisher)
+        publisher.publish.assert_not_called()
+        publication.approve(self.task['id'], prepared['digest'], 'reviewer')
+        reopened = LocalRunner(self.root / 'state')
+        self.addCleanup(reopened.db.close)
+        resumed = Publication(reopened)
+        self.assertEqual('PR_CREATED', resumed.resume(self.task['id'], publisher)['status'])
+        resumed.resume(self.task['id'], publisher)
+        publisher.publish.assert_called_once()
+
+    def test_publication_revalidates_after_approval(self):
+        publication, prepared = self.prepare_publication()
+        publication.approve(self.task['id'], prepared['digest'], 'reviewer')
+        (self.repo / 'review-note.txt').write_text('Changed after approval')
+        publisher = Mock()
+        with self.assertRaises(ValueError):
+            publication.resume(self.task['id'], publisher)
+        publisher.publish.assert_not_called()
+
+    def test_publication_uncertain_response_is_recoverable(self):
+        publication, prepared = self.prepare_publication()
+        publication.approve(self.task['id'], prepared['digest'], 'reviewer')
+        publisher = Mock()
+        publisher.publish.side_effect = [RuntimeError('lost response'),
+                                         'https://github.com/example/project/pull/1']
+        with self.assertRaises(RuntimeError):
+            publication.resume(self.task['id'], publisher)
+        self.assertEqual('PUBLISHING', self.runner.get('tasks', self.task['id'])['publication']['status'])
+        self.assertEqual('PR_CREATED', publication.resume(self.task['id'], publisher)['status'])
+
     def test_concurrent_driver_is_rejected(self):
         with (self.runner.root / 'runner.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with self.assertRaises(BlockingIOError):
                 self.runner.attempt(self.task['id'], self.patch)
+
+
+class PublisherTests(unittest.TestCase):
+    def candidate(self):
+        return dict(repo='.', repository='example/project', branch='review',
+                    head_sha='abc', base_branch='main', title='Review', body='Body')
+
+    def test_lost_creation_response_reconciles_existing_pr(self):
+        import json
+        existing = [dict(url='https://github.com/example/project/pull/1',
+                         headRefOid='abc', baseRefName='main', state='OPEN')]
+        with patch('publication.command', side_effect=[b'', b'abc refs/heads/review',
+                                                       json.dumps(existing).encode()]) as invoke:
+            self.assertEqual(existing[0]['url'], GitHubPublisher().publish(self.candidate()))
+        self.assertFalse(any('create' in call.args for call in invoke.call_args_list))
+
+    def test_remote_mismatch_stops_before_pr_creation(self):
+        with patch('publication.command', side_effect=[b'', b'changed refs/heads/review']) as invoke:
+            with self.assertRaises(ValueError):
+                GitHubPublisher().publish(self.candidate())
+        self.assertEqual(2, invoke.call_count)
 
 
 if __name__ == '__main__':

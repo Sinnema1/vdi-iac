@@ -1,4 +1,4 @@
-"""Slice 001: local, single-host orchestration; no remote publishing capability."""
+"""Slice 001: local, single-host orchestration; explicitly approved draft publication."""
 import argparse
 from contextlib import contextmanager
 import fcntl
@@ -214,30 +214,34 @@ class LocalRunner:
             self.save('tasks', task)
             return task
 
-    def approve(self, task_id, packet_sha256, reviewer, coordination_seconds):
-        if not reviewer.strip() or not math.isfinite(coordination_seconds) or coordination_seconds < 0:
+    def approve(self, task_id, packet_sha256, reviewer, coordination_seconds=None):
+        if not reviewer.strip() or (coordination_seconds is not None and
+                                   (not math.isfinite(coordination_seconds) or coordination_seconds < 0)):
             raise ValueError('Reviewer and finite nonnegative coordination time required')
         with self.lock(), self.db:
             report = self.report(task_id)
             task = report['task']
             if task['status'] != 'AWAITING_APPROVAL' or report['packet_sha256'] != packet_sha256:
                 raise ValueError('Approval must refer to the current successful evidence packet')
-            execution = report['executions'][-1]
-            for artifact in execution['artifacts'].values():
-                if digest(Path(artifact['path']).read_bytes()) != artifact['sha256']:
-                    raise ValueError('Evidence changed since validation')
-            worktree = execution['worktree']
-            if command(worktree, 'git', 'rev-parse', 'HEAD').decode().strip() != execution['seed_commit']:
-                raise ValueError('Execution HEAD changed since validation')
-            if command(worktree, 'git', 'write-tree').decode().strip() != execution['tree']:
-                raise ValueError('Index changed since validation')
-            if command(worktree, 'git', 'diff').strip() or command(worktree, 'git', 'ls-files', '--others', '--exclude-standard').strip():
-                raise ValueError('Worktree changed since validation')
+            self._revalidate(report)
             task.update(status='APPROVED', approval=dict(reviewer=reviewer,
                         packet_sha256=packet_sha256, at=time.time()),
                         coordination_seconds=coordination_seconds)
             self.save('tasks', task)
             return task
+
+    def _revalidate(self, report):
+        execution = report['executions'][-1]
+        for artifact in execution['artifacts'].values():
+            if digest(Path(artifact['path']).read_bytes()) != artifact['sha256']:
+                raise ValueError('Evidence changed since validation')
+        worktree = execution['worktree']
+        if command(worktree, 'git', 'rev-parse', 'HEAD').decode().strip() != execution['seed_commit']:
+            raise ValueError('Execution HEAD changed since validation')
+        if command(worktree, 'git', 'write-tree').decode().strip() != execution['tree']:
+            raise ValueError('Index changed since validation')
+        if command(worktree, 'git', 'diff').strip() or command(worktree, 'git', 'ls-files', '--others', '--exclude-standard').strip():
+            raise ValueError('Worktree changed since validation')
 
     def report(self, task_id):
         task = self.get('tasks', task_id)
@@ -273,7 +277,7 @@ def main():
     approve.add_argument('task_id')
     approve.add_argument('--packet-sha256', required=True)
     approve.add_argument('--reviewer', required=True)
-    approve.add_argument('--coordination-seconds', type=float, required=True)
+    approve.add_argument('--coordination-seconds', type=float)
     args = vars(parser.parse_args())
     runner = LocalRunner(args.pop('state'))
     result = getattr(runner, args.pop('action'))(**args)

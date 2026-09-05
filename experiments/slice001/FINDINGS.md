@@ -1,6 +1,9 @@
 # Slice 001 review findings
 
-## Observed
+## Initial local milestone
+
+This milestone supports the orchestration contract, not the overall V1 value
+proposition. It did not measure reduced human effort or economic value.
 
 The retained local experiment ran against implementation commit `8814055`.
 It reached AWAITING_APPROVAL after two executions in approximately 5.06 seconds.
@@ -58,3 +61,17 @@ Temporal is deferred for this bounded local pilot under ADR 8. The next useful
 experiment would replace the operator-driven scheduling and patch handoff while
 preserving the Task/TaskExecution and evidence contracts, then compare measured
 human attention and cost against a single engineering-session baseline.
+
+## Lifecycle follow-up
+
+The follow-up adds explicit implementation publication approval and resumable
+PR creation. It preserves the original execution packet and separately binds
+the implementation commit, diff and publication destination. Fifteen local
+integration tests pass, including publication gating, stale-state rejection,
+restart, uncertain-response recovery and remote-head mismatch checks.
+
+Remote run receipts belong outside the reviewed commit so collecting them does
+not change the commit being verified. The measurement protocol has six planned
+trial records; no comparative trial or human-effort reduction is claimed.
+Temporal remains an option to evaluate against a demonstrated need, not an
+automatic V1 dependency. Architectural invariants remain provisional.

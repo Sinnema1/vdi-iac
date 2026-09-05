@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed implementation for review; no remote publication or lab execution.
+Local orchestration contract experiment; value proposition remains unproven.
 
 ## Context
 
@@ -19,7 +19,8 @@ Task intent independently of TaskExecution attempts. Pin repository input and
 use fresh worktrees, a fixed validation policy, hashed artifacts and bounded
 attempts. Reject concurrent drivers with an operating-system lock. An uncertain
 attempt is abandoned and counted, never replayed in place. Human approval binds
-the exact successful evidence packet. The driver has no publishing capability.
+the exact successful evidence packet. Publication requires a separate approval bound to the implementation commit.
+The publisher can create a draft PR, but cannot merge or deploy.
 
 The replacement boundary is `LocalRunner`: create, attempt, recover, report and
 approve expose domain semantics independent of an engine. Its worktree/patch/
@@ -34,8 +35,9 @@ repeat engineering attempts outside the domain budget.
 This is deliberately not a general durable workflow engine. There are no
 persisted timers, queues, leases or automatic scheduling. SQLite supplies local
 transaction semantics; operator-triggered recovery supplies the minimal pilot
-recovery policy. Temporal adoption is required before adding distributed
-workers, durable timed waits or unattended scheduling. The adapter will need
+recovery policy. Distributed workers, durable timed waits or unattended scheduling would trigger
+a fresh evaluation of Temporal or another existing durable engine. Adoption is
+not automatic: each added subsystem must answer a demonstrated requirement. The adapter will need
 its own replay and crash tests; replacement is not claimed to be implemented.
 
 Patch submission separates the engineering session from authoritative state.

@@ -1,6 +1,7 @@
 # Slice 001: durable maintenance experiment
 
-This is a single-host experiment, independent of the image-build pipeline.
+This is proof of the orchestration contract, not proof of the V1 value
+proposition. It is a single-host experiment independent of the image pipeline.
 Python 3.10+ (standard library), Git and Bash are sufficient on macOS or Linux.
 It never runs PowerShell, Packer, Windows provisioning, or a lab operation.
 
@@ -72,7 +73,7 @@ python3 experiments/slice001/runner.py --state ../slice001-state approve \
   --coordination-seconds 45
 ```
 
-The time is a human-supplied total of active coordination and review effort,
+The optional time is a human-supplied total of active coordination and review effort,
 not wall-clock waiting time. It remains unknown until supplied. Attempts,
 escalations, individual validation exit codes and durations, execution start/end
 timestamps, and task elapsed time are recorded. Optional `--cost-usd` records
@@ -80,11 +81,32 @@ worker-reported execution cost; an unknown component makes the total unknown.
 Do not infer cost from account usage or invent a dollar estimate.
 
 Approval rejects changed evidence, staged changes, unstaged changes, and new
-untracked files. APPROVED is a durable review result, not publication. There is
-intentionally no GitHub credential, push, PR-creation, merge, or deployment API.
-A future publisher must require that approval and recheck its evidence binding;
-it must not treat a passing test as approval. Do not publish seeded experiment
-branches as product changes. The implementation branch is the review candidate.
+untracked files. APPROVED is a durable execution review result. The seeded
+repair has an empty base diff, so its approval cannot authorize publication of
+the implementation itself. `publication.py` binds a separate approval to the
+implementation HEAD, diff, repository, branch, PR title and body.
+
+```bash
+python3 experiments/slice001/publication.py --state ../slice001-state prepare \
+  TASK_ID --title 'Bounded orchestration contract experiment' \
+  --body-file ../pr-body.md
+python3 experiments/slice001/publication.py --state ../slice001-state approve \
+  TASK_ID --packet-digest DIGEST --reviewer reviewer
+python3 experiments/slice001/publication.py --state ../slice001-state resume TASK_ID
+```
+
+The trusted operator runs publication with authenticated Git and GitHub CLI.
+Resume revalidates execution evidence and the exact implementation state before
+pushing the approved SHA and creating a draft PR. An uncertain remote response
+leaves PUBLISHING durably recorded; resume reconciles an existing PR before
+creating one. A completed resume is a no-op. Existing closed or mismatched PRs
+require human disposition. No merge or deployment operation exists.
+
+Publication credentials belong to the trusted operator, not the patch worker.
+GitHub branch protection and a trusted host remain necessary against concurrent
+external writers; local checks do not make distributed publication atomic.
+Remote CI evidence must identify the PR head SHA and workflow-run identity.
+PR creation is not final acceptance and does not imply a green CI result.
 
 ## Trust and limitations
 
@@ -99,7 +121,7 @@ SQLite transactions persist Task and TaskExecution records. Evidence is written
 and synced before its hash is recorded; abandoned files after a crash are kept.
 Keep the entire state directory and repository together for recovery. Deleting
 it is not supported recovery. Backups, multi-host scheduling, authenticated
-approval, automatic model calls and remote publication remain deferred.
+approval, and automatic model calls remain deferred.
 
 Run integration tests with the same command used by CI:
 
